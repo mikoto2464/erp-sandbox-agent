@@ -21,7 +21,7 @@
     </form>
   </section>
   <div id="app-view" hidden>
-    <header class="topbar"><button id="home" class="logo brand-button" aria-label="返回项目列表">E<span>ERP 沙盘</span></button><div class="topbar-actions"><button id="open-settings" class="quiet">模型设置 <span id="model-dot" class="dot"></span></button><button id="logout" class="quiet">退出</button></div></header>
+    <header class="topbar"><button id="home" class="logo brand-button" aria-label="返回项目列表">E<span>ERP 沙盘</span></button><div class="topbar-actions"><select id="active-model-preset" class="preset-quick-select" aria-label="当前模型预设"></select><button id="open-settings" class="quiet">模型预设 <span id="model-dot" class="dot"></span></button><button id="logout" class="quiet">退出</button></div></header>
     <main>
       <section id="project-view">
         <div class="page-heading"><div><p class="eyebrow">项目</p><h1>我的项目</h1></div><button id="new-project" class="primary">＋ 新建项目</button></div>
@@ -40,7 +40,7 @@
           <label id="drop-zone" class="drop-zone" for="files"><span class="upload-icon">↑</span><strong>点击选择，或拖入文件</strong><span class="muted">DOCX / DOC · 可一次添加多个文件</span><input id="files" type="file" accept=".docx,.doc" multiple></label>
           <div id="documents" class="file-list"></div>
           <details id="source-preview"><summary>查看原文</summary><div id="source-content"></div></details>
-          <div id="model-required" class="notice" hidden>请先配置读题模型。<button id="configure-model" class="text-button">打开模型设置</button></div>
+          <div id="model-required" class="notice" hidden>请先配置读题模型。<button id="configure-model" class="text-button">打开模型预设</button></div>
           <div class="panel-footer"><span id="selected-count" class="muted"></span><button id="read" class="primary" disabled>读取题目 →</button></div>
         </section>
         <section id="step-2" class="step-panel" hidden>
@@ -70,9 +70,13 @@
   <dialog id="delete-dialog"><form id="delete-form"><div class="dialog-heading"><h2>删除项目</h2><button type="button" data-close="delete-dialog" class="icon-button" aria-label="关闭">×</button></div><p>删除“<strong id="delete-name"></strong>”及其所有文件、题目版本和方案？此操作无法撤销。</p><div class="dialog-footer"><button type="button" data-close="delete-dialog" class="secondary">取消</button><button class="danger">删除项目</button></div></form></dialog>
   <dialog id="revision-dialog"><form id="revision-form"><div class="dialog-heading"><h2>保存新版本</h2><button type="button" data-close="revision-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="revision-note">修改依据</label><input id="revision-note" placeholder="例如：平台确认利率按季计算" required><div class="dialog-footer"><button type="button" data-close="revision-dialog" class="secondary">取消</button><button class="primary">保存并校验</button></div></form></dialog>
   <dialog id="settings-dialog">
+    <div class="dialog-heading"><h2>模型预设</h2><button type="button" data-close="settings-dialog" class="icon-button" aria-label="关闭">×</button></div>
+    <label for="preset-picker">已保存预设</label>
+    <div class="preset-actions"><select id="preset-picker"></select><button id="new-preset" type="button" class="secondary">新增</button></div>
+    <p id="settings-status" class="muted"></p>
+    <div class="preset-actions"><button id="activate-preset" type="button" class="primary">启用此预设</button><button id="delete-preset" type="button" class="danger-text">删除预设</button><button id="reset-preset" type="button" class="quiet" hidden>撤销修改</button></div>
     <form id="settings-form">
-      <div class="dialog-heading"><h2>模型设置</h2><button type="button" data-close="settings-dialog" class="icon-button" aria-label="关闭">×</button></div>
-      <p id="settings-status" class="muted"></p>
+      <label for="preset-name">预设名称</label><input id="preset-name" required maxlength="80" placeholder="例如：生产主模型 / 备用模型 / 本地测试">
       <label for="model-provider">接口类型</label>
       <select id="model-provider"></select>
       <p id="provider-help" class="muted"></p>
@@ -93,10 +97,11 @@
           <label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="64000" value="12000"></label>
         </div>
       </details>
-      <p class="muted">密钥保存在服务器。同一接口留空保留原密钥；切换接口类型或主机后需重新填写。本机 Ollama 可不填。</p>
-      <div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button class="primary">保存设置</button></div>
+      <p class="muted">各预设独立保存密钥。新增预设保存后需启用；修改当前预设用于新任务。同一接口留空保留密钥，换接口或主机需重填。本机 Ollama 可不填。</p>
+      <div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button id="save-preset" class="primary">保存预设</button></div>
     </form>
   </dialog>
+  <dialog id="delete-preset-dialog"><h2>删除模型预设</h2><p>删除“<strong id="delete-preset-name"></strong>”及其保存的密钥？</p><div class="dialog-footer"><button type="button" data-close="delete-preset-dialog" class="secondary">取消</button><button id="confirm-delete-preset" type="button" class="danger">删除</button></div></dialog>
   <aside id="evidence-drawer" class="evidence-drawer" hidden><div class="dialog-heading"><h2>原文证据</h2><button id="close-evidence" class="icon-button" aria-label="关闭证据">×</button></div><div id="evidence-content"></div></aside>
   <dialog id="discard-dialog"><div class="dialog-heading"><h2>有未保存的修改</h2><button type="button" data-close="discard-dialog" class="icon-button" aria-label="关闭">×</button></div><p>离开后将丢弃当前修改。</p><div class="dialog-footer"><button type="button" data-close="discard-dialog" class="secondary">返回修改</button><button id="discard-confirm" type="button" class="danger">丢弃并离开</button></div></dialog>
 </body>

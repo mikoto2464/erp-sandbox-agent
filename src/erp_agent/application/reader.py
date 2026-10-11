@@ -15,8 +15,9 @@ class StructuredReader:
         self.llm = llm
         self.client_factory = client_factory
 
-    def read(self, documents: tuple[ParsedDocument, ...], control: RunControl) -> ReadingResult:
-        client = self.client_factory() if self.client_factory else self.llm
+    def read(self, documents: tuple[ParsedDocument, ...], control: RunControl,
+             client: LLMClient | None = None) -> ReadingResult:
+        client = client or (self.client_factory() if self.client_factory else self.llm)
         control.checkpoint("reading")
         prompt = files("erp_agent").joinpath("prompts/reader.txt").read_text(encoding="utf-8")
         schema = dumps(READING_SCHEMA)

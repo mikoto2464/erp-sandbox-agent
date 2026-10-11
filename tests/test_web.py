@@ -3,6 +3,7 @@ import io
 import time
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError
@@ -232,6 +233,75 @@ class WebTests(unittest.TestCase):
         self.request("/api/model-settings", {"provider": "gemini", "model": "gemini-model"})
         self.assertFalse(self.request("/api/status")["llm_configured"])
 
+    def test_preset_endpoints_create_edit_switch_delete_and_authentication(self):
+        catalog = self.request("/api/model-presets")
+        self.assertEqual(catalog["active_id"], "default")
+        preset = self.request("/api/model-presets", {
+            "name": "本地预设", "provider": "ollama", "model": "local-model",
+        })
+        self.assertEqual(self.request("/api/model-presets")["active_id"], "default")
+        preset = self.request(f"/api/model-presets/{preset['id']}", {
+            "expected_revision": 1, "name": "生产备用",
+        })
+        self.request(f"/api/model-presets/{preset['id']}/activate", {"expected_revision": 2})
+        self.assertTrue(self.request("/api/status")["llm_configured"])
+        path = f"/api/model-presets/{preset['id']}?revision=2"
+        self.assertEqual(self.raw_request(path, method="DELETE")[0], 409)
+        self.request("/api/model-presets/default", {"expected_revision": 1,
+                                                     "model": "primary", "api_key": "secret"})
+        self.request("/api/model-presets/default/activate", {"expected_revision": 2})
+        self.assertEqual(self.raw_request(f"/api/model-presets/{preset['id']}?revision=2",
+                                         method="DELETE")[0], 200)
+        self.cookie = ""
+        self.assertEqual(self.raw_request("/api/model-presets")[0], 401)
+        self.assertEqual(self.raw_request("/api/model-presets/default/activate", method="POST")[0], 401)
+
+    def test_queued_read_and_solve_retain_submission_preset(self):
+        project, _ = self.setup_problem()
+        workflow = self.server.workflow
+        runner = workflow.jobs
+        runner.executor.shutdown(wait=True)
+        runner.executor = ThreadPoolExecutor(max_workers=1)
+        entered, release = threading.Event(), threading.Event()
+
+        def block(control):
+            entered.set()
+            release.wait(3)
+            return {}
+
+        held = runner.submit(project, "test", block)
+        self.assertTrue(entered.wait(2))
+        self.llm.response = proposal_json()
+        read = self.request(f"/api/projects/{project}/read", {})
+        solve = self.request(f"/api/projects/{project}/solve", {"version": 1})
+        original_response = self.llm.response
+        original_generate = self.llm.generate
+
+        def generate(request):
+            if request.schema_name == "erp_reading":
+                snapshot = workflow.repository.snapshot(project, 1)
+                self.llm.response = dumps({"title": "题目", "facts": snapshot["reading"]["problem"]["facts"],
+                                           "rules": [], "issues": []})
+            else:
+                self.llm.response = original_response
+            return original_generate(request)
+
+        self.llm.generate = generate
+        try:
+            preset = self.request("/api/model-presets", {
+                "name": "切换后模型", "provider": "ollama", "model": "replacement",
+            })
+            self.request(f"/api/model-presets/{preset['id']}/activate", {"expected_revision": 1})
+            release.set()
+            self.wait_job(project, held["id"])
+            self.assertEqual(self.wait_job(project, read["id"])["status"], "succeeded")
+            self.assertEqual(self.wait_job(project, solve["id"])["status"], "succeeded")
+            self.assertEqual(read["metadata"]["model_preset"]["preset_id"], "default")
+            self.assertEqual(solve["metadata"]["model_preset"]["preset_revision"], 1)
+            self.assertEqual(self.request(f"/api/projects/{project}/solutions")[0]["model"], "test-model")
+        finally:
+            release.set()
+
     def test_delete_project_cleans_every_record_and_blocks_late_write(self):
         project, result = self.setup_problem()
         repository = self.server.workflow.repository
@@ -291,10 +361,10 @@ class WebTests(unittest.TestCase):
         class DelayedReader:
             llm = original.llm
 
-            def read(self, documents, control):
+            def read(self, documents, control, client=None):
                 entered.set()
                 release.wait(3)
-                return original.read(documents, control)
+                return original.read(documents, control, client)
 
         self.server.workflow.reader = DelayedReader()
         try:

@@ -12,7 +12,7 @@ from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.adapters.model_settings import ModelSettingsService
 from erp_agent.adapters.sessions import SQLiteSessionStore
 from erp_agent.application.access import AccessService
-from erp_agent.application.contracts import JSONObject, dumps, loads, obj, string
+from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string
 from erp_agent.application.ports import LLMClient, PlanEvaluator
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
@@ -113,6 +113,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.server.models.public())
             elif method == "POST":
                 self._json(self.server.models.update(self._body_json()))
+            else:
+                raise ERPError("method_not_allowed", "不支持该操作。", 405)
+            return
+        if path == "/api/model-presets":
+            if method == "GET":
+                self._json(self.server.models.catalog())
+            elif method == "POST":
+                self._json(self.server.models.create_preset(self._body_json()), 201)
+            else:
+                raise ERPError("method_not_allowed", "不支持该操作。", 405)
+            return
+        preset_parts = path.strip("/").split("/")
+        if len(preset_parts) >= 3 and preset_parts[:2] == ["api", "model-presets"]:
+            preset_id = preset_parts[2]
+            if len(preset_parts) == 4 and preset_parts[3] == "activate" and method == "POST":
+                self._json(self.server.models.activate(preset_id, self._body_json()))
+            elif len(preset_parts) == 3 and method == "POST":
+                self._json(self.server.models.update_preset(preset_id, self._body_json()))
+            elif len(preset_parts) == 3 and method == "DELETE":
+                query = parse_qs(parsed.query)
+                raw_revision = query.get("revision", [""])[0]
+                revision = integer(int(raw_revision))
+                self.server.models.delete_preset(preset_id, revision)
+                self._json({"deleted": True})
             else:
                 raise ERPError("method_not_allowed", "不支持该操作。", 405)
             return

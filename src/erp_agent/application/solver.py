@@ -65,13 +65,14 @@ class SolverService:
         self.generator = generator
         self.evaluator = evaluator
 
-    def solve(self, request: SolveRequest, control: RunControl) -> SolutionBundle:
+    def solve(self, request: SolveRequest, control: RunControl,
+              generator: StrategyGenerator | None = None) -> SolutionBundle:
         if request.mode == SolverMode.LLM_MONTE_CARLO and not self.evaluator.supports_scoring:
             raise ERPError("simulation_not_ready", "蒙特卡罗需要可评分的仿真器；当前内核尚未就绪。", 409)
         if not 1 <= request.search.candidates <= 2000:
             raise ERPError("search_limit", "候选数必须在 1 到 2000 之间。")
         control.checkpoint("proposing")
-        proposal = self.generator.propose(request.snapshot)
+        proposal = (generator or self.generator).propose(request.snapshot)
         control.checkpoint("validating_plan")
         baseline = self.evaluator.evaluate(request.snapshot, proposal.baseline)
         best_plan, best_eval = proposal.baseline, baseline

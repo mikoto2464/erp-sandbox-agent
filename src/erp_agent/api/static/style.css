@@ -195,6 +195,25 @@ small,.muted {
   background:#2fa37f;
 }
 
+.preset-quick-select {
+  width:170px;
+}
+
+.preset-actions {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-bottom:12px;
+}
+
+.preset-actions select {
+  flex:1;
+}
+
+.preset-actions button {
+  white-space:nowrap;
+}
+
 main {
   max-width:1190px;
   padding:40px 35px;
@@ -929,6 +948,18 @@ pre {
 }
 
 @media(max-width:760px) {
+  .topbar {
+    height:auto;
+    min-height:68px;
+    flex-wrap:wrap;
+    gap:10px;
+    padding-top:12px;
+    padding-bottom:12px;
+  }
+  .preset-quick-select {
+    width:105px;
+    padding:8px 5px;
+  }
   main {
     padding:25px 16px;
   }

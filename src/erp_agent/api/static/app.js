@@ -20,6 +20,7 @@ let pendingDelete = null, latestReadSeen = 0, documentsSignature = "", jobsSigna
 let toastTimer;
 let pendingNavigation = null;
 let modelProviders = [];
+let modelCatalog = null, selectedPresetId = "", presetDirty = false;
 const providerHelp = {
   openai_chat: "适用于 OpenAI、DeepSeek、通义等兼容服务。填写基础地址（如 /v1）或完整 Chat Completions 地址。",
   openai_responses: "使用 OpenAI Responses 格式，可填写 /v1 基础地址或完整 /responses 地址。",
@@ -64,7 +65,7 @@ async function safe(operation) { try { await operation(); } catch (error) { toas
 async function busy(button, operation) {
   button.disabled = true;
   try { await operation(); } catch (error) { toast(error.message); }
-  finally { button.disabled = false; updateControls(); }
+  finally { button.disabled = false; updateControls(); if(modelCatalog)updatePresetControls(); }
 }
 function markDirty() {
   dirty = true;
@@ -117,10 +118,23 @@ function updateControls() {
   $("step2-caption").textContent = snapshot ? `版本 ${snapshot.version} · ${snapshot.reading.problem.facts.length} 个字段` : "核对数据与规则";
 }
 async function loadStatus() {
-  status = await api("/api/status");
+  const [currentStatus, catalog] = await Promise.all([api("/api/status"), api("/api/model-presets")]);
+  status = currentStatus;
+  modelCatalog = catalog;
+  renderQuickPresets();
   $("model-dot").classList.toggle("ready", status.llm_configured);
   $("upload-limit").textContent = `单文件最大 ${status.max_upload_mb} MB`;
   updateControls();
+}
+function renderQuickPresets() {
+  $("active-model-preset").replaceChildren();
+  for (const preset of modelCatalog.presets) {
+    const option=node("option",preset.name);
+    option.value=preset.id;
+    option.disabled=!preset.configured && preset.id!==modelCatalog.active_id;
+    $("active-model-preset").append(option);
+  }
+  $("active-model-preset").value=modelCatalog.active_id;
 }
 async function enterApp() {
   authenticated = true;
@@ -320,6 +334,7 @@ function renderJobs() {
   $("task-count").textContent=jobs.length ? `· ${jobs.length}` : "";
   for(const job of [...jobs].reverse()){
     const row=node("div",undefined,"task-row"), text=node("div",`${job.kind==="parse"?"文件解析":job.kind==="read"?"读题":"方案生成"} · ${statusNames[job.status]} · ${stageNames[job.stage]||job.stage}`);
+    if(job.metadata?.model_preset)text.append(node("p",`${job.metadata.model_preset.preset_name} · 版本 ${job.metadata.model_preset.preset_revision}`,"muted"));
     if(job.error)text.append(node("p",job.error.message,"error"));row.append(text);
     if(["queued","running"].includes(job.status)){
       const button=node("button","取消","quiet");button.onclick=()=>safe(async()=>{await post(`${base()}/jobs/${job.id}/cancel`,{});await refresh();});row.append(button);
@@ -373,21 +388,48 @@ async function startReading(button) {
   await busy(button,async()=>{await post(base()+"/read",{document_ids:[...selectedFiles]});setStep(2);await refresh();});
 }
 async function openSettings() {
-  const settings=await api("/api/model-settings");
-  modelProviders=settings.providers;
+  modelCatalog=await api("/api/model-presets");
+  modelProviders=modelCatalog.providers;
   $("model-provider").replaceChildren();
   for (const provider of modelProviders) {
     const option=node("option",provider.name); option.value=provider.id; $("model-provider").append(option);
   }
+  renderPresetPicker(modelCatalog.active_id);
+  fillPreset(modelCatalog.presets.find(p=>p.id===modelCatalog.active_id));
+  $("settings-dialog").showModal();
+}
+function renderPresetPicker(id) {
+  $("preset-picker").replaceChildren();
+  for (const preset of modelCatalog.presets) {
+    const option=node("option",`${preset.name}${preset.id===modelCatalog.active_id?" · 当前启用":""}`);
+    option.value=preset.id;$("preset-picker").append(option);
+  }
+  $("preset-picker").value=id;
+}
+function fillPreset(settings) {
+  selectedPresetId=settings.id || "";
+  presetDirty=false;
+  $("preset-name").value=settings.name || "";
   $("model-provider").value=settings.provider;
   $("model-url").value=settings.base_url;$("model-name").value=settings.model;$("model-key").value="";
   $("model-key").placeholder=settings.api_key_set?"已保存，留空保留原密钥":"输入 API 密钥";
   $("clear-model-key").checked=false;$("model-format").value=settings.format;$("model-timeout").value=settings.timeout;
   $("model-input-limit").value=settings.max_input_chars;$("model-output-limit").value=settings.max_output_tokens;
   $("model-token-parameter").value=settings.token_parameter;
-  $("settings-status").textContent=settings.configured?"已配置 · 修改后用于新请求":"尚未配置模型";
+  $("settings-status").textContent=!selectedPresetId?"新预设 · 保存后可启用":settings.id===modelCatalog.active_id
+    ?"当前启用 · 新任务使用此预设":settings.configured?"已保存 · 可切换启用":"尚未配置完成";
   updateProviderFields();
-  $("settings-dialog").showModal();
+  updatePresetControls();
+}
+function updatePresetControls() {
+  const preset=modelCatalog?.presets.find(p=>p.id===selectedPresetId);
+  $("activate-preset").disabled=!preset || presetDirty || !preset.configured || preset.id===modelCatalog.active_id;
+  $("delete-preset").disabled=!preset || preset.id===modelCatalog.active_id;
+  $("reset-preset").hidden=!presetDirty;
+  $("save-preset").textContent=selectedPresetId?"保存修改":"保存新预设";
+}
+function markPresetDirty() {
+  presetDirty=true;$("settings-status").textContent="有未保存修改";updatePresetControls();
 }
 function updateProviderFields() {
   const provider=$("model-provider").value;
@@ -402,8 +444,47 @@ $("model-provider").onchange=()=>{
   $("model-key").placeholder=provider.api_key_required?"输入此接口的 API 密钥":"本机服务可留空";
   $("clear-model-key").checked=false;
   $("settings-status").textContent="接口已切换，请填写模型及其密钥后保存";
+  markPresetDirty();
   updateProviderFields();
 };
+$("settings-form").addEventListener("input",markPresetDirty);
+$("preset-picker").onchange=()=>{
+  if(presetDirty){$("preset-picker").value=selectedPresetId;toast("请先保存或撤销预设修改。");return;}
+  fillPreset(modelCatalog.presets.find(p=>p.id===$("preset-picker").value));
+};
+$("new-preset").onclick=()=>{
+  if(presetDirty){toast("请先保存或撤销预设修改。");return;}
+  $("preset-picker").value="";
+  fillPreset({provider:"openai_chat",base_url:modelProviders.find(p=>p.id==="openai_chat").base_url,
+    model:"",api_key_set:false,format:"json_schema",timeout:90,max_input_chars:100000,
+    max_output_tokens:12000,token_parameter:"max_completion_tokens"});
+  $("preset-name").focus();
+};
+$("reset-preset").onclick=()=>{
+  const preset=modelCatalog.presets.find(p=>p.id===(selectedPresetId || modelCatalog.active_id));
+  renderPresetPicker(preset.id);fillPreset(preset);
+};
+async function activatePreset(preset) {
+  await post(`/api/model-presets/${preset.id}/activate`,{expected_revision:preset.revision});
+  await loadStatus();
+  if($("settings-dialog").open){renderPresetPicker(preset.id);fillPreset(modelCatalog.presets.find(p=>p.id===preset.id));}
+  toast(`已启用 ${preset.name}，新任务使用此预设。`);
+}
+$("active-model-preset").onchange=()=>busy($("active-model-preset"),async()=>{
+  if(presetDirty && $("settings-dialog").open){$("active-model-preset").value=modelCatalog.active_id;toast("请先保存或撤销预设修改。");return;}
+  const preset=modelCatalog.presets.find(p=>p.id===$("active-model-preset").value);
+  try{await activatePreset(preset);}finally{$("active-model-preset").value=modelCatalog.active_id;}
+});
+$("activate-preset").onclick=()=>busy($("activate-preset"),()=>activatePreset(modelCatalog.presets.find(p=>p.id===selectedPresetId)));
+$("delete-preset").onclick=()=>{
+  $("delete-preset-name").textContent=modelCatalog.presets.find(p=>p.id===selectedPresetId).name;
+  $("delete-preset-dialog").showModal();
+};
+$("confirm-delete-preset").onclick=()=>busy($("confirm-delete-preset"),async()=>{
+  const preset=modelCatalog.presets.find(p=>p.id===selectedPresetId);
+  await api(`/api/model-presets/${preset.id}?revision=${preset.revision}`,{method:"DELETE"});
+  $("delete-preset-dialog").close();await openSettings();await loadStatus();toast("预设已删除。");
+});
 $("login-form").onsubmit=async event=>{
   event.preventDefault();$("login-button").disabled=true;$("login-error").hidden=true;
   try{await post("/api/auth/login",{key:$("access-key").value,remember:$("remember").checked});await enterApp();}
@@ -439,8 +520,10 @@ $("apply-json").onclick=()=>safe(async()=>{const data=JSON.parse($("reading-json
 $("solve").onclick=()=>busy($("solve"),async()=>{await post(base()+"/solve",{version:snapshot.version,mode:mode(),seed:Number($("seed").value),candidates:Number($("candidates").value)});await refresh();});
 $("open-settings").onclick=$("configure-model").onclick=()=>safe(openSettings);
 $("settings-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{
-  await post("/api/model-settings",{provider:$("model-provider").value,base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,token_parameter:$("model-token-parameter").value,timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)});
-  $("model-key").value="";$("settings-dialog").close();await loadStatus();toast("模型设置已保存。");
+  const data={name:$("preset-name").value,provider:$("model-provider").value,base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,token_parameter:$("model-token-parameter").value,timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)};
+  if(selectedPresetId)data.expected_revision=modelCatalog.presets.find(p=>p.id===selectedPresetId).revision;
+  const saved=await post(selectedPresetId?`/api/model-presets/${selectedPresetId}`:"/api/model-presets",data);
+  $("model-key").value="";await loadStatus();renderPresetPicker(saved.id);fillPreset(saved);toast("模型预设已保存。");
 });};
 $("close-evidence").onclick=()=>{$("evidence-drawer").hidden=true;};
 safe(async()=>{const session=await api("/api/auth/session");if(session.authenticated)await enterApp();else if(!session.configured){$("login-error").textContent="请先在服务器 .env 中设置 ERP_ACCESS_KEY。";$("login-error").hidden=false;}});

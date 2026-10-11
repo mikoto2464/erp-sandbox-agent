@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from erp_agent.application.contracts import JSONObject, JSONValue
@@ -36,9 +36,28 @@ class LLMClient(Protocol):
     def generate(self, request: LLMRequest) -> LLMResponse: ...
 
 
+@dataclass(frozen=True)
+class ModelBinding:
+    preset_id: str
+    preset_name: str
+    preset_revision: int
+    configuration: JSONObject
+    client: LLMClient = field(repr=False)
+
+    def metadata(self) -> JSONObject:
+        return {"preset_id": self.preset_id, "preset_name": self.preset_name,
+                "preset_revision": self.preset_revision, **self.configuration}
+
+
 class ModelSettings(Protocol):
     def public(self) -> JSONObject: ...
     def update(self, data: JSONObject) -> JSONObject: ...
+    def catalog(self) -> JSONObject: ...
+    def create_preset(self, data: JSONObject) -> JSONObject: ...
+    def update_preset(self, preset_id: str, data: JSONObject) -> JSONObject: ...
+    def activate(self, preset_id: str, data: JSONObject) -> JSONObject: ...
+    def delete_preset(self, preset_id: str, revision: int) -> None: ...
+    def capture(self) -> ModelBinding: ...
 
 
 class DocumentConverter(Protocol):

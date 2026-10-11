@@ -11,7 +11,7 @@ from erp_agent.application.contracts import (
 )
 from erp_agent.application.ports import DocumentParser, JobRunner, ModelSettings, Repository, RunControl
 from erp_agent.application.reader import StructuredReader
-from erp_agent.application.solver import SolverService
+from erp_agent.application.solver import LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     ProblemSnapshot, SearchConfig, SolveRequest, SolverMode, SourceDocument,
@@ -114,9 +114,13 @@ class WorkflowService:
             raise ERPError("no_documents", "请先上传并等待文档解析完成。")
         versions = self.repository.versions(project_id)
         expected_version = versions[0] if versions else 0
+        binding = self.model_settings.capture() if self.model_settings else None
+        if binding and not binding.client.configured:
+            raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
 
         def operation(control: RunControl) -> JSONValue:
-            result = self.reader.read(documents, control)
+            result = (self.reader.read(documents, control, binding.client) if binding
+                      else self.reader.read(documents, control))
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
             control.checkpoint("saving_reading")
             snapshot = ProblemSnapshot(project_id, expected_version + 1, timestamp(),
@@ -129,7 +133,8 @@ class WorkflowService:
 
         return self.jobs.submit(project_id, "read", operation,
                                 {"document_ids": to_json(tuple(d.source.id for d in documents)),
-                                 "expected_version": expected_version})
+                                 "expected_version": expected_version,
+                                 "model_preset": binding.metadata() if binding else None})
 
     def revise(self, project_id: str, data: JSONObject) -> JSONObject:
         self.project(project_id)
@@ -171,13 +176,18 @@ class WorkflowService:
             integer(data.get("seed", 42), 0, 2**32 - 1),
             integer(data.get("candidates", 100), 1, 2000),
         ))
+        binding = self.model_settings.capture() if self.model_settings else None
+        if binding and not binding.client.configured:
+            raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
+        generator = LLMStrategyGenerator(binding.client) if binding else None
 
         def operation(control: RunControl) -> JSONValue:
-            result = self.solver.solve(request, control)
+            result = self.solver.solve(request, control, generator)
             self.repository.put("solution", project_id, result.id, result)
             return {"solution_id": result.id, "verified": result.evaluation.verified,
                     "needs_input": not result.evaluation.feasible}
 
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
-                                 "search": to_json(request.search)})
+                                 "search": to_json(request.search),
+                                 "model_preset": binding.metadata() if binding else None})
