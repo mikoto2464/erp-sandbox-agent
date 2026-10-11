@@ -148,7 +148,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-4")
+        self.assertEqual(result.prompt_version, "reader-5")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)
@@ -219,7 +219,8 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual((result.problem.years, result.problem.periods_per_year), (4, 4))
         self.assertEqual(result.problem.facts[1].state, KnowledgeState.ASSUMED)
         self.assertFalse(any(i.code == 'validation.horizon_missing' for i in result.issues))
-        self.assertTrue(any(i.code == 'validation.uncertain' for i in result.issues))
+        self.assertTrue(any(i.code == 'validation.uncertain' and i.severity == 'info'
+                            for i in result.issues))
 
     def test_reader_unwraps_whole_json_fence_without_extra_model_call(self):
         document = OOXMLDocumentParser().parse(

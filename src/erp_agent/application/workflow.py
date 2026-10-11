@@ -10,11 +10,12 @@ from erp_agent.application.contracts import (
     JSONObject, JSONValue, decode_reading, dumps, integer, obj, string, strings, to_json,
 )
 from erp_agent.application.ports import DocumentParser, JobRunner, ModelSettings, Repository, RunControl
+from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    ProblemSnapshot, SearchConfig, SolveRequest, SolverMode, SourceDocument,
+    KnowledgeState, ProblemSnapshot, SearchConfig, SolveRequest, SolverMode, SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 
@@ -92,6 +93,33 @@ class WorkflowService:
         return [to_json(parsed_document(obj(document)))
                 for document in self.repository.list("document", project_id)]
 
+    def problem(self, project_id: str, version: int | None = None) -> ProblemSnapshot:
+        self.project(project_id)
+        snapshot = problem_snapshot(self.repository.snapshot(project_id, version))
+        reading = snapshot.reading
+        evidence = tuple(e for document_id in snapshot.document_ids for e in parsed_document(
+            self.repository.get("document", project_id, document_id)).evidence)
+        failed_ids = {i.target for i in reading.issues if i.code == "validation.unsupported_value"}
+        if failed_ids and reading.raw_response:
+            try:
+                original = decode_reading(normalize_model_json(reading.raw_response), reading.model)
+            except ERPError:
+                original = None
+            if original:
+                original_facts = {f.id: f for f in original.problem.facts}
+                facts = []
+                for fact in reading.problem.facts:
+                    source_fact = original_facts.get(fact.id)
+                    unchanged = source_fact and replace(fact, state=source_fact.state) == source_fact
+                    disputed = any(i.target == fact.id and i.severity != "info"
+                                   and not i.code.startswith("validation.") for i in reading.issues)
+                    if (fact.id in failed_ids and fact.state == KnowledgeState.CONFLICTED
+                            and unchanged and source_fact.state == KnowledgeState.KNOWN and not disputed):
+                        fact = replace(fact, state=KnowledgeState.KNOWN)
+                    facts.append(fact)
+                reading = replace(reading, problem=replace(reading.problem, facts=tuple(facts)))
+        return replace(snapshot, reading=validate_reading(reading, evidence))
+
     def read(self, project_id: str, data: JSONObject | None = None) -> JSONObject:
         with self._read_lock:
             return self._submit_read(project_id, data)
@@ -158,9 +186,7 @@ class WorkflowService:
         return self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
 
     def solve(self, project_id: str, data: JSONObject) -> JSONObject:
-        self.project(project_id)
-        snapshot = problem_snapshot(self.repository.snapshot(project_id,
-                                                            integer(data.get("version"))))
+        snapshot = self.problem(project_id, integer(data.get("version")))
         if any(issue.severity == "error" for issue in snapshot.reading.issues):
             raise ERPError("reading_needs_revision", "请先修正读题错误并保存新版本。", 409)
         if not snapshot.reading.problem.years or not snapshot.reading.problem.periods_per_year:

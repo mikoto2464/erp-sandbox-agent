@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 from erp_agent.api.server import Handler, create_access, create_workflow
 from erp_agent.application.contracts import dumps, loads
+from erp_agent.adapters.documents import OOXMLDocumentParser
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.config import Settings
+from erp_agent.domain.models import SourceDocument
 from erp_agent.application.ports import LLMResponse
 from unittest.mock import patch
 from tests.helpers import FakeLLM, docx_bytes, proposal_json
@@ -136,6 +138,35 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as isolated:
             self.request(f"/api/projects/{other}/jobs/{job['id']}")
         self.assertEqual(isolated.exception.code, 404)
+
+    def test_legacy_false_conflict_is_rechecked_without_rewriting_snapshot(self):
+        project, result = self.setup_problem()
+        base = f"/api/projects/{project}"
+        snapshot = result["snapshot"]
+        document_id = snapshot["document_ids"][0]
+        parser = OOXMLDocumentParser()
+        content = docx_bytes('<w:p><w:r><w:t>每季付息，到期还 本</w:t></w:r></w:p>')
+        document = parser.parse(SourceDocument(document_id, 'topic.docx', '', len(content), 'docx'), content)
+        self.server.workflow.repository.put('document', project, document_id, document)
+        fact = {'id': 'repayment', 'category': 'finance', 'entity_id': 'bank',
+                'entity_name': '长期银行融资', 'key': 'repayment_method',
+                'value': '每季付息，到期还本', 'value_type': 'text', 'unit': '无', 'state': 'known',
+                'evidence_ids': [document.evidence[0].id], 'conversion': 'identity', 'explanation': ''}
+        snapshot['reading']['raw_response'] = dumps({'title': '测试', 'facts': [fact], 'rules': [], 'issues': []})
+        snapshot['reading']['problem']['facts'] = [{**fact, 'state': 'conflicted'}]
+        snapshot['reading']['issues'] = [{'code': 'validation.unsupported_value', 'severity': 'error',
+                                         'target': fact['id'], 'message': '旧校验误报',
+                                         'evidence_ids': fact['evidence_ids']}]
+        saved = self.server.workflow.repository.save_snapshot(project, snapshot, 1)
+        current = self.request(base + '/problem')['snapshot']['reading']
+        self.assertEqual(current['problem']['facts'][0]['state'], 'known')
+        self.assertFalse(any(i['target'] == fact['id'] for i in current['issues']))
+        self.assertEqual(self.server.workflow.repository.snapshot(project, 2), saved)
+        snapshot['reading']['problem']['facts'][0]['explanation'] = '用户修改后仍有争议'
+        self.server.workflow.repository.save_snapshot(project, snapshot, 2)
+        current = self.request(base + '/problem')['snapshot']['reading']
+        self.assertEqual(current['problem']['facts'][0]['state'], 'conflicted')
+        self.assertTrue(any(i['target'] == fact['id'] and i['severity'] == 'warning' for i in current['issues']))
 
     def test_parse_retry_uses_stored_original(self):
         project = self.request("/api/projects", {"name": "重试"})["id"]

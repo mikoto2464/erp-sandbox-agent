@@ -12,7 +12,7 @@ from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.adapters.model_settings import ModelSettingsService
 from erp_agent.adapters.sessions import SQLiteSessionStore
 from erp_agent.application.access import AccessService
-from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string
+from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string, to_json
 from erp_agent.application.ports import LLMClient, PlanEvaluator
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
@@ -182,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             elif resource == "problem" and method == "GET":
                 query = parse_qs(parsed.query)
                 version = int(query["version"][0]) if "version" in query else None
-                snapshot = workflow.repository.snapshot(project_id, version)
+                snapshot = to_json(workflow.problem(project_id, version))
                 self._json({"snapshot": snapshot,
                             "versions": workflow.repository.versions(project_id)})
             elif resource == "revisions" and method == "POST":

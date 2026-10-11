@@ -309,7 +309,7 @@ function renderReading(data) {
   $("reading-model").textContent = `${snapshot.reading.problem.title} · ${documents.length} 个文件`;
   $("metric-facts").textContent = editable.facts.length;
   $("metric-errors").textContent = snapshot.reading.issues.filter(i => i.severity === "error").length;
-  $("metric-pending").textContent = editable.facts.filter(f => f.state !== "known").length;
+  $("metric-pending").textContent = reviewIssues().filter(i => i.severity !== "info").length;
   $("metric-rules").textContent = editable.rules.length;
   $("issue-count").textContent = snapshot.reading.issues.filter(i => i.severity !== "info").length;
   $("category-filter").replaceChildren(node("option", "全部分类"));
@@ -319,7 +319,7 @@ function renderReading(data) {
   $("dirty-note").textContent = "修改后请保存";
   $("issue-filter").value = "";
   renderFacts(); renderRules(); renderIssues(); updateControls(); setStep(currentStep);
-  reviewTab(snapshot.reading.issues.some(i=>i.severity!=="info") || !reviewReadiness().horizon ? "issues" : "facts");
+  reviewTab(reviewIssues().some(i=>i.severity!=="info") || !reviewReadiness().horizon ? "issues" : "facts");
 }
 function renderFacts() {
   $("facts").replaceChildren();
@@ -401,7 +401,7 @@ function renderReviewGuide(ready) {
   $("review-issues-summary").textContent=`${ready.errors} 项错误 · ${ready.warnings} 项提示`;
   $("review-rules-summary").textContent=`${editable.facts.length} 个字段 · ${editable.rules.length} 条规则`;
   $("metric-facts").textContent=editable.facts.length;
-  $("metric-pending").textContent=editable.facts.filter(f=>f.state!=="known").length;
+  $("metric-pending").textContent=reviewIssues().filter(i=>i.severity!=="info").length;
   $("metric-rules").textContent=editable.rules.length;
   $("dirty-note").textContent=dirty ? "有未保存修改，请保存并校验" : ready.errors ? "校验未通过：先修正错误，再保存校验" : !ready.horizon ? "请补充周期，再保存校验" : "可以生成草稿；暂定内容会随方案保留";
 }
@@ -528,7 +528,8 @@ function renderCycleIssues(filter) {
   if(filter==="error")return;
   for(const key of ["years","periods_per_year"]){
     const field=editable.facts.find(f=>f.category==="initial" && f.key===key);
-    if(field?.state==="known" && field.value)continue;
+    if(field?.value && ["known","assumed"].includes(field.state)
+      && Number.isInteger(Number(field.value)) && Number(field.value)>=1 && Number(field.value)<=100)continue;
     const item=node("article",undefined,"issue-item cycle-item");
     const heading=node("div",undefined,"issue-heading");
     const confirmed=field && editable.issues.some(i=>i.code==="review.confirmed" && i.target===field.id && i.message===fieldConfirmation(field));

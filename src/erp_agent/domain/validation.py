@@ -27,6 +27,7 @@ def _only_unspecified_unit(issue: Issue) -> bool:
 
 def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> ReadingResult:
     sources = {e.id: e for e in evidence}
+    failed_ids = {i.target for i in reading.issues if i.code == "validation.unsupported_value"}
     issues = [i for i in reading.issues if not i.code.startswith("validation.")]
     unit_issues = [i for i in issues if _only_unspecified_unit(i)]
     unit_targets = {i.target for i in unit_issues}
@@ -55,7 +56,8 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             acknowledged = fact.explanation.startswith("用户标注：")
             issues.append(Issue("validation.value_missing", "info" if acknowledged else "warning",
                                 fact.id, fact.explanation if acknowledged else "字段值尚未提供。"))
-        elif fact.state == KnowledgeState.KNOWN:
+        elif fact.state == KnowledgeState.KNOWN or (
+                fact.state == KnowledgeState.CONFLICTED and fact.id in failed_ids):
             linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
                 _number_supported(current, linked) if fact.value_type in {"number", "integer"}
@@ -70,8 +72,12 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
                                     "原文证据无法支持该数值或所选转换，请核对数据格及适用表头。",
                                     current.evidence_ids))
         if current.state in {KnowledgeState.ASSUMED, KnowledgeState.CONFLICTED}:
-            issues.append(Issue("validation.uncertain", "warning", fact.id,
-                                "该字段仍是显式假设或冲突，使用前需复核。", current.evidence_ids))
+            issues.append(Issue("validation.uncertain",
+                                "info" if current.state == KnowledgeState.ASSUMED else "warning",
+                                fact.id, "已采用暂定或默认值，随方案保留其口径。"
+                                if current.state == KnowledgeState.ASSUMED else
+                                "该字段存在尚未解决的冲突，需核对具体含义与来源。",
+                                current.evidence_ids))
         normalized.append(current)
     keys: dict[tuple[str, str, str], Fact] = {}
     for fact in normalized:
