@@ -141,9 +141,7 @@ class WorkflowService:
         self.project(project_id)
         expected = integer(data.get("expected_version"))
         old = problem_snapshot(self.repository.snapshot(project_id, expected))
-        note = string(data.get("note", "")).strip()
-        if not note:
-            raise ERPError("revision_note_required", "请说明修改依据或假设。")
+        note = string(data.get("note", "")).strip() or "默认"
         payload = obj(data.get("reading"))
         reading = decode_reading(dumps(payload), old.reading.model)
         evidence = tuple(

@@ -31,7 +31,9 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             current = replace(current, state=KnowledgeState.CONFLICTED)
         if fact.value is None:
             current = replace(current, state=KnowledgeState.MISSING)
-            issues.append(Issue("validation.value_missing", "warning", fact.id, "字段值尚未提供。"))
+            acknowledged = fact.explanation.startswith("用户标注：")
+            issues.append(Issue("validation.value_missing", "info" if acknowledged else "warning",
+                                fact.id, fact.explanation if acknowledged else "字段值尚未提供。"))
         elif fact.state == KnowledgeState.KNOWN:
             linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
@@ -87,6 +89,14 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
 
     years = period_value("years")
     periods = period_value("periods_per_year")
+    if years is not None and periods is not None:
+        issues = [replace(issue, severity="info", code="review.resolved." + issue.code,
+                          message=issue.message + "；已按当前周期字段处理。")
+                  if not issue.code.startswith(("validation.", "review.resolved."))
+                  and re.search(r"missing_periods|horizon|经营年限|经营周期|每年期数|总期数", issue.code + " " + issue.message,
+                                re.IGNORECASE)
+                  and re.search(r"missing|缺|未提供|未给|需补", issue.code + " " + issue.message,
+                                re.IGNORECASE) else issue for issue in issues]
     if years is None or periods is None:
         issues.append(Issue("validation.horizon_missing", "warning", "horizon",
                             "经营年数或每年期数尚未确认；不能检查完整逐季计划。"))

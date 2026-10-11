@@ -114,8 +114,8 @@ function updateControls() {
   const solving = jobs.some(job=>job.kind==="solve" && ["queued","running"].includes(job.status));
   $("solve").disabled = !snapshot || dirty || readingErrors || horizonMissing || solving || !status?.llm_configured || (mc && !status?.simulation_ready);
   $("save-revision").disabled = !snapshot || !dirty;
-  $("next-solve").disabled = !snapshot || dirty || readingErrors || horizonMissing;
-  $("next-solve").textContent = dirty ? "先保存并校验" : readingErrors ? "待修正错误" : horizonMissing ? "先确认经营周期" : "继续生成方案 →";
+  $("next-solve").disabled = !snapshot || (!dirty && (readingErrors || horizonMissing));
+  $("next-solve").textContent = dirty ? "保存并继续 →" : readingErrors ? "待修正错误" : horizonMissing ? "先确认经营周期" : "继续生成方案 →";
   $("solve").textContent = solving ? "正在生成…" : "生成方案草稿";
   $("solver-note").textContent = horizonMissing ? "请返回读题复核，确认经营年数和每年期数并保存。" : readingErrors ? "请返回读题复核，修正错误后保存新版本。" : mc
     ? (status?.simulation_ready ? "在仿真器中搜索并比较候选方案。" : "经营仿真内核尚未就绪，暂不能使用蒙特卡罗。")
@@ -387,7 +387,6 @@ function renderReviewGuide(ready) {
   badge.className=`badge ${dirty || ready.errors || !ready.horizon ? "conflicted" : "known"}`;
   $("review-status-detail").textContent=dirty ? "已应用的修改尚未保存。保存后更新校验结果和下一步状态。" : ready.errors ? "错误会阻止生成方案；警告可以在明确假设后保留。" : !ready.horizon ? "缺少经营年数或每年期数，无法生成覆盖完整周期的计划。" : `${ready.warnings} 项提示仍需复核；方案为草稿，经营数值尚未验证。`;
   $("review-issues-summary").textContent=`${ready.errors} 项错误 · ${ready.warnings} 项提示`;
-  $("review-horizon-summary").textContent=ready.horizon ? `${snapshot.reading.problem.years} 年 × 每年 ${snapshot.reading.problem.periods_per_year} 期` : "经营年数 / 每年期数缺失";
   $("review-rules-summary").textContent=`${editable.facts.length} 个字段 · ${editable.rules.length} 条规则`;
   $("metric-facts").textContent=editable.facts.length;
   $("metric-pending").textContent=editable.facts.filter(f=>f.state!=="known").length;
@@ -401,31 +400,39 @@ function issueAdvice(issue) {
   if(issue.code==="validation.duplicate_field" || issue.code==="validation.duplicate_id")return "合并重复字段及其来源，不同对象应使用不同编号；可在高级结构化数据中处理。";
   if(issue.code==="validation.uncertain")return "对照原文确认含义。已核实可补来源标为已知；无法确定则保留假设或冲突并说明。";
   if(issue.code==="validation.value_missing")return "在字段编辑中补充已查到的值；未查到时保留缺失，不要用零替代。";
-  if(issue.code==="validation.horizon_missing" || /PERIOD|horizon|simulation_period/.test(issue.code+issue.target))return "填写经营年数和每年期数；赛题未给出时说明暂定理由，以假设保存。";
+  if(issue.code==="validation.horizon_missing" || /PERIOD|horizon|simulation_period/.test(issue.code+issue.target))return "在待确认项填写经营年数和每年期数，说明可留空，保存后使用。";
   return "对照原文核对相关字段或规则。处理模型提示后记录依据；系统错误须重新校验。";
 }
 function renderIssues() {
   $("issues").replaceChildren();
   const filter=$("issue-filter").value;
-  const issues=reviewIssues().filter(i=>i.severity!=="info" && (!filter || i.severity===filter))
+  const issues=reviewIssues().filter(i=>i.code!=="validation.horizon_missing" && i.severity!=="info" && (!filter || i.severity===filter))
     .sort((a,b)=>(a.severity==="error"?0:1)-(b.severity==="error"?0:1));
   $("issue-count").textContent=reviewIssues().filter(i=>i.severity!=="info").length;
   $("issue-guide").textContent=dirty ? "修改待保存，系统校验结果仍来自上一版本" : "错误必须修正；提示需明确依据或假设";
+  renderCycleIssues(filter);
   for(const issue of issues) {
-    const fact=editable.facts.find(f=>f.id===issue.target) || editable.facts.find(f=>f.key===issue.target),rule=editable.rules.find(r=>r.id===issue.target);
+    if(isCycleIssue(issue))continue;
+    const fact=issueFact(issue),rule=editable.rules.find(r=>r.id===issue.target);
     const item=node("article",undefined,`issue-item ${issue.severity}`);
     const heading=node("div",undefined,"issue-heading");
     heading.append(node("span",issue.severity==="error"?"阻止生成":"需核对","badge "+(issue.severity==="error"?"conflicted":"assumed")),node("strong",fact?`${fact.entity_name} · ${fieldNames[fact.key]||fact.key}`:rule?.name || (issue.target==="horizon"?"经营周期":"题目提示")));
     item.append(heading,node("p",issue.message),node("p",issueAdvice(issue),"muted"));
     const actions=node("div",undefined,"actions");
     if(fact){const edit=node("button","修正字段","secondary");edit.onclick=()=>openFactEditor(fact.id);actions.append(edit);}
-    else if(/horizon|PERIOD|simulation_period/.test(issue.code+issue.target)){const edit=node("button","确认经营周期","secondary");edit.onclick=openHorizonEditor;actions.append(edit);}
     else if(rule){const edit=node("button","修正规则","secondary");edit.onclick=()=>{reviewTab("rules");$("rule-row-"+rule.id)?.scrollIntoView({block:"center"});};actions.append(edit);}
     if(issue.evidence_ids.length){const source=node("button","查看原文","source-button");source.onclick=()=>showEvidence(issue.evidence_ids,fact?`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`:"原文证据",fact);actions.append(source);}
     if(!issue.code.startsWith("validation.")){const resolve=node("button","记录处理说明","quiet");resolve.onclick=()=>{resolvingIssue=issue;$("issue-dialog-message").textContent=issue.message;$("issue-resolution").value="";$("issue-dialog").showModal();};actions.append(resolve);}
+    const unitIssue=!issue.code.startsWith("validation.") && /unit|单位/i.test(issue.code+issue.message);
+    if(!issue.code.startsWith("validation.") || fact){
+      for(const choice of ["无","不清楚"]){
+        const button=node("button",choice,"annotation-button");
+        button.onclick=()=>annotateIssue(issue,choice,unitIssue);actions.append(button);
+      }
+    }
     item.append(actions);$("issues").append(item);
   }
-  if(!issues.length)$("issues").append(node("p",filter?"没有此类问题。":"没有待处理的问题。可继续核对经营周期、数据和规则。","empty"));
+  if(!$("issues").children.length)$("issues").append(node("p",filter?"没有此类问题。":"没有待处理的问题。可继续核对经营周期、数据和规则。","empty"));
 }
 function openFactEditor(id) {
   editingFact=editable.facts.find(f=>f.id===id);
@@ -456,12 +463,68 @@ function renderEvidencePicker() {
   }
   if(!selected.length && !others.length)$("fact-evidence-list").append(node("p",search?"没有匹配的原文。换一个关键词搜索。":"暂无已选来源。输入关键词查找原文。","muted"));
 }
-function openHorizonEditor() {
-  const field=key=>editable.facts.find(f=>f.category==="initial" && f.key===key);
-  $("horizon-years").value=field("years")?.value || "";
-  $("horizon-periods").value=field("periods_per_year")?.value || "";
-  $("horizon-explanation").value=[...new Set([field("years"),field("periods_per_year")].map(f=>f?.explanation).filter(Boolean))].join("；");
-  $("horizon-error").hidden=true;$("horizon-dialog").showModal();
+function isCycleIssue(issue) {
+  if(issue.severity==="error")return false;
+  const fact=issueFact(issue);
+  if(fact?.category==="initial" && ["years","periods_per_year"].includes(fact.key))return true;
+  return /missing_periods|horizon|simulation_period/i.test(issue.code+issue.target)
+    || ["years","periods_per_year"].includes(issue.target.split(".").pop());
+}
+function issueFact(issue) {
+  const key=issue.target.split(".").pop();
+  return editable.facts.find(f=>f.id===issue.target) || editable.facts.find(f=>f.key===key);
+}
+function setCycleField(key,value) {
+  let fact=editable.facts.find(f=>f.category==="initial" && f.key===key);
+  if(!fact){
+    let id=`review_${key}`;while(editable.facts.some(f=>f.id===id))id+="_";
+    fact={id,category:"initial",entity_id:"company",entity_name:"公司",key,evidence_ids:[]};editable.facts.push(fact);
+  }
+  if(fact.value!==value || fact.value_type!=="integer" || !["known","assumed"].includes(fact.state)){
+    Object.assign(fact,{value:value || null,value_type:"integer",unit:key==="years"?"年":"期/年",
+      state:value?"assumed":"missing",conversion:"identity",explanation:"默认",evidence_ids:[]});
+    markDirty();renderFacts();
+  }
+}
+function renderCycleIssues(filter) {
+  if(filter==="error")return;
+  for(const key of ["years","periods_per_year"]){
+    const field=editable.facts.find(f=>f.category==="initial" && f.key===key);
+    if(field?.state==="known" && field.value)continue;
+    const item=node("article",undefined,"issue-item cycle-item");
+    const heading=node("div",undefined,"issue-heading");
+    heading.append(node("span",field?.value?"默认值":"待填写","badge assumed"),node("strong",fieldNames[key]));
+    const row=node("div",undefined,"inline-confirmation"),input=node("input");
+    input.type="number";input.min="1";input.max="100";input.step="1";input.value=field?.value || "";
+    input.id=`confirm-${key}`;input.setAttribute("aria-label",fieldNames[key]);input.placeholder="填写整数";
+    input.oninput=()=>setCycleField(key,input.value);
+    const explanation=node("input");explanation.placeholder="说明（选填，留空为默认）";
+    explanation.setAttribute("aria-label",fieldNames[key]+"说明");
+    explanation.value=field?.explanation==="默认"?"":field?.explanation || "";
+    explanation.oninput=()=>{setCycleField(key,input.value);const fact=editable.facts.find(f=>f.category==="initial"&&f.key===key);fact.explanation=explanation.value.trim()||"默认";markDirty();};
+    row.append(input,node("span",key==="years"?"年":"期/年","muted"),explanation);
+    item.append(heading,row);$("issues").append(item);
+  }
+}
+function resolveModelIssue(issue,explanation) {
+  const index=editable.issues.findIndex(i=>i.code===issue.code && i.target===issue.target && i.message===issue.message);
+  if(index>=0)editable.issues[index]={...editable.issues[index],code:"review.resolved."+issue.code,severity:"info",message:issue.message+"；用户标注："+explanation};
+}
+function annotateIssue(issue,choice,unitIssue) {
+  const fact=issueFact(issue);
+  const key=issue.target.split(".").pop();
+  const matches=unitIssue?editable.facts.filter(f=>f.key===key || f.id===issue.target):fact?[fact]:[];
+  if(unitIssue){
+    for(const field of matches){field.unit=choice==="无"?"": "不清楚";field.explanation=`用户标注：单位${choice}`;}
+  }else if(fact){
+    Object.assign(fact,{value:null,state:"missing",evidence_ids:[],explanation:`用户标注：${choice}`});
+  }
+  if(!issue.code.startsWith("validation."))resolveModelIssue(issue,choice);
+  else if(fact && !unitIssue){
+    editable.issues.push({code:"review.annotation",severity:"info",target:fact.id,
+      message:`用户标注：${choice}`,evidence_ids:[]});
+  }
+  markDirty();renderFacts();renderIssues();toast(`已标注“${choice}”，保存后生效。`);
 }
 function renderSolutions(solutions) {
   $("solutions").replaceChildren();
@@ -667,15 +730,21 @@ $("files").onchange=()=>safe(()=>uploadFiles([...$("files").files]));
 for(const type of ["dragenter","dragover"])$("drop-zone").addEventListener(type,event=>{event.preventDefault();$("drop-zone").classList.add("dragover");});
 for(const type of ["dragleave","drop"])$("drop-zone").addEventListener(type,event=>{event.preventDefault();$("drop-zone").classList.remove("dragover");if(type==="drop")safe(()=>uploadFiles([...event.dataTransfer.files]));});
 $("read").onclick=()=>startReading($("read"));$("reread").onclick=()=>startReading($("reread"));
-$("next-solve").onclick=()=>setStep(3);$("back-review").onclick=()=>setStep(2);
+$("next-solve").onclick=()=>busy($("next-solve"),async()=>{
+  if(dirty)await saveRevision();
+  const ready=reviewReadiness();
+  if(ready.errors || !ready.horizon){reviewTab("issues");toast(ready.errors?"仍有错误需要处理。":"请填写经营年数和每年期数。");return;}
+  setStep(3);
+});$("back-review").onclick=()=>setStep(2);
 $("versions").onchange=()=>safe(async()=>{if(dirty){$("versions").value=snapshot.version;toast("请先保存修改。");return;}const data=await api(base()+`/problem?version=${$("versions").value}`);renderReading(data);});
 $("fact-search").oninput=renderFacts;$("category-filter").onchange=renderFacts;$("state-filter").onchange=renderFacts;
-$("save-revision").onclick=()=>{$("revision-dialog").showModal();$("revision-note").focus();};
-$("revision-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{
-  const result=await post(base()+"/revisions",{expected_version:snapshot.version,note:$("revision-note").value,reading:editable});
-  const versions=[result.version,...Array.from($("versions").options,o=>Number(o.value))];renderReading({snapshot:result,versions});
-  $("revision-dialog").close();$("revision-note").value="";toast(result.reading.issues.some(i=>i.severity==="error") ? "已保存，仍有错误需要修正。" : !result.reading.problem.years || !result.reading.problem.periods_per_year ? "已保存，请继续确认经营周期。" : "已保存并校验，可生成方案草稿。");
-});};
+async function saveRevision() {
+  const result=await post(base()+"/revisions",{expected_version:snapshot.version,note:"默认",reading:editable});
+  const versions=[result.version,...Array.from($("versions").options,o=>Number(o.value))];
+  renderReading({snapshot:result,versions});
+  toast(result.reading.issues.some(i=>i.severity==="error")?"已保存，仍有错误需要处理。":!result.reading.problem.years || !result.reading.problem.periods_per_year?"已保存，请补充经营周期。":"已保存，可继续生成草稿。");
+}
+$("save-revision").onclick=()=>busy($("save-revision"),saveRevision);
 $("apply-json").onclick=()=>safe(async()=>{const data=JSON.parse($("reading-json").value);if(!Array.isArray(data.facts)||!Array.isArray(data.rules)||!Array.isArray(data.issues)||typeof data.title!=="string")throw new Error("结构化数据必须包含 title、facts、rules、issues。");editable=data;markDirty();renderFacts();renderRules();renderIssues();toast("已应用，请保存新版本。");});
 $("solve").onclick=()=>busy($("solve"),async()=>{await post(base()+"/solve",{version:snapshot.version,mode:mode(),seed:Number($("seed").value),candidates:Number($("candidates").value)});await refresh();});
 $("open-settings").onclick=$("configure-model").onclick=()=>safe(openSettings);
@@ -686,7 +755,6 @@ $("settings-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,
   $("model-key").value="";await loadStatus();renderPresetPicker(saved.id);fillPreset(saved);toast("模型预设已保存。");
 });};
 $("review-open-issues").onclick=()=>reviewTab("issues");
-$("review-open-horizon").onclick=openHorizonEditor;
 $("review-open-rules").onclick=()=>reviewTab("rules");
 $("issue-filter").onchange=renderIssues;
 $("reset-filters").onclick=()=>{$("fact-search").value="";$("category-filter").value="";$("state-filter").value="";renderFacts();};
@@ -697,34 +765,19 @@ $("fact-form").onsubmit=event=>{
   const explanation=$("edit-fact-explanation").value.trim();
   let error="";
   if(state==="known" && (!value || !editingEvidence.size))error="已知字段必须填写值并选择支持该值的原文。";
-  if(state==="assumed" && !explanation)error="请说明暂定值或假设的依据。";
   if(state==="missing" && value)error="缺失状态应留空；有暂定值时请选择假设。";
   $("fact-editor-error").textContent=error;$("fact-editor-error").hidden=!error;if(error)return;
   Object.assign(editingFact,{value:value || null,unit:$("edit-fact-unit").value.trim(),
     value_type:$("edit-fact-type").value,state:value?state:"missing",conversion:$("edit-fact-conversion").value,
-    evidence_ids:[...editingEvidence],explanation});
+    evidence_ids:[...editingEvidence],explanation:explanation || "默认"});
   markDirty();renderFacts();renderIssues();$("fact-dialog").close();toast("字段修改已应用，请保存并校验。");
 };
-$("horizon-form").onsubmit=event=>{
-  event.preventDefault();
-  const years=Number($("horizon-years").value),periods=Number($("horizon-periods").value);
-  const explanation=$("horizon-explanation").value.trim();
-  const duplicate=["years","periods_per_year"].some(key=>editable.facts.filter(f=>f.category==="initial" && f.key===key).length>1);
-  const error=duplicate ? "周期字段重复，请在数据中合并重复字段后再填写。" : !explanation || !Number.isInteger(years) || !Number.isInteger(periods) || years<1 || years>100 || periods<1 || periods>100 ? "填写 1 到 100 的整数，并说明周期依据。" : "";
-  $("horizon-error").textContent=error;$("horizon-error").hidden=!error;if(error)return;
-  for(const [key,value,unit] of [["years",years,"年"],["periods_per_year",periods,"期/年"]]){
-    let fact=editable.facts.find(f=>f.category==="initial" && f.key===key);
-    if(fact?.state==="known" && fact.value_type==="integer" && Number(fact.value)===value)continue;
-    if(!fact){let id=`review_${key}`;while(editable.facts.some(f=>f.id===id))id+="_";fact={id,category:"initial",entity_id:"company",entity_name:"公司",key};editable.facts.push(fact);}
-    Object.assign(fact,{value:String(value),value_type:"integer",unit,state:"assumed",conversion:"identity",explanation,evidence_ids:[]});
-  }
-  markDirty();renderFacts();renderIssues();$("horizon-dialog").close();toast("周期已作为假设应用，请保存并校验。");
-};
+$("unit-none").onclick=()=>{$("edit-fact-unit").value="";$("edit-fact-explanation").value="用户标注：无单位";};
+$("unit-unknown").onclick=()=>{$("edit-fact-unit").value="不清楚";$("edit-fact-explanation").value="用户标注：单位不清楚";};
 $("issue-form").onsubmit=event=>{
-  event.preventDefault();const explanation=$("issue-resolution").value.trim();if(!explanation)return;
-  const index=editable.issues.findIndex(i=>i.code===resolvingIssue.code && i.target===resolvingIssue.target && i.message===resolvingIssue.message);
-  if(index>=0)editable.issues[index]={...editable.issues[index],code:"review.resolved."+resolvingIssue.code,severity:"info",message:resolvingIssue.message+"；处理依据："+explanation};
-  markDirty();renderIssues();$("issue-dialog").close();toast("已记录处理依据，请保存并校验。");
+  event.preventDefault();const explanation=$("issue-resolution").value.trim() || "默认";
+  resolveModelIssue(resolvingIssue,explanation);
+  markDirty();renderIssues();$("issue-dialog").close();toast("处理标注已应用，保存后生效。");
 };
 $("add-rule").onclick=()=>{
   let id="review_rule";while(editable.rules.some(r=>r.id===id))id+="_";
