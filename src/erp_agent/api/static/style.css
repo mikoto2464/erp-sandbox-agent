@@ -1086,14 +1086,15 @@ dialog { max-height:calc(100dvh - 40px); overflow:auto; background:#fff; }
 .review-shortcuts span { color:var(--muted); font-weight:400; margin-left:8px; }
 .inline-confirmation { display:flex; gap:10px; align-items:center; margin-top:14px; }
 .inline-confirmation input[type=number] { width:115px; flex-shrink:0; }
-.inline-confirmation input:last-child { flex:1; min-width:0; }
+.inline-confirmation input:not([type=number]) { flex:1; min-width:0; }
+.inline-confirmation .confirm-button { flex-shrink:0; min-width:74px; }
 .annotation-button { background:#f1f3f9; color:#58647b; padding:7px 14px; border:1px solid var(--line); }
 .unit-shortcuts { display:flex; align-items:center; gap:8px; margin-top:12px; }
 .cycle-item { color:inherit; }
 #settings-dialog .preset-actions { gap:10px; }
 @media(max-width:760px) {
   .inline-confirmation { flex-wrap:wrap; }
-  .inline-confirmation input:last-child { flex-basis:100%; }
+  .inline-confirmation input:not([type=number]) { flex-basis:calc(100% - 90px); }
   .review-shortcuts { gap:10px; }
   dialog { padding:22px; border-radius:12px; }
 }

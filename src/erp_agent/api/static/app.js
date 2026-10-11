@@ -338,7 +338,7 @@ function renderFacts() {
       for(const [key,label] of Object.entries(stateNames)){const option=node("option",label);option.value=key;stateSelect.append(option);} stateSelect.value=fact.state;
       stateSelect.onchange=()=>{fact.state=stateSelect.value;tr.classList.add("changed");markDirty();};stateCell.append(stateSelect);
       const sourceCell=node("td"), sourceButton=node("button",fact.evidence_ids.length ? `${fact.evidence_ids.length} 处` : "无来源","source-button");
-      sourceButton.onclick=()=>showEvidence(fact.evidence_ids,`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`,fact);const editButton=node("button","修正字段","text-button");editButton.onclick=()=>openFactEditor(fact.id);sourceCell.append(sourceButton,editButton);
+      sourceButton.onclick=()=>showEvidence(fact.evidence_ids,`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`,fact);const editButton=node("button","确认 / 修改","text-button");editButton.onclick=()=>openFactEditor(fact.id);sourceCell.append(sourceButton,editButton);
       const unitCell = node("td"), unit = node("input");
       unit.value = fact.unit; unit.setAttribute("aria-label", `${fact.key}的单位`);
       unit.onchange = () => { fact.unit = unit.value; tr.classList.add("changed"); markDirty(); };
@@ -364,7 +364,15 @@ function renderRules() {
     const explanation=node("textarea"); explanation.value=rule.explanation; explanation.rows=2;
     explanation.placeholder="规则口径与适用范围"; explanation.setAttribute("aria-label",`${rule.name}的说明`);
     explanation.onchange=()=>{rule.explanation=explanation.value;markDirty();};
-    item.append(title,expression,explanation);$("rules").append(item);
+    const confirm=node("button","确认规则","secondary");
+    confirm.onclick=()=>{
+      if(!rule.expression.trim()){toast("请先填写规则内容。");return;}
+      rule.explanation=rule.explanation.trim() || "默认";
+      if(rule.state!=="known")rule.state="assumed";
+      state.value=rule.state;
+      markDirty();confirm.textContent="已确认";toast("规则已确认，保存后生效。");
+    };
+    item.append(title,expression,explanation,confirm);$("rules").append(item);
   }
 }
 function reviewIssues() {
@@ -418,10 +426,10 @@ function renderIssues() {
     heading.append(node("span",issue.severity==="error"?"阻止生成":"需核对","badge "+(issue.severity==="error"?"conflicted":"assumed")),node("strong",fact?`${fact.entity_name} · ${fieldNames[fact.key]||fact.key}`:rule?.name || (issue.target==="horizon"?"经营周期":"题目提示")));
     item.append(heading,node("p",issue.message),node("p",issueAdvice(issue),"muted"));
     const actions=node("div",undefined,"actions");
-    if(fact){const edit=node("button","修正字段","secondary");edit.onclick=()=>openFactEditor(fact.id);actions.append(edit);}
+    if(fact){const edit=node("button","确认 / 修改","secondary");edit.onclick=()=>openFactEditor(fact.id);actions.append(edit);}
     else if(rule){const edit=node("button","修正规则","secondary");edit.onclick=()=>{reviewTab("rules");$("rule-row-"+rule.id)?.scrollIntoView({block:"center"});};actions.append(edit);}
     if(issue.evidence_ids.length){const source=node("button","查看原文","source-button");source.onclick=()=>showEvidence(issue.evidence_ids,fact?`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`:"原文证据",fact);actions.append(source);}
-    if(!issue.code.startsWith("validation.")){const resolve=node("button","记录处理说明","quiet");resolve.onclick=()=>{resolvingIssue=issue;$("issue-dialog-message").textContent=issue.message;$("issue-resolution").value="";$("issue-dialog").showModal();};actions.append(resolve);}
+    if(!issue.code.startsWith("validation.")){const resolve=node("button","确认","secondary");resolve.onclick=()=>{resolvingIssue=issue;$("issue-dialog-message").textContent=issue.message;$("issue-resolution").value="";$("issue-dialog").showModal();};actions.append(resolve);}
     const unitIssue=!issue.code.startsWith("validation.") && /unit|单位/i.test(issue.code+issue.message);
     if(!issue.code.startsWith("validation.") || fact){
       for(const choice of ["无","不清楚"]){
@@ -485,6 +493,14 @@ function setCycleField(key,value) {
     markDirty();renderFacts();
   }
 }
+function fieldConfirmation(fact) {
+  return `用户已确认：${fieldNames[fact.key] || fact.key}=${fact.value ?? "未提供"} ${fact.unit}；说明：${fact.explanation || "默认"}`;
+}
+function recordFieldConfirmation(fact) {
+  editable.issues=editable.issues.filter(i=>!(i.code==="review.confirmed" && i.target===fact.id));
+  editable.issues.push({code:"review.confirmed",severity:"info",target:fact.id,
+    message:fieldConfirmation(fact),evidence_ids:fact.evidence_ids});
+}
 function renderCycleIssues(filter) {
   if(filter==="error")return;
   for(const key of ["years","periods_per_year"]){
@@ -492,16 +508,30 @@ function renderCycleIssues(filter) {
     if(field?.state==="known" && field.value)continue;
     const item=node("article",undefined,"issue-item cycle-item");
     const heading=node("div",undefined,"issue-heading");
-    heading.append(node("span",field?.value?"默认值":"待填写","badge assumed"),node("strong",fieldNames[key]));
+    const confirmed=field && editable.issues.some(i=>i.code==="review.confirmed" && i.target===field.id && i.message===fieldConfirmation(field));
+    const badge=node("span",confirmed?"已确认":field?.value?"待确认":"待填写","badge "+(confirmed?"known":"assumed"));
+    heading.append(badge,node("strong",fieldNames[key]));
     const row=node("div",undefined,"inline-confirmation"),input=node("input");
     input.type="number";input.min="1";input.max="100";input.step="1";input.value=field?.value || "";
     input.id=`confirm-${key}`;input.setAttribute("aria-label",fieldNames[key]);input.placeholder="填写整数";
-    input.oninput=()=>setCycleField(key,input.value);
+    const resetConfirmation=()=>{badge.textContent="待确认";badge.className="badge assumed";confirm.textContent="确认";confirm.disabled=false;};
+    input.oninput=()=>{setCycleField(key,input.value);resetConfirmation();};
     const explanation=node("input");explanation.placeholder="说明（选填，留空为默认）";
     explanation.setAttribute("aria-label",fieldNames[key]+"说明");
     explanation.value=field?.explanation==="默认"?"":field?.explanation || "";
-    explanation.oninput=()=>{setCycleField(key,input.value);const fact=editable.facts.find(f=>f.category==="initial"&&f.key===key);fact.explanation=explanation.value.trim()||"默认";markDirty();};
-    row.append(input,node("span",key==="years"?"年":"期/年","muted"),explanation);
+    explanation.oninput=()=>{setCycleField(key,input.value);const fact=editable.facts.find(f=>f.category==="initial"&&f.key===key);fact.explanation=explanation.value.trim()||"默认";markDirty();resetConfirmation();};
+    const confirm=node("button",confirmed?"已确认":"确认","secondary confirm-button");confirm.type="button";confirm.disabled=!!confirmed;
+    confirm.setAttribute("aria-label",`确认${fieldNames[key]}`);
+    confirm.onclick=()=>{
+      const value=Number(input.value);
+      if(!input.value || !Number.isInteger(value) || value<1 || value>100){toast("请填写 1 到 100 的整数。");input.focus();return;}
+      setCycleField(key,input.value);
+      const fact=editable.facts.find(f=>f.category==="initial"&&f.key===key);
+      fact.explanation=explanation.value.trim() || "默认";recordFieldConfirmation(fact);
+      markDirty();badge.textContent="已确认";badge.className="badge known";confirm.textContent="已确认";confirm.disabled=true;
+      toast(`${fieldNames[key]}已确认，保存后生效。`);
+    };
+    row.append(input,node("span",key==="years"?"年":"期/年","muted"),explanation,confirm);
     item.append(heading,row);$("issues").append(item);
   }
 }
@@ -805,7 +835,8 @@ $("fact-form").onsubmit=event=>{
   Object.assign(editingFact,{value:value || null,unit:$("edit-fact-unit").value.trim(),
     value_type:$("edit-fact-type").value,state:value?state:"missing",conversion:$("edit-fact-conversion").value,
     evidence_ids:[...editingEvidence],explanation:explanation || "默认"});
-  markDirty();renderFacts();renderIssues();$("fact-dialog").close();toast("字段修改已应用，请保存并校验。");
+  recordFieldConfirmation(editingFact);
+  markDirty();renderFacts();renderIssues();$("fact-dialog").close();toast("字段已确认，保存后生效。");
 };
 $("unit-none").onclick=()=>{$("edit-fact-unit").value="";$("edit-fact-explanation").value="用户标注：无单位";};
 $("unit-unknown").onclick=()=>{$("edit-fact-unit").value="不清楚";$("edit-fact-explanation").value="用户标注：单位不清楚";};
