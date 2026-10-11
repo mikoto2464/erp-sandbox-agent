@@ -294,7 +294,7 @@ main {
 
 .steps {
   display:grid;
-  grid-template-columns:repeat(3,1fr);
+  grid-template-columns:repeat(5,minmax(0,1fr));
   gap:1px;
   margin-bottom:28px;
   background:var(--line);
@@ -310,7 +310,7 @@ main {
   display:flex;
   align-items:center;
   gap:13px;
-  padding:18px 25px;
+  padding:18px 16px;
   color:#667187;
 }
 
@@ -1096,4 +1096,53 @@ dialog { max-height:calc(100dvh - 40px); overflow:auto; background:#fff; }
   .inline-confirmation input:last-child { flex-basis:100%; }
   .review-shortcuts { gap:10px; }
   dialog { padding:22px; border-radius:12px; }
+}
+
+.badge.planned { background:#f0f2f6; color:#6e7889; }
+.result-heading { margin-top:26px; }
+.module-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.module-card { display:flex; flex-direction:column; align-items:flex-start; gap:14px; }
+.module-card h3,.module-card p { margin:0; }
+.module-card>button:last-child { margin-top:auto; }
+.module-symbol { display:grid; place-items:center; width:44px; height:44px; border-radius:12px; background:#eef1fe; color:var(--primary); font-size:24px; }
+.module-preview { display:grid; gap:10px; width:100%; background:#f8f9fc; border:1px solid var(--line); border-radius:10px; padding:18px; }
+.module-preview span { border-bottom:1px solid var(--line); padding-bottom:9px; color:#6f7b90; font-size:13px; }
+.module-preview span:last-child { border:0; padding:0; }
+.template-placeholder { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; width:100%; padding:22px; border:1px dashed #cbd3e4; border-radius:10px; text-align:center; }
+.template-placeholder span { color:var(--muted); font-size:12px; }
+.validation-placeholder { margin-top:20px; }
+.validation-placeholder h3 { margin-top:0; }
+.placeholder-checks { display:flex; flex-wrap:wrap; gap:10px; }
+.placeholder-checks span { padding:9px 14px; background:#f6f7fa; border-radius:8px; color:var(--muted); font-size:13px; }
+.module-empty,.conversation-empty { display:flex; flex-direction:column; align-items:center; text-align:center; padding:38px 22px; gap:14px; }
+.module-empty h3,.module-empty p,.conversation-empty h3,.conversation-empty p { margin:0; }
+.module-empty p { color:var(--muted); font-size:13px; }
+.conversation-card { padding:0; overflow:hidden; }
+.conversation-empty { min-height:340px; justify-content:center; }
+.question-examples { display:flex; justify-content:center; gap:10px; flex-wrap:wrap; margin-top:10px; }
+.question-examples span { padding:10px 14px; border:1px solid var(--line); border-radius:10px; font-size:13px; color:#6c778c; }
+.conversation-compose { display:flex; align-items:flex-end; gap:12px; border-top:1px solid var(--line); padding:20px; background:#fafbfe; }
+.conversation-compose textarea { flex:1; min-width:0; resize:none; background:#fff; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
+.solution-card { margin-bottom:20px; }
+.solution-card .section-heading { margin-bottom:8px; }
+.period-plan { margin:20px 0; }
+.period-group { border:1px solid var(--line); border-radius:10px; margin-top:14px; overflow:hidden; }
+.period-group h3 { margin:0; padding:12px 16px; background:#f5f7fd; color:#4b5d89; font-size:13px; }
+.plan-action { display:flex; align-items:flex-start; gap:20px; justify-content:space-between; padding:14px 16px; border-top:1px solid var(--line); font-size:13px; }
+.plan-action p { margin:0; flex:1; }
+.action-values { color:var(--muted); font-size:12px; white-space:nowrap; }
+.plan-notes { margin:14px 0; }
+.plan-notes li { margin:10px 0; font-size:13px; color:#5f6b80; }
+@media(max-width:900px) {
+  .step { flex-direction:column; align-items:flex-start; gap:9px; padding:14px 12px; }
+  .step small { display:none; }
+}
+@media(max-width:600px) {
+  .steps { grid-template-columns:repeat(3,minmax(0,1fr)); background:#fff; }
+  .step { font-size:12px; }
+  .module-grid { grid-template-columns:1fr; gap:16px; }
+  .plan-action { flex-direction:column; gap:8px; }
+  .conversation-compose { padding:15px; }
+  .section-heading { flex-wrap:wrap; }
 }
