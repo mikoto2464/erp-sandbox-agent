@@ -3,15 +3,18 @@ import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from erp_agent.adapters.llm import CompatibleLLMClient
+from erp_agent.adapters.llm_protocols import protocol_catalog, requires_api_key
 from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse
-from erp_agent.config import Settings
+from erp_agent.config import LLM_BASE_URLS, Settings
 from erp_agent.domain.errors import ERPError
 
 MODEL_FIELDS = {"llm_base_url", "llm_model", "llm_api_key", "llm_format", "llm_timeout",
-                "llm_max_input_chars", "llm_max_output_tokens"}
+                "llm_max_input_chars", "llm_max_output_tokens", "llm_provider",
+                "llm_token_parameter"}
 
 
 class RuntimeLLMClient:
@@ -49,15 +52,18 @@ class ModelSettingsService:
 
     def public(self) -> JSONObject:
         settings = self.settings
-        return {"base_url": settings.llm_base_url, "model": settings.llm_model,
+        return {"provider": settings.llm_provider, "providers": protocol_catalog(),
+                "base_url": settings.llm_base_url, "model": settings.llm_model,
                 "api_key_set": bool(settings.llm_api_key), "format": settings.llm_format,
+                "api_key_required": requires_api_key(settings),
+                "token_parameter": settings.llm_token_parameter,
                 "timeout": settings.llm_timeout, "max_input_chars": settings.llm_max_input_chars,
                 "max_output_tokens": settings.llm_max_output_tokens,
                 "configured": self.client.configured}
 
     def update(self, data: JSONObject) -> JSONObject:
         if set(data) - {"base_url", "model", "api_key", "clear_api_key", "format", "timeout",
-                        "max_input_chars", "max_output_tokens"}:
+                        "max_input_chars", "max_output_tokens", "provider", "token_parameter"}:
             raise ERPError("invalid_model_settings", "模型设置包含未知字段。")
         with self._lock:
             current = self.settings
@@ -65,11 +71,28 @@ class ModelSettingsService:
             clear = data.get("clear_api_key", False)
             if not isinstance(clear, bool):
                 raise ERPError("invalid_model_settings", "清除密钥选项无效。")
+            provider = string(data.get("provider", current.llm_provider))
+            if provider not in LLM_BASE_URLS:
+                raise ERPError("invalid_model_settings", "不支持的模型接口类型。")
+            changed_provider = provider != current.llm_provider
+            default_url = LLM_BASE_URLS[provider] if changed_provider else current.llm_base_url
+            base_url = (
+                string(data.get("base_url", default_url)).strip() or LLM_BASE_URLS[provider]
+            )
+            changed_host = urlsplit(base_url).netloc != urlsplit(current.llm_base_url).netloc
+            retained_key = "" if changed_provider or changed_host else current.llm_api_key
             changes = {
-                "llm_base_url": string(data.get("base_url", current.llm_base_url)).strip(),
-                "llm_model": string(data.get("model", current.llm_model), maximum=200).strip(),
-                "llm_api_key": "" if clear else key or current.llm_api_key,
+                "llm_provider": provider,
+                "llm_base_url": base_url,
+                "llm_model": string(
+                    data.get("model", "" if changed_provider else current.llm_model),
+                    maximum=200,
+                ).strip(),
+                "llm_api_key": "" if clear else key or retained_key,
                 "llm_format": string(data.get("format", current.llm_format)),
+                "llm_token_parameter": string(data.get(
+                    "token_parameter", current.llm_token_parameter,
+                )),
                 "llm_timeout": integer(data.get("timeout", current.llm_timeout), 5, 300),
                 "llm_max_input_chars": integer(data.get("max_input_chars",
                                                         current.llm_max_input_chars), 10000, 1000000),

@@ -19,6 +19,14 @@ let authenticated = false, dirty = false, polling = false, generation = 0, curre
 let pendingDelete = null, latestReadSeen = 0, documentsSignature = "", jobsSignature = "", solutionsSignature = "";
 let toastTimer;
 let pendingNavigation = null;
+let modelProviders = [];
+const providerHelp = {
+  openai_chat: "适用于 OpenAI、DeepSeek、通义等兼容服务。填写基础地址（如 /v1）或完整 Chat Completions 地址。",
+  openai_responses: "使用 OpenAI Responses 格式，可填写 /v1 基础地址或完整 /responses 地址。",
+  anthropic: "使用 Claude 原生 Messages 格式，填写 /v1 基础地址或完整 /messages 地址。",
+  gemini: "使用 Gemini 原生格式，填写 /v1beta 基础地址或完整 generateContent 地址。",
+  ollama: "使用 Ollama 原生 /api/chat，本机服务通常为 http://localhost:11434。"
+};
 function node(tag, text, className) {
   const element = document.createElement(tag);
   if (text !== undefined) element.textContent = text;
@@ -366,13 +374,36 @@ async function startReading(button) {
 }
 async function openSettings() {
   const settings=await api("/api/model-settings");
+  modelProviders=settings.providers;
+  $("model-provider").replaceChildren();
+  for (const provider of modelProviders) {
+    const option=node("option",provider.name); option.value=provider.id; $("model-provider").append(option);
+  }
+  $("model-provider").value=settings.provider;
   $("model-url").value=settings.base_url;$("model-name").value=settings.model;$("model-key").value="";
   $("model-key").placeholder=settings.api_key_set?"已保存，留空保留原密钥":"输入 API 密钥";
   $("clear-model-key").checked=false;$("model-format").value=settings.format;$("model-timeout").value=settings.timeout;
   $("model-input-limit").value=settings.max_input_chars;$("model-output-limit").value=settings.max_output_tokens;
+  $("model-token-parameter").value=settings.token_parameter;
   $("settings-status").textContent=settings.configured?"已配置 · 修改后用于新请求":"尚未配置模型";
+  updateProviderFields();
   $("settings-dialog").showModal();
 }
+function updateProviderFields() {
+  const provider=$("model-provider").value;
+  $("provider-help").textContent=providerHelp[provider] || "";
+  $("token-parameter-field").hidden=provider!=="openai_chat";
+}
+$("model-provider").onchange=()=>{
+  const provider=modelProviders.find(item=>item.id===$("model-provider").value);
+  $("model-url").value=provider.base_url;
+  $("model-name").value="";
+  $("model-key").value="";
+  $("model-key").placeholder=provider.api_key_required?"输入此接口的 API 密钥":"本机服务可留空";
+  $("clear-model-key").checked=false;
+  $("settings-status").textContent="接口已切换，请填写模型及其密钥后保存";
+  updateProviderFields();
+};
 $("login-form").onsubmit=async event=>{
   event.preventDefault();$("login-button").disabled=true;$("login-error").hidden=true;
   try{await post("/api/auth/login",{key:$("access-key").value,remember:$("remember").checked});await enterApp();}
@@ -408,7 +439,7 @@ $("apply-json").onclick=()=>safe(async()=>{const data=JSON.parse($("reading-json
 $("solve").onclick=()=>busy($("solve"),async()=>{await post(base()+"/solve",{version:snapshot.version,mode:mode(),seed:Number($("seed").value),candidates:Number($("candidates").value)});await refresh();});
 $("open-settings").onclick=$("configure-model").onclick=()=>safe(openSettings);
 $("settings-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{
-  await post("/api/model-settings",{base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)});
+  await post("/api/model-settings",{provider:$("model-provider").value,base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,token_parameter:$("model-token-parameter").value,timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)});
   $("model-key").value="";$("settings-dialog").close();await loadStatus();toast("模型设置已保存。");
 });};
 $("close-evidence").onclick=()=>{$("evidence-drawer").hidden=true;};

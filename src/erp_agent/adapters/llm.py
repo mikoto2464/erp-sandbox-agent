@@ -1,9 +1,9 @@
-import json
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from erp_agent.application.contracts import array, loads, obj, string
+from erp_agent.adapters.llm_protocols import MAX_RESPONSE_BYTES, create_protocol, requires_api_key
+from erp_agent.application.contracts import dumps, loads, obj
 from erp_agent.application.ports import LLMRequest, LLMResponse
 from erp_agent.config import Settings
 from erp_agent.domain.errors import ERPError
@@ -18,52 +18,41 @@ class NoRedirect(HTTPRedirectHandler):
 class CompatibleLLMClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.protocol = create_protocol(settings.llm_provider)
 
     @property
     def configured(self) -> bool:
-        return bool(self.settings.llm_model and self.settings.llm_api_key)
+        return bool(self.settings.llm_model and (
+            self.settings.llm_api_key or not requires_api_key(self.settings)
+        ))
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         if not self.configured:
             raise ERPError("llm_not_configured", "请在服务端配置模型名称和 API 密钥。", 503)
         if len(request.system) + len(request.user) > self.settings.llm_max_input_chars:
             raise ERPError("llm_input_limit", "材料超过模型输入限制，请拆分文件或调高配置。")
-        response_format: dict[str, object] = {"type": self.settings.llm_format}
-        if self.settings.llm_format == "json_schema":
-            response_format["json_schema"] = {
-                "name": request.schema_name, "strict": True, "schema": loads(request.schema_json),
-            }
-        payload = json.dumps({
-            "model": self.settings.llm_model,
-            "messages": [{"role": "system", "content": request.system},
-                         {"role": "user", "content": request.user}],
-            "response_format": response_format,
-            "max_completion_tokens": self.settings.llm_max_output_tokens,
-        }, ensure_ascii=False).encode()
+        outgoing = self.protocol.build(request, self.settings)
+        payload = dumps(outgoing.payload).encode("utf-8")
         opener = build_opener(NoRedirect())
         for attempt in range(self.settings.llm_retries + 1):
-            req = Request(self.settings.llm_base_url.rstrip("/") + "/chat/completions",
-                          data=payload, headers={
-                              "Authorization": f"Bearer {self.settings.llm_api_key}",
-                              "Content-Type": "application/json",
-                          }, method="POST")
+            req = Request(outgoing.url, data=payload,
+                          headers={**outgoing.headers, "Content-Type": "application/json"},
+                          method="POST")
             try:
                 with opener.open(req, timeout=self.settings.llm_timeout) as response:
-                    raw = response.read(4 * 1024 * 1024 + 1)
-                if len(raw) > 4 * 1024 * 1024:
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
                     raise ERPError("llm_output_limit", "模型响应超过大小限制。", 502)
-                root = obj(loads(raw.decode("utf-8")))
-                choices = array(root.get("choices"))
-                if not choices:
-                    raise ERPError("llm_empty_response", "模型没有返回候选结果。", 502)
-                choice = obj(choices[0])
-                message = obj(choice.get("message"))
-                if message.get("refusal"):
-                    raise ERPError("llm_refusal", "模型拒绝生成结果。", 502)
-                if choice.get("finish_reason") != "stop":
-                    raise ERPError("llm_incomplete", "模型输出未正常完成，请调整输出上限。", 502)
-                return LLMResponse(string(message.get("content"), maximum=4 * 1024 * 1024),
-                                   string(root.get("model", self.settings.llm_model)))
+                try:
+                    root = obj(loads(raw.decode("utf-8")))
+                    result = self.protocol.parse(root, self.settings, request)
+                except (ERPError, UnicodeError) as exc:
+                    if isinstance(exc, ERPError) and exc.code.startswith("llm_"):
+                        raise
+                    raise ERPError("llm_invalid_response", "模型接口响应结构无效。", 502) from exc
+                if not result.content.strip():
+                    raise ERPError("llm_empty_response", "模型没有返回可用内容。", 502)
+                return result
             except HTTPError as exc:
                 if exc.code in {429, 500, 502, 503, 504} and attempt < self.settings.llm_retries:
                     time.sleep(min(2**attempt, 4))

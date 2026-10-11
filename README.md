@@ -20,18 +20,33 @@ python main.py
 
 打开 `http://127.0.0.1:8000`。使用项目虚拟环境时执行 `.venv/bin/python main.py`。数据默认保存在 `.erp-data/erp.sqlite3`，含原始文件、解析数据、题目版本、方案和任务状态；运行不依赖 `sample/`。
 
-登录后点击右上角“模型设置”，填写兼容接口地址、模型名称与 API 密钥，也可调整输出格式、超时及输入/输出上限。保存后用于新的模型请求；同一次读题及其格式修复保持使用原模型配置。接口不会返回已保存的 API 密钥，输入框留空保留旧密钥，勾选清除可删除。
+登录后点击右上角“模型设置”，选择接口类型，填写地址、模型名称与 API 密钥，也可调整输出格式、超时及输入/输出上限。保存后用于新的模型请求；同一次读题及其格式修复保持使用原模型配置。接口不会返回已保存的 API 密钥；同一接口留空保留旧密钥，切换接口类型或主机时清除旧密钥，需要重新填写。勾选清除可删除密钥。
 
 模型设置写入服务端数据目录的 `model-settings.json`（权限 `0600`），重启后仍生效；该文件存在时优先于模型环境配置。初始模型配置也可写在 `.env` 中。已有环境变量优先于 `.env`：
 
 ```dotenv
+ERP_LLM_PROVIDER=openai_chat
 ERP_LLM_BASE_URL=https://你的兼容接口/v1
 ERP_LLM_API_KEY=你的密钥
 ERP_LLM_MODEL=你的模型名称
 ERP_DEFAULT_SOLVER=llm_only
 ```
 
-模型接口使用 Chat Completions 格式，默认请求严格 JSON Schema。兼容服务不支持该格式时可设 `ERP_LLM_FORMAT=json_object`，服务端仍严格校验响应。不支持对应请求参数的供应商通过实现 `LLMClient` 并在组合根注入接入。当前环境无法访问官方文档或真实接口，兼容性需要在实际供应商上验证。
+支持以下接口类型，前端和 `ERP_LLM_PROVIDER` 使用同一配置：
+
+| 配置值 | 请求接口 | 地址留空时使用 |
+| --- | --- | --- |
+| `openai_chat` | OpenAI / 兼容 Chat Completions | `https://api.openai.com/v1` |
+| `openai_responses` | OpenAI Responses | `https://api.openai.com/v1` |
+| `anthropic` | Claude 原生 Messages | `https://api.anthropic.com/v1` |
+| `gemini` | Gemini 原生 generateContent | `https://generativelanguage.googleapis.com/v1beta` |
+| `ollama` | Ollama 原生 Chat | `http://localhost:11434` |
+
+接口地址可用基础 URL 或所选协议的完整端点，系统避免重复添加端点。DeepSeek、通义等提供 OpenAI 兼容接口的服务选 `openai_chat`，填写其对应地址和模型名；不是按模型名称推断协议。本机 Ollama 可不填 API 密钥，远程接口仍需要鉴权。
+
+默认 `ERP_LLM_FORMAT=json_schema`：OpenAI 请求 Schema，Claude 通过指定工具的结构化输入返回结果（不执行模型生成的工具），Gemini 设置 JSON Schema，Ollama 传入格式 Schema。模型或服务不支持 Schema 时可选 `json_object`；不支持结构化输出参数时选 `text`，只使用提示词要求 JSON，服务端继续严格校验实际响应，不保证模型一定遵从格式。OpenAI 兼容服务若不接受 `max_completion_tokens`，设置 `ERP_LLM_TOKEN_PARAMETER=max_tokens` 或在前端高级参数选择。
+
+供应商版本和模型能力可能限制结构化输出。当前环境无法访问官方文档或真实接口，适配经过固定请求/响应测试，仍需在实际供应商上验证；新的私有协议可扩展 `ModelProtocol`，或实现 `LLMClient` 后在组合根注入。
 
 未配置模型时可以上传和查看原文，读题与方案生成会显示配置缺口。DOCX 直接解析；旧 DOC 需要安装 LibreOffice，或替换 `DocumentConverter`。图片 OCR 暂未实现，系统会提示复核图片内的信息。
 
@@ -79,6 +94,6 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 node --check src/erp_agent/api/static/app.js
 ```
 
-测试动态生成最小 DOCX，模型使用固定响应，不依赖样例目录、外网或密钥。覆盖结构解析、数值证据、中文数字、有限格式修复、两种策略、任务取消、版本冲突、30 天会话、密钥轮换、接口鉴权、模型配置持久化、文件权限和项目删除期间的后台写入。HTTP 测试用内存连接执行真实请求处理器，适用于禁止创建套接字的沙箱；真实端口、浏览器显示与模型供应商仍需本机联调。
+测试动态生成最小 DOCX，模型使用固定响应，不依赖样例目录、外网或密钥。覆盖五类模型协议的请求格式、鉴权、响应解析与统一读题契约，以及结构解析、数值证据、中文数字、有限格式修复、两种策略、任务取消、版本冲突、30 天会话、密钥轮换、模型配置持久化、文件权限和项目删除期间的后台写入。HTTP 测试用内存连接执行真实请求处理器，适用于禁止创建套接字的沙箱；真实端口、浏览器显示与模型供应商仍需本机联调。
 
 开发工具配置在 `pyproject.toml`；可在可联网环境安装开发依赖并运行 Ruff 和 mypy。当前环境未能安装这些工具，因此未声称其检查已经通过。

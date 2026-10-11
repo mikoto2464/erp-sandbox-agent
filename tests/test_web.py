@@ -222,6 +222,16 @@ class WebTests(unittest.TestCase):
         self.request("/api/model-settings", {"clear_api_key": True})
         self.assertFalse(self.request("/api/model-settings")["api_key_set"])
 
+    def test_provider_setting_is_visible_and_switches_runtime_status(self):
+        metadata = self.request("/api/model-settings")
+        self.assertEqual(len(metadata["providers"]), 5)
+        changed = self.request("/api/model-settings", {"provider": "ollama", "model": "local-model"})
+        self.assertEqual(changed["base_url"], "http://localhost:11434")
+        self.assertFalse(changed["api_key_set"])
+        self.assertTrue(self.request("/api/status")["llm_configured"])
+        self.request("/api/model-settings", {"provider": "gemini", "model": "gemini-model"})
+        self.assertFalse(self.request("/api/status")["llm_configured"])
+
     def test_delete_project_cleans_every_record_and_blocks_late_write(self):
         project, result = self.setup_problem()
         repository = self.server.workflow.repository

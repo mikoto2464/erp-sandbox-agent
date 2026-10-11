@@ -69,7 +69,34 @@
   <dialog id="project-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建项目</h2><button type="button" data-close="project-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="project-name">项目名称</label><input id="project-name" maxlength="100" required autofocus><div class="dialog-footer"><button type="button" data-close="project-dialog" class="secondary">取消</button><button class="primary">创建</button></div></form></dialog>
   <dialog id="delete-dialog"><form id="delete-form"><div class="dialog-heading"><h2>删除项目</h2><button type="button" data-close="delete-dialog" class="icon-button" aria-label="关闭">×</button></div><p>删除“<strong id="delete-name"></strong>”及其所有文件、题目版本和方案？此操作无法撤销。</p><div class="dialog-footer"><button type="button" data-close="delete-dialog" class="secondary">取消</button><button class="danger">删除项目</button></div></form></dialog>
   <dialog id="revision-dialog"><form id="revision-form"><div class="dialog-heading"><h2>保存新版本</h2><button type="button" data-close="revision-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="revision-note">修改依据</label><input id="revision-note" placeholder="例如：平台确认利率按季计算" required><div class="dialog-footer"><button type="button" data-close="revision-dialog" class="secondary">取消</button><button class="primary">保存并校验</button></div></form></dialog>
-  <dialog id="settings-dialog"><form id="settings-form"><div class="dialog-heading"><h2>模型设置</h2><button type="button" data-close="settings-dialog" class="icon-button" aria-label="关闭">×</button></div><p id="settings-status" class="muted"></p><label for="model-url">接口地址</label><input id="model-url" type="url" required placeholder="https://你的接口/v1"><label for="model-name">模型名称</label><input id="model-name" required maxlength="200" placeholder="输入供应商提供的模型名称"><label for="model-key">API 密钥</label><input id="model-key" type="password" autocomplete="new-password" maxlength="2048"><label class="check"><input id="clear-model-key" type="checkbox">清除已保存的 API 密钥</label><details class="advanced"><summary>高级参数</summary><div class="form-grid"><label>输出格式<select id="model-format"><option value="json_schema">严格 JSON Schema</option><option value="json_object">兼容 JSON</option></select></label><label>超时（秒）<input id="model-timeout" type="number" min="5" max="300" value="90"></label><label>输入字符上限<input id="model-input-limit" type="number" min="10000" max="1000000" value="100000"></label><label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="64000" value="12000"></label></div></details><p class="muted">密钥保存在服务器。留空可保留原密钥，保存后立即用于新请求。</p><div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button class="primary">保存设置</button></div></form></dialog>
+  <dialog id="settings-dialog">
+    <form id="settings-form">
+      <div class="dialog-heading"><h2>模型设置</h2><button type="button" data-close="settings-dialog" class="icon-button" aria-label="关闭">×</button></div>
+      <p id="settings-status" class="muted"></p>
+      <label for="model-provider">接口类型</label>
+      <select id="model-provider"></select>
+      <p id="provider-help" class="muted"></p>
+      <label for="model-url">接口地址</label>
+      <input id="model-url" type="url" required>
+      <label for="model-name">模型名称</label>
+      <input id="model-name" required maxlength="200" placeholder="输入供应商提供的模型名称">
+      <label for="model-key">API 密钥</label>
+      <input id="model-key" type="password" autocomplete="new-password" maxlength="2048">
+      <label class="check"><input id="clear-model-key" type="checkbox">清除已保存的 API 密钥</label>
+      <details class="advanced">
+        <summary>高级参数</summary>
+        <div class="form-grid">
+          <label>输出格式<select id="model-format"><option value="json_schema">结构化 Schema</option><option value="json_object">JSON 对象</option><option value="text">提示词约束 JSON</option></select></label>
+          <label id="token-parameter-field">Token 上限参数<select id="model-token-parameter"><option value="max_completion_tokens">max_completion_tokens</option><option value="max_tokens">max_tokens</option></select></label>
+          <label>超时（秒）<input id="model-timeout" type="number" min="5" max="300" value="90"></label>
+          <label>输入字符上限<input id="model-input-limit" type="number" min="10000" max="1000000" value="100000"></label>
+          <label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="64000" value="12000"></label>
+        </div>
+      </details>
+      <p class="muted">密钥保存在服务器。同一接口留空保留原密钥；切换接口类型或主机后需重新填写。本机 Ollama 可不填。</p>
+      <div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button class="primary">保存设置</button></div>
+    </form>
+  </dialog>
   <aside id="evidence-drawer" class="evidence-drawer" hidden><div class="dialog-heading"><h2>原文证据</h2><button id="close-evidence" class="icon-button" aria-label="关闭证据">×</button></div><div id="evidence-content"></div></aside>
   <dialog id="discard-dialog"><div class="dialog-heading"><h2>有未保存的修改</h2><button type="button" data-close="discard-dialog" class="icon-button" aria-label="关闭">×</button></div><p>离开后将丢弃当前修改。</p><div class="dialog-footer"><button type="button" data-close="discard-dialog" class="secondary">返回修改</button><button id="discard-confirm" type="button" class="danger">丢弃并离开</button></div></dialog>
 </body>
