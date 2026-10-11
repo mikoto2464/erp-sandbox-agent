@@ -71,7 +71,8 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
         issues.append(Issue("validation.initial_cash", "warning", "initial_cash", "缺少初始现金。"))
 
     def period_value(key: str) -> int | None:
-        matches = [f for f in initial if f.key == key and f.state == KnowledgeState.KNOWN
+        matches = [f for f in initial if f.key == key
+                   and f.state in {KnowledgeState.KNOWN, KnowledgeState.ASSUMED}
                    and f.value_type == "integer" and f.value is not None]
         if len(matches) != 1:
             return None

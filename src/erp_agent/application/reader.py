@@ -3,6 +3,7 @@ from importlib.resources import files
 from typing import Callable
 
 from erp_agent.application.contracts import READING_SCHEMA, JSONObject, decode_reading, dumps
+from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl
 from erp_agent.domain.models import Issue, ParsedDocument, ReadingResult
 from erp_agent.domain.errors import ERPError
@@ -29,7 +30,7 @@ class StructuredReader:
                 dumps({"documents": documents_json}), "erp_reading", schema,
             ))
             control.checkpoint("validating")
-            reading = decode_reading(response.content, response.model)
+            reading = decode_reading(normalize_model_json(response.content), response.model)
         except ERPError as error:
             if response is None and error.code != "llm_structured_response":
                 raise
@@ -43,12 +44,13 @@ class StructuredReader:
                 "erp_reading", schema,
             ))
             control.checkpoint("validating")
-            reading = decode_reading(response.content, response.model)
+            reading = decode_reading(normalize_model_json(response.content), response.model)
         source_issues = tuple(
             Issue("reading.source_warning", "warning", doc.source.id, warning)
             for doc in documents for warning in doc.warnings
         )
-        reading = replace(reading, prompt_version="reader-2", issues=reading.issues + source_issues)
+        reading = replace(reading, prompt_version="reader-2", raw_response=response.content,
+                          issues=reading.issues + source_issues)
         return validate_reading(reading, tuple(e for doc in documents for e in doc.evidence))
 
     @staticmethod

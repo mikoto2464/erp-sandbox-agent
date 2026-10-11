@@ -165,3 +165,28 @@ class ReadingTests(unittest.TestCase):
         warnings = [issue for issue in result.issues if issue.code == "reading.source_warning"]
         self.assertEqual(len(warnings), 1)
         self.assertIn("OCR", warnings[0].message)
+
+    def test_assumed_horizon_is_usable_and_preserves_status(self):
+        reading = self.result()
+        facts = reading.problem.facts + tuple(
+            Fact(key, 'initial', 'company', '公司', key, value, 'integer', '',
+                 KnowledgeState.ASSUMED, (), explanation='暂定经营周期')
+            for key, value in [('years', '4'), ('periods_per_year', '4')])
+        result = validate_reading(replace(reading, problem=replace(reading.problem, facts=facts)),
+                                  (Evidence('p1', 'doc', '格', '100000'),))
+        self.assertEqual((result.problem.years, result.problem.periods_per_year), (4, 4))
+        self.assertEqual(result.problem.facts[1].state, KnowledgeState.ASSUMED)
+        self.assertFalse(any(i.code == 'validation.horizon_missing' for i in result.issues))
+        self.assertTrue(any(i.code == 'validation.uncertain' for i in result.issues))
+
+    def test_reader_unwraps_whole_json_fence_without_extra_model_call(self):
+        document = OOXMLDocumentParser().parse(
+            SourceDocument('d', 'topic.docx', 'hash', 0, 'docx'), docx_bytes(),
+        )
+        content = '```json\n' + dumps(editable_reading(
+            self.result(refs=(document.evidence[0].id,)))) + '\n```'
+        llm = FakeLLM(content)
+        result = StructuredReader(llm).read((document,), Control())
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(result.raw_response, content)
+        self.assertEqual(result.problem.facts[0].state, KnowledgeState.KNOWN)

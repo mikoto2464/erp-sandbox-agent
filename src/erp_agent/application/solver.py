@@ -2,9 +2,11 @@ import random
 from dataclasses import replace
 from decimal import ROUND_FLOOR
 from importlib.resources import files
+from typing import Callable
 from uuid import uuid4
 
 from erp_agent.application.contracts import PROPOSAL_SCHEMA, decode_proposal, dumps
+from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import (
     LLMClient, LLMRequest, PlanEvaluator, RunControl, StrategyGenerator,
 )
@@ -16,17 +18,45 @@ from erp_agent.domain.models import (
 
 
 class LLMStrategyGenerator:
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(self, llm: LLMClient, on_repair: Callable[[], None] | None = None,
+                 search_parameters: bool = True) -> None:
         self.llm = llm
+        self.on_repair = on_repair
+        self.search_parameters = search_parameters
 
     def propose(self, snapshot: ProblemSnapshot) -> StrategyProposal:
         prompt = files("erp_agent").joinpath("prompts/solver.txt").read_text(encoding="utf-8")
         schema = dumps(PROPOSAL_SCHEMA)
-        response = self.llm.generate(LLMRequest(
-            prompt + "\nJSON schema:\n" + schema,
-            dumps({"snapshot": snapshot}), "erp_strategy", schema,
-        ))
-        return decode_proposal(response.content, response.model)
+        material = {"project_id": snapshot.project_id, "problem_version": snapshot.version,
+                    "problem": snapshot.reading.problem, "rules": snapshot.reading.rules,
+                    "issues": snapshot.reading.issues}
+        instruction = ("生成包含基线值的搜索参数。" if self.search_parameters
+                       else "当前为单 LLM 模式，无需搜索参数，parameters 必须为空数组。")
+        payload = {"snapshot": material, "mode_instruction": instruction}
+        for attempt in range(2):
+            response = None
+            try:
+                response = self.llm.generate(LLMRequest(
+                    prompt + "\nJSON schema:\n" + schema,
+                    dumps(payload), "erp_strategy", schema,
+                ))
+                proposal = decode_proposal(normalize_model_json(response.content), response.model)
+                return replace(proposal, raw_response=response.content)
+            except ERPError as error:
+                if response is None and error.code != "llm_structured_response":
+                    raise
+                if attempt:
+                    raise ERPError("strategy_output_invalid",
+                                   "模型连续两次未返回符合要求的方案结构。"
+                                   f"校验原因：{error.message} 请检查输出格式后重试。", 502) from error
+                if self.on_repair:
+                    self.on_repair()
+                payload = {"snapshot": material, "mode_instruction": instruction,
+                           "previous_output": response.content if response else None,
+                           "error": error.message,
+                           "instruction": "修正方案 JSON 的语法和字段类型，保持题目及方案依据。"
+                                          "只返回一个完整 JSON 对象，不附加 Markdown 或说明。"}
+        raise ERPError("strategy_output_invalid", "未生成有效的方案结构。", 502)
 
 
 class DraftPlanEvaluator:

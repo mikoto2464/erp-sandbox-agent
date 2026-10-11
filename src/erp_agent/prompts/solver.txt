@@ -8,3 +8,4 @@ amount 使用金额字符串或 null，quantity 使用非负整数或 null，不
 kind 使用简洁稳定的英文动作名，description 说明操作与前置条件。
 parameters 可为空；若提供则是允许搜索的金额/数量范围，action_index 从 0 开始。
 范围须包含基线值并说明风险；不输出任何自称已计算或已验证的评分。
+不得使用 Markdown 代码块、自然语言前后缀或多段 JSON。所有必需字段必须出现；没有值时按 schema 使用 null 或空数组。

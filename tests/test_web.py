@@ -92,12 +92,14 @@ class WebTests(unittest.TestCase):
         eid = docs[0]["evidence"][0]["id"]
         facts = []
         for key, value, kind in [("initial_cash", "100000", "number"),
-                                 ("years", "4", "integer"), ("periods_per_year", "4", "integer")]:
+                                 ("years", "1", "integer"), ("periods_per_year", "2", "integer")]:
             facts.append({"id": key, "category": "initial", "entity_id": "company",
                           "entity_name": "公司", "key": key, "value": value, "value_type": kind,
                           "unit": "", "state": "known", "evidence_ids": [eid],
                           "conversion": "identity", "explanation": ""})
-        facts[1]["state"] = "assumed"
+        for fact in facts[1:]:
+            fact["state"] = "assumed"
+            fact["explanation"] = "测试情景：经营一年，每年两期"
         self.llm.response = dumps({"title": "测试题目", "facts": facts, "rules": [], "issues": []})
         job = self.request(base + "/read", {})
         self.assertEqual(self.wait_job(project, job["id"])["status"], "succeeded")
@@ -422,3 +424,32 @@ class WebTests(unittest.TestCase):
             self.request(f"/api/projects/{project}/solve", {"version": revision["version"]})
         self.assertEqual(invalid.exception.code, 409)
         self.assertEqual(len(self.llm.calls), calls)
+
+    def test_missing_horizon_blocks_generation_and_assumption_revision_unlocks(self):
+        project, result = self.setup_problem()
+        base = f'/api/projects/{project}'
+        facts = [f for f in result['snapshot']['reading']['problem']['facts']
+                 if f['key'] == 'initial_cash']
+        revised = self.request(base + '/revisions', {
+            'expected_version': 1, 'note': '测试未提供周期',
+            'reading': {'title': '未提供周期', 'facts': facts, 'rules': [], 'issues': []},
+        })
+        before = len(self.llm.calls)
+        with self.assertRaises(HTTPError) as error:
+            self.request(base + '/solve', {'version': revised['version']})
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn('reading_horizon_missing', error.exception.msg)
+        self.assertEqual(len(self.llm.calls), before)
+        for key, value in [('years', '1'), ('periods_per_year', '2')]:
+            facts.append({'id': key, 'category': 'initial', 'entity_id': 'company',
+                          'entity_name': '公司', 'key': key, 'value': value,
+                          'value_type': 'integer', 'unit': '', 'state': 'assumed',
+                          'evidence_ids': [], 'conversion': 'identity',
+                          'explanation': '明确假设一年两期'})
+        self.request(base + '/revisions', {
+            'expected_version': 2, 'note': '采用假设周期',
+            'reading': {'title': '假设周期', 'facts': facts, 'rules': [], 'issues': []},
+        })
+        self.llm.response = proposal_json()
+        job = self.request(base + '/solve', {'version': 3})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')

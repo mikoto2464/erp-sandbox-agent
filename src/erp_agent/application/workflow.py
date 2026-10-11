@@ -164,6 +164,8 @@ class WorkflowService:
                                                             integer(data.get("version"))))
         if any(issue.severity == "error" for issue in snapshot.reading.issues):
             raise ERPError("reading_needs_revision", "请先修正读题错误并保存新版本。", 409)
+        if not snapshot.reading.problem.years or not snapshot.reading.problem.periods_per_year:
+            raise ERPError("reading_horizon_missing", "请在读题复核中补充经营年数和每年期数，保存校验后再生成方案。", 409)
         try:
             mode = SolverMode(string(data.get("mode", self.default_solver.value)))
         except ValueError as exc:
@@ -179,9 +181,15 @@ class WorkflowService:
         binding = self.model_settings.capture() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
-        generator = LLMStrategyGenerator(binding.client) if binding else None
 
         def operation(control: RunControl) -> JSONValue:
+            generator = self.solver.generator
+            if binding or isinstance(generator, LLMStrategyGenerator):
+                generator = LLMStrategyGenerator(
+                    binding.client if binding else generator.llm,
+                    lambda: control.checkpoint("repairing_strategy"),
+                    search_parameters=mode == SolverMode.LLM_MONTE_CARLO,
+                )
             result = self.solver.solve(request, control, generator)
             self.repository.put("solution", project_id, result.id, result)
             return {"solution_id": result.id, "verified": result.evaluation.verified,
