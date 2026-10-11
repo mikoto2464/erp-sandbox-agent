@@ -123,7 +123,7 @@ class OOXMLDocumentParser:
         if not any(e.text.strip() for e in evidence):
             raise ERPError("empty_document", "文档没有可读取文字，可能需要 OCR。")
         return contextualize_document(ParsedDocument(
-            source, tuple(blocks), tuple(evidence), tuple(warnings), parser_version="ooxml-2",
+            source, tuple(blocks), tuple(evidence), tuple(warnings), parser_version="ooxml-3",
             converted_sha256=converted_hash,
         ))
 

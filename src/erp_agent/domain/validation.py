@@ -10,15 +10,36 @@ CHINESE_COUNT = re.compile(
     rf"(?<![{CHINESE_DIGITS}\dA-Za-z.\-])([{CHINESE_DIGITS}]+)(?=年|季|个|期|月)",
 )
 UNIT_MARKERS = {"percent_to_ratio": ("%", "％"), "wan_to_yuan": ("万元", "万")}
+UNSPECIFIED_UNITS = {"无", "无单位", "不清楚", "不明确", "未知", "未注明", "未提供", "unknown"}
+
+
+def _normalized_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"(?<=[\u3400-\u9fff]) (?=[\u3400-\u9fff])", "", text)
+
+
+def _only_unspecified_unit(issue: Issue) -> bool:
+    return (issue.code.split(".")[-1].lower() in {
+        "ambiguous_unit", "missing_unit", "unit_missing", "unknown_unit", "unit_unknown",
+    } and bool(re.search(r"未(?:明确|注明|提供|说明|列明)|不(?:清楚|明确)|未知|缺少", issue.message))
+        and not re.search(r"冲突|不一致|换算|倍率|百分|万元|周期", issue.message))
 
 
 def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> ReadingResult:
     sources = {e.id: e for e in evidence}
     issues = [i for i in reading.issues if not i.code.startswith("validation.")]
+    unit_issues = [i for i in issues if _only_unspecified_unit(i)]
+    unit_targets = {i.target for i in unit_issues}
+    issues = [replace(i, code="review.resolved." + i.code, severity="info",
+                      message=i.message + "；单位未注明，按无单位处理，保留原数值。")
+              if i in unit_issues else i for i in issues]
     ids: set[str] = set()
     normalized: list[Fact] = []
     for fact in reading.problem.facts:
         current = _attach_unit_headers(fact, sources)
+        unit = current.unit.strip()
+        current = replace(current, unit="" if unit.lower() in UNSPECIFIED_UNITS or (
+            current.id in unit_targets and current.conversion == "identity") else unit)
         if not fact.id or fact.id in ids:
             issues.append(Issue("validation.duplicate_id", "error", fact.id, "字段 ID 为空或重复。"))
         ids.add(fact.id)
@@ -38,12 +59,16 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
                 _number_supported(current, linked) if fact.value_type in {"number", "integer"}
-                else any(fact.value in e.text for e in linked)
+                else bool(_normalized_text(fact.value)) and any(
+                    _normalized_text(fact.value) in _normalized_text(e.text) for e in linked)
             )
             if not supported:
                 current = replace(current, state=KnowledgeState.CONFLICTED)
                 issues.append(Issue("validation.unsupported_value", "error", fact.id,
-                                    "原文证据无法支持该值及其单位转换。", current.evidence_ids))
+                                    "原文证据无法支持这段文字，请核对内容与来源。"
+                                    if fact.value_type == "text" else
+                                    "原文证据无法支持该数值或所选转换，请核对数据格及适用表头。",
+                                    current.evidence_ids))
         if current.state in {KnowledgeState.ASSUMED, KnowledgeState.CONFLICTED}:
             issues.append(Issue("validation.uncertain", "warning", fact.id,
                                 "该字段仍是显式假设或冲突，使用前需复核。", current.evidence_ids))

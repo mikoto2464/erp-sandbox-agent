@@ -8,7 +8,7 @@ from erp_agent.adapters.model_settings import RuntimeLLMClient
 from erp_agent.application.ports import LLMResponse
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    Evidence, Fact, KnowledgeState, ProblemSpec, ReadingResult, RuleSet, SourceDocument,
+    Evidence, Fact, Issue, KnowledgeState, ProblemSpec, ReadingResult, RuleSet, SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 from tests.helpers import Control, FakeLLM, docx_bytes
@@ -23,6 +23,48 @@ class ReadingTests(unittest.TestCase):
     def test_supported_value_and_chinese_prefix(self):
         result = validate_reading(self.result(), (Evidence("p1", "doc", "段落", "初始资本100000元"),))
         self.assertEqual(result.problem.facts[0].state, KnowledgeState.KNOWN)
+
+    def test_text_layout_whitespace_is_supported_without_changing_meaning(self):
+        for value, source, supported in [
+            ("每季付息，到期还本", "每季付息，到期还 本", True),
+            ("本息同还", "每季付息，到期还 本", False),
+            ("AB", "A B", False),
+        ]:
+            with self.subTest(value=value, source=source):
+                checked = validate_reading(self.result(value, kind="text"),
+                                           (Evidence("p1", "doc", "格", source),))
+                self.assertEqual(checked.problem.facts[0].state == KnowledgeState.KNOWN,
+                                 supported)
+                if not supported:
+                    message = next(i.message for i in checked.issues
+                                   if i.code == "validation.unsupported_value")
+                    self.assertIn("文字", message)
+                    self.assertNotIn("单位", message)
+
+    def test_unspecified_unit_is_empty_and_does_not_change_value_or_conversion(self):
+        for unit in ("", "无", "不清楚", "unknown"):
+            reading = self.result("50")
+            reading = replace(reading, problem=replace(
+                reading.problem, facts=(replace(reading.problem.facts[0], unit=unit),)))
+            checked = validate_reading(reading, (Evidence("p1", "doc", "格", "50"),))
+            fact = checked.problem.facts[0]
+            self.assertEqual((fact.value, fact.unit, fact.state), ("50", "", KnowledgeState.KNOWN))
+        checked = validate_reading(self.result("0.5", "percent_to_ratio"),
+                                   (Evidence("p1", "doc", "格", "50"),))
+        self.assertEqual(checked.problem.facts[0].state, KnowledgeState.CONFLICTED)
+
+    def test_only_missing_unit_warning_uses_default_and_keeps_real_conflict(self):
+        reading = replace(self.result("50"), issues=(
+            Issue("ambiguous_unit", "warning", "cash", "数值单位未注明，需补充单位。"),
+            Issue("ambiguous_unit", "error", "cash", "单位未明确，元与万元口径冲突。"),
+        ))
+        checked = validate_reading(reading, (Evidence("p1", "doc", "格", "50"),))
+        fact = checked.problem.facts[0]
+        self.assertEqual((fact.value, fact.unit, fact.state), ("50", "", KnowledgeState.KNOWN))
+        self.assertTrue(any(i.code == "review.resolved.ambiguous_unit" and i.severity == "info"
+                            for i in checked.issues))
+        self.assertTrue(any(i.code == "ambiguous_unit" and i.severity == "error"
+                            for i in checked.issues))
 
     def test_wrong_value_and_bad_reference(self):
         for result in [self.result("72000"), self.result(refs=("wrong",))]:
@@ -106,7 +148,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-3")
+        self.assertEqual(result.prompt_version, "reader-4")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)

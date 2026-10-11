@@ -5,6 +5,7 @@
   font-synthesis:none;
   --primary:#3e58db;
   --muted:#758094;
+  --text:#202b3b;
   --line:#e5e8ef;
   --red:#b83e46;
 }
@@ -1058,6 +1059,9 @@ pre {
 .issue-heading { display:flex; gap:12px; align-items:center; margin-bottom:10px; }
 .issue-item p { margin:8px 0; }
 .issue-item .actions { margin-top:13px; flex-wrap:wrap; }
+.issue-value { color:var(--text); background:var(--surface-soft,#f4f7fb); border-radius:7px; padding:10px 12px; overflow-wrap:anywhere; }
+.issue-explanation { display:grid; gap:7px; margin-top:14px; color:var(--text); font-weight:500; }
+.issue-explanation textarea { resize:vertical; min-height:70px; font-weight:400; }
 .rules-heading { gap:15px; margin:18px 0; }
 .rules-heading p { margin:0; }
 .rules-heading button { flex-shrink:0; }

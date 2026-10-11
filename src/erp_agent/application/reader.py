@@ -49,7 +49,7 @@ class StructuredReader:
             Issue("reading.source_warning", "warning", doc.source.id, warning)
             for doc in documents for warning in doc.warnings
         )
-        reading = replace(reading, prompt_version="reader-3", raw_response=response.content,
+        reading = replace(reading, prompt_version="reader-4", raw_response=response.content,
                           issues=reading.issues + source_issues)
         return validate_reading(reading, tuple(e for doc in documents for e in doc.evidence))
 

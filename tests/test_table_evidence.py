@@ -63,6 +63,26 @@ class TableEvidenceTests(unittest.TestCase):
                                    tuple(e for e in document.evidence if e.id != other.id) + (other,))
         self.assertEqual(checked.problem.facts[0].state, KnowledgeState.CONFLICTED)
 
+    def test_matching_continuation_inherits_header_but_new_section_or_row_type_does_not(self):
+        first = table([['名称', '收款期（季）', '贴息（%）'], ['4 季贴现', '4', '8']])
+        continuation = table([['3 季贴现', '3', '6'], ['1 季贴现', '1', '2']])
+        document = self.parse(first + '<w:p/><w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+                              + continuation + '<w:p/>' + table([['2 季贴现', '2', '4']]))
+        checked = validate_reading(self.reading('doc:t3:r1:c2', '0.02'), document.evidence)
+        self.assertEqual(checked.problem.facts[0].state, KnowledgeState.KNOWN)
+        self.assertIn('doc:t0:r0:c2', checked.problem.facts[0].evidence_ids)
+        checked = validate_reading(self.reading('doc:t5:r0:c2', '0.04'), document.evidence)
+        self.assertEqual(checked.problem.facts[0].state, KnowledgeState.KNOWN)
+        for separator, next_table in [
+            ('<w:p><w:r><w:t>其他参数</w:t></w:r></w:p>', continuation),
+            ('<w:p/>', table([['生产线', '1', '2']])),
+        ]:
+            with self.subTest(separator=separator, next_table=next_table):
+                document = self.parse(first + separator + next_table)
+                checked = validate_reading(self.reading('doc:t2:r0:c2', '0.02',
+                                                       refs=('doc:t0:r0:c2',)), document.evidence)
+                self.assertEqual(checked.problem.facts[0].state, KnowledgeState.CONFLICTED)
+
     def test_merged_multilevel_unit_header_supports_only_columns_it_covers(self):
         xml = ('<w:tbl><w:tr>' + cell('名称', '<w:vMerge w:val="restart"/>')
                + cell('效率（％）', '<w:gridSpan w:val="2"/>') + cell('数量') + '</w:tr>'
