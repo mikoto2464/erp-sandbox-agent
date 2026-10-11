@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERP 沙盘</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="toast" role="status" hidden></div>
+  <section id="login-view" class="login-view">
+    <form id="login-form" class="login-card">
+      <div class="logo">E<span>ERP 沙盘</span></div>
+      <h1>登录</h1>
+      <label for="access-key">访问密钥</label>
+      <input id="access-key" type="password" autocomplete="current-password" maxlength="2048" required autofocus>
+      <label class="check"><input id="remember" type="checkbox" checked>记住此浏览器 · 30 天</label>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <button id="login-button" class="primary full">进入系统</button>
+    </form>
+  </section>
+  <div id="app-view" hidden>
+    <header class="topbar"><button id="home" class="logo brand-button" aria-label="返回项目列表">E<span>ERP 沙盘</span></button><div class="topbar-actions"><button id="open-settings" class="quiet">模型设置 <span id="model-dot" class="dot"></span></button><button id="logout" class="quiet">退出</button></div></header>
+    <main>
+      <section id="project-view">
+        <div class="page-heading"><div><p class="eyebrow">项目</p><h1>我的项目</h1></div><button id="new-project" class="primary">＋ 新建项目</button></div>
+        <div id="project-list" class="project-grid"></div>
+        <div id="no-projects" class="empty" hidden>暂无项目<button id="empty-create" class="quiet">新建项目</button></div>
+      </section>
+      <section id="flow-view" hidden>
+        <div class="flow-heading"><button id="back-projects" class="quiet">← 项目列表</button><div><h1 id="project-title"></h1><span id="project-subtitle" class="muted"></span></div><button id="delete-current" class="danger-text">删除项目</button></div>
+        <nav class="steps" aria-label="操作步骤">
+          <button data-step="1" class="step active"><span class="step-number">1</span><span>上传题目<small id="step1-caption">添加赛题与补充文件</small></span></button>
+          <button data-step="2" class="step"><span class="step-number">2</span><span>读题复核<small id="step2-caption">核对数据与规则</small></span></button>
+          <button data-step="3" class="step"><span class="step-number">3</span><span>生成方案<small id="step3-caption">选择解题策略</small></span></button>
+        </nav>
+        <section id="step-1" class="step-panel card">
+          <div class="section-heading"><h2>题目文件</h2><span id="upload-limit" class="muted"></span></div>
+          <label id="drop-zone" class="drop-zone" for="files"><span class="upload-icon">↑</span><strong>点击选择，或拖入文件</strong><span class="muted">DOCX / DOC · 可一次添加多个文件</span><input id="files" type="file" accept=".docx,.doc" multiple></label>
+          <div id="documents" class="file-list"></div>
+          <details id="source-preview"><summary>查看原文</summary><div id="source-content"></div></details>
+          <div id="model-required" class="notice" hidden>请先配置读题模型。<button id="configure-model" class="text-button">打开模型设置</button></div>
+          <div class="panel-footer"><span id="selected-count" class="muted"></span><button id="read" class="primary" disabled>读取题目 →</button></div>
+        </section>
+        <section id="step-2" class="step-panel" hidden>
+          <div class="review-toolbar"><div><h2>读题结果</h2><span id="reading-model" class="muted"></span></div><div class="actions"><select id="versions" aria-label="题目版本"></select><button id="reread" class="secondary">重新读题</button></div></div>
+          <div id="reading-empty" class="card empty">尚未生成读题结果。</div>
+          <div id="review" hidden>
+            <div class="metrics"><div><strong id="metric-facts">0</strong><span>规范字段</span></div><div><strong id="metric-errors">0</strong><span>冲突 / 错误</span></div><div><strong id="metric-pending">0</strong><span>待确认</span></div><div><strong id="metric-rules">0</strong><span>规则</span></div></div>
+            <div class="card review-card">
+              <div class="review-tabs" role="tablist"><button data-review="facts" class="active">数据</button><button data-review="rules">规则</button><button data-review="issues">待核对事项 <span id="issue-count"></span></button></div>
+              <div id="facts-panel"><div class="filters"><input id="fact-search" type="search" placeholder="搜索对象或字段" aria-label="搜索字段"><select id="category-filter" aria-label="字段分类"><option value="">全部分类</option></select><select id="state-filter" aria-label="字段状态"><option value="">全部状态</option><option value="known">已知</option><option value="assumed">假设</option><option value="conflicted">冲突</option><option value="missing">缺失</option></select></div><div class="table-wrap"><table class="fact-table"><thead><tr><th>对象 / 字段</th><th>值</th><th>单位</th><th>状态</th><th>证据</th></tr></thead><tbody id="facts"></tbody></table></div><p id="no-facts" class="empty" hidden>没有匹配的字段。</p></div>
+              <div id="rules-panel" hidden><div id="rules"></div></div>
+              <div id="issues-panel" hidden><div id="issues"></div></div>
+              <details class="advanced"><summary>高级：结构化数据</summary><textarea id="reading-json" rows="16" spellcheck="false" aria-label="结构化读题数据"></textarea><button id="apply-json" class="secondary">应用修改</button></details>
+              <div class="panel-footer"><span id="dirty-note" class="muted">修改后请保存新版本</span><div class="actions"><button id="save-revision" class="secondary" disabled>保存修改</button><button id="next-solve" class="primary">继续生成方案 →</button></div></div>
+            </div>
+          </div>
+        </section>
+        <section id="step-3" class="step-panel" hidden>
+          <div class="card"><div class="section-heading"><h2>解题策略</h2><span id="solve-version" class="muted"></span></div><div class="strategy-options"><label class="strategy-option"><input type="radio" name="solver-mode" value="llm_only" checked><span><strong>单 LLM</strong><small>生成一套方案草稿</small></span></label><label class="strategy-option"><input type="radio" name="solver-mode" value="llm_monte_carlo"><span><strong>LLM + 蒙特卡罗</strong><small>搜索并比较候选方案</small></span></label></div><div id="search-config" class="form-grid" hidden><label>随机种子<input id="seed" type="number" min="0" max="4294967295" value="42"></label><label>候选数量<input id="candidates" type="number" min="1" max="2000" value="100"></label></div><p id="solver-note" class="notice"></p><div class="panel-footer"><button id="back-review" class="quiet">← 返回复核</button><button id="solve" class="primary" disabled>生成方案</button></div></div>
+          <div id="solutions"></div>
+        </section>
+        <section class="task-section"><details id="task-details"><summary>任务记录 <span id="task-count" class="muted"></span></summary><div id="jobs"></div></details><div id="active-job" class="active-job" hidden></div></section>
+      </section>
+    </main>
+  </div>
+  <dialog id="project-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建项目</h2><button type="button" data-close="project-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="project-name">项目名称</label><input id="project-name" maxlength="100" required autofocus><div class="dialog-footer"><button type="button" data-close="project-dialog" class="secondary">取消</button><button class="primary">创建</button></div></form></dialog>
+  <dialog id="delete-dialog"><form id="delete-form"><div class="dialog-heading"><h2>删除项目</h2><button type="button" data-close="delete-dialog" class="icon-button" aria-label="关闭">×</button></div><p>删除“<strong id="delete-name"></strong>”及其所有文件、题目版本和方案？此操作无法撤销。</p><div class="dialog-footer"><button type="button" data-close="delete-dialog" class="secondary">取消</button><button class="danger">删除项目</button></div></form></dialog>
+  <dialog id="revision-dialog"><form id="revision-form"><div class="dialog-heading"><h2>保存新版本</h2><button type="button" data-close="revision-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="revision-note">修改依据</label><input id="revision-note" placeholder="例如：平台确认利率按季计算" required><div class="dialog-footer"><button type="button" data-close="revision-dialog" class="secondary">取消</button><button class="primary">保存并校验</button></div></form></dialog>
+  <dialog id="settings-dialog"><form id="settings-form"><div class="dialog-heading"><h2>模型设置</h2><button type="button" data-close="settings-dialog" class="icon-button" aria-label="关闭">×</button></div><p id="settings-status" class="muted"></p><label for="model-url">接口地址</label><input id="model-url" type="url" required placeholder="https://你的接口/v1"><label for="model-name">模型名称</label><input id="model-name" required maxlength="200" placeholder="输入供应商提供的模型名称"><label for="model-key">API 密钥</label><input id="model-key" type="password" autocomplete="new-password" maxlength="2048"><label class="check"><input id="clear-model-key" type="checkbox">清除已保存的 API 密钥</label><details class="advanced"><summary>高级参数</summary><div class="form-grid"><label>输出格式<select id="model-format"><option value="json_schema">严格 JSON Schema</option><option value="json_object">兼容 JSON</option></select></label><label>超时（秒）<input id="model-timeout" type="number" min="5" max="300" value="90"></label><label>输入字符上限<input id="model-input-limit" type="number" min="10000" max="1000000" value="100000"></label><label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="64000" value="12000"></label></div></details><p class="muted">密钥保存在服务器。留空可保留原密钥，保存后立即用于新请求。</p><div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button class="primary">保存设置</button></div></form></dialog>
+  <aside id="evidence-drawer" class="evidence-drawer" hidden><div class="dialog-heading"><h2>原文证据</h2><button id="close-evidence" class="icon-button" aria-label="关闭证据">×</button></div><div id="evidence-content"></div></aside>
+  <dialog id="discard-dialog"><div class="dialog-heading"><h2>有未保存的修改</h2><button type="button" data-close="discard-dialog" class="icon-button" aria-label="关闭">×</button></div><p>离开后将丢弃当前修改。</p><div class="dialog-footer"><button type="button" data-close="discard-dialog" class="secondary">返回修改</button><button id="discard-confirm" type="button" class="danger">丢弃并离开</button></div></dialog>
+</body>
+</html>

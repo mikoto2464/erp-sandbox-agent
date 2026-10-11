@@ -1,0 +1,81 @@
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from erp_agent.domain.models import SolverMode
+
+
+def load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or not key.strip().startswith("ERP_"):
+            raise ValueError(".env 只能包含 ERP_ 开头的 KEY=VALUE 配置。")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+@dataclass(frozen=True)
+class Settings:
+    host: str = "127.0.0.1"
+    port: int = 8000
+    data_dir: Path = Path(".erp-data")
+    access_key: str = field(default="", repr=False)
+    cookie_secure: bool = False
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str = field(default="", repr=False)
+    llm_model: str = ""
+    llm_format: str = "json_schema"
+    llm_timeout: int = 90
+    llm_retries: int = 2
+    llm_max_input_chars: int = 100_000
+    llm_max_output_tokens: int = 12_000
+    default_solver: SolverMode = SolverMode.LLM_ONLY
+    libreoffice: str = "libreoffice"
+    max_upload_mb: int = 20
+
+    def __post_init__(self) -> None:
+        url = urlsplit(self.llm_base_url)
+        if not url.hostname:
+            raise ValueError("模型地址必须包含有效的主机名。")
+        if url.port is not None and not 1 <= url.port <= 65535:
+            raise ValueError("模型地址端口无效。")
+        local = url.hostname in {"localhost", "127.0.0.1", "::1"}
+        if url.scheme != "https" and not (url.scheme == "http" and local):
+            raise ValueError("模型地址必须使用 HTTPS，本机接口可使用 HTTP。")
+        if url.username or url.password or url.query or url.fragment:
+            raise ValueError("模型地址不能包含凭据、查询参数或片段。")
+        if self.llm_format not in {"json_schema", "json_object"}:
+            raise ValueError("ERP_LLM_FORMAT 必须为 json_schema 或 json_object。")
+        if not 0 <= self.port <= 65535:
+            raise ValueError("端口必须在 0 到 65535 之间，0 表示自动分配。")
+        if not 0 <= self.llm_retries <= 5:
+            raise ValueError("模型重试次数必须在 0 到 5 之间。")
+        if min(self.max_upload_mb, self.llm_timeout, self.llm_max_input_chars,
+               self.llm_max_output_tokens) <= 0:
+            raise ValueError("资源限制必须为正数。")
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        return cls(
+            host=os.getenv("ERP_HOST", "127.0.0.1"),
+            port=int(os.getenv("ERP_PORT", "8000")),
+            data_dir=Path(os.getenv("ERP_DATA_DIR", ".erp-data")),
+            access_key=os.getenv("ERP_ACCESS_KEY", ""),
+            cookie_secure=os.getenv("ERP_COOKIE_SECURE", "false").lower() == "true",
+            llm_base_url=os.getenv("ERP_LLM_BASE_URL", "https://api.openai.com/v1"),
+            llm_api_key=os.getenv("ERP_LLM_API_KEY", ""),
+            llm_model=os.getenv("ERP_LLM_MODEL", ""),
+            llm_format=os.getenv("ERP_LLM_FORMAT", "json_schema"),
+            llm_timeout=int(os.getenv("ERP_LLM_TIMEOUT", "90")),
+            llm_retries=int(os.getenv("ERP_LLM_RETRIES", "2")),
+            llm_max_input_chars=int(os.getenv("ERP_LLM_MAX_INPUT_CHARS", "100000")),
+            llm_max_output_tokens=int(os.getenv("ERP_LLM_MAX_OUTPUT_TOKENS", "12000")),
+            default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
+            libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
+            max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),
+        )
