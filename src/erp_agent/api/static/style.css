@@ -1074,4 +1074,10 @@ pre {
 .evidence-choice { display:flex; align-items:flex-start; gap:10px; margin:8px 0; padding:10px; background:#f8f9fc; border-radius:7px; }
 .evidence-choice>span { display:block; overflow-wrap:anywhere; }
 .evidence-choice small,.evidence-choice span span { display:block; white-space:pre-wrap; }
+.evidence-item h4 { margin:12px 0 0; }
+.evidence-column-title { font-weight:600; }
+.evidence-table-wrap { margin:12px 0; }
+.evidence-table { min-width:460px; }
+.evidence-table th,.evidence-table td { white-space:pre-wrap; min-width:75px; }
+.evidence-table .evidence-selected { background:#e9edff; color:var(--primary); font-weight:700; box-shadow:inset 0 0 0 2px var(--primary); }
 @media(max-width:760px) { .review-checklist { grid-template-columns:1fr; } .review-footer .actions { flex-wrap:wrap; } .filters:has(#issue-filter) { flex-wrap:wrap; } }

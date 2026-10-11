@@ -49,7 +49,7 @@ class StructuredReader:
             Issue("reading.source_warning", "warning", doc.source.id, warning)
             for doc in documents for warning in doc.warnings
         )
-        reading = replace(reading, prompt_version="reader-2", raw_response=response.content,
+        reading = replace(reading, prompt_version="reader-3", raw_response=response.content,
                           issues=reading.issues + source_issues)
         return validate_reading(reading, tuple(e for doc in documents for e in doc.evidence))
 
@@ -61,8 +61,15 @@ class StructuredReader:
                 blocks.append({"paragraph": [block.evidence_id, block.text]})
             else:
                 blocks.append({"table": [[c.row, c.column, c.text, c.evidence_id,
-                                           c.column_span, c.vertical_merge] for c in block.cells]})
+                                           c.column_span, c.vertical_merge] for c in block.cells],
+                               "block_index": block.index})
         return {"document_id": document.source.id, "filename": document.source.filename,
                 "cell_layout": ["row", "column", "text", "evidence_id", "column_span",
                                 "vertical_merge"],
-                "blocks": blocks, "warnings": list(document.warnings)}
+                "blocks": blocks, "warnings": list(document.warnings),
+                "table_contexts": {
+                    e.id: {"heading_ids": list(e.table_context.heading_ids),
+                           "column_header_ids": list(e.table_context.column_header_ids)}
+                    for e in document.evidence
+                    if e.table_context and e.table_context.column_header_ids
+                }}

@@ -232,14 +232,63 @@ function renderDocuments() {
   }
   updateControls();
 }
-function showEvidence(ids, title = "原文证据") {
+function evidenceIndex() {
+  return new Map(documents.flatMap(doc=>doc.evidence.map(e=>[e.id,{...e,filename:doc.source.filename}])));
+}
+function evidenceContextText(evidence, index) {
+  const context=evidence.table_context;
+  if(!context)return "";
+  const text=ids=>ids.map(id=>index.get(id)?.text).filter(Boolean).join(" / ");
+  return [text(context.heading_ids),text(context.column_header_ids),text(context.row_ids)].filter(Boolean).join(" · ");
+}
+function appendEvidenceTable(item, evidence, index) {
+  const context=evidence.table_context;
+  if(!context)return;
+  const document=documents.find(doc=>doc.source.id===evidence.document_id);
+  const block=document?.blocks.find(block=>block.index===context.block_index);
+  if(!block)return;
+  const headerRows=new Set();
+  for(const id of context.row_ids){
+    for(const headerId of index.get(id)?.table_context?.column_header_ids || []){
+      const header=index.get(headerId);if(header?.table_context)headerRows.add(header.table_context.row);
+    }
+  }
+  const wrapper=node("div",undefined,"table-wrap evidence-table-wrap"),table=node("table",undefined,"source-table evidence-table");
+  const rows=[...new Set([...headerRows,context.row])].sort((a,b)=>a-b);
+  for(const row of rows){
+    const tr=node("tr");
+    for(const cell of block.cells.filter(c=>c.row===row)){
+      const td=node(headerRows.has(row)?"th":"td",cell.text || (cell.vertical_merge==="continue"?"（合并续行）":"—"));
+      td.colSpan=cell.column_span;
+      if(cell.evidence_id===evidence.id){td.classList.add("evidence-selected");td.title="当前引用单元格";}
+      tr.append(td);
+    }
+    table.append(tr);
+  }
+  wrapper.append(table);item.append(wrapper,node("small","表格保留原列序；横向滚动可查看完整行。","muted"));
+}
+function showEvidence(ids, title = "原文证据", fact = null) {
   $("evidence-content").replaceChildren(node("h3", title));
-  const index = new Map(documents.flatMap(doc => doc.evidence.map(e => [e.id, {...e, filename:doc.source.filename}])));
+  if(fact){
+    const conversion={percent_to_ratio:"百分数转比例：原值 ÷ 100",wan_to_yuan:"万元转元：原值 × 10000",identity:"按原值保存"};
+    $("evidence-content").append(node("p",`当前字段：${fact.value ?? "未提供"} ${fact.unit} · ${conversion[fact.conversion] || ""}`,"notice"));
+  }
+  const index = evidenceIndex();
   if (!ids.length) $("evidence-content").append(node("p", "未关联原文证据。", "muted"));
   for (const id of ids) {
     const evidence = index.get(id), item = node("div", undefined, "evidence-item");
     item.append(node("small", evidence ? `${evidence.filename} · ${evidence.location}` : "证据不存在"));
-    item.append(node("p", evidence?.text || "（空白或合并单元格）"), node("code", id));
+    if(evidence?.table_context){
+      const contextText=evidenceContextText(evidence,index);
+      const heading=evidence.table_context.heading_ids.map(id=>index.get(id)?.text).filter(Boolean).join(" / ");
+      if(heading)item.append(node("h4",heading));
+      const headers=evidence.table_context.column_header_ids.map(id=>index.get(id)?.text).filter(Boolean).join(" / ");
+      if(headers)item.append(node("p",`列标题：${headers}`,"evidence-column-title"));
+      item.append(node("p",`引用原值：${evidence.text || "（空白或合并单元格）"}`));
+      appendEvidenceTable(item,evidence,index);
+      if(contextText)item.title=contextText;
+    }else item.append(node("p", evidence?.text || "（空白或合并单元格）"));
+    const details=node("details");details.append(node("summary","来源编号"),node("code",id));item.append(details);
     $("evidence-content").append(item);
   }
   $("evidence-drawer").hidden = false;
@@ -290,7 +339,7 @@ function renderFacts() {
       for(const [key,label] of Object.entries(stateNames)){const option=node("option",label);option.value=key;stateSelect.append(option);} stateSelect.value=fact.state;
       stateSelect.onchange=()=>{fact.state=stateSelect.value;tr.classList.add("changed");markDirty();};stateCell.append(stateSelect);
       const sourceCell=node("td"), sourceButton=node("button",fact.evidence_ids.length ? `${fact.evidence_ids.length} 处` : "无来源","source-button");
-      sourceButton.onclick=()=>showEvidence(fact.evidence_ids,`${fact.entity_name} · ${fact.key}`);const editButton=node("button","修正字段","text-button");editButton.onclick=()=>openFactEditor(fact.id);sourceCell.append(sourceButton,editButton);
+      sourceButton.onclick=()=>showEvidence(fact.evidence_ids,`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`,fact);const editButton=node("button","修正字段","text-button");editButton.onclick=()=>openFactEditor(fact.id);sourceCell.append(sourceButton,editButton);
       const unitCell = node("td"), unit = node("input");
       unit.value = fact.unit; unit.setAttribute("aria-label", `${fact.key}的单位`);
       unit.onchange = () => { fact.unit = unit.value; tr.classList.add("changed"); markDirty(); };
@@ -372,7 +421,7 @@ function renderIssues() {
     if(fact){const edit=node("button","修正字段","secondary");edit.onclick=()=>openFactEditor(fact.id);actions.append(edit);}
     else if(/horizon|PERIOD|simulation_period/.test(issue.code+issue.target)){const edit=node("button","确认经营周期","secondary");edit.onclick=openHorizonEditor;actions.append(edit);}
     else if(rule){const edit=node("button","修正规则","secondary");edit.onclick=()=>{reviewTab("rules");$("rule-row-"+rule.id)?.scrollIntoView({block:"center"});};actions.append(edit);}
-    if(issue.evidence_ids.length){const source=node("button","查看原文","source-button");source.onclick=()=>showEvidence(issue.evidence_ids);actions.append(source);}
+    if(issue.evidence_ids.length){const source=node("button","查看原文","source-button");source.onclick=()=>showEvidence(issue.evidence_ids,fact?`${fact.entity_name} · ${fieldNames[fact.key] || fact.key}`:"原文证据",fact);actions.append(source);}
     if(!issue.code.startsWith("validation.")){const resolve=node("button","记录处理说明","quiet");resolve.onclick=()=>{resolvingIssue=issue;$("issue-dialog-message").textContent=issue.message;$("issue-resolution").value="";$("issue-dialog").showModal();};actions.append(resolve);}
     item.append(actions);$("issues").append(item);
   }
@@ -394,14 +443,16 @@ function openFactEditor(id) {
 }
 function renderEvidencePicker() {
   const search=$("fact-evidence-search").value.trim().toLowerCase();
-  const evidence=documents.flatMap(doc=>doc.evidence.map(e=>({...e,filename:doc.source.filename})));
+  const index=evidenceIndex(), evidence=[...index.values()];
   const selected=evidence.filter(e=>editingEvidence.has(e.id));
-  const others=evidence.filter(e=>!editingEvidence.has(e.id) && search && `${e.text} ${e.location}`.toLowerCase().includes(search)).slice(0,40);
+  const others=evidence.filter(e=>!editingEvidence.has(e.id) && search && `${e.text} ${e.location} ${evidenceContextText(e,index)}`.toLowerCase().includes(search)).slice(0,40);
   $("fact-evidence-list").replaceChildren();
   for(const e of [...selected,...others]) {
     const label=node("label",undefined,"evidence-choice"),check=node("input");check.type="checkbox";check.checked=editingEvidence.has(e.id);
     check.onchange=()=>{if(check.checked)editingEvidence.add(e.id);else editingEvidence.delete(e.id);};
-    const body=node("span");body.append(node("small",`${e.filename} · ${e.location}`),node("span",e.text || "（空白单元格）"));label.append(check,body);$("fact-evidence-list").append(label);
+    const body=node("span");body.append(node("small",`${e.filename} · ${e.location}`));
+    const context=evidenceContextText(e,index);if(context)body.append(node("small",context));
+    body.append(node("span",`原值：${e.text || "（空白单元格）"}`));label.append(check,body);$("fact-evidence-list").append(label);
   }
   if(!selected.length && !others.length)$("fact-evidence-list").append(node("p",search?"没有匹配的原文。换一个关键词搜索。":"暂无已选来源。输入关键词查找原文。","muted"));
 }

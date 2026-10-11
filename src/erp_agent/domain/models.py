@@ -25,11 +25,22 @@ class JobStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class TableEvidenceContext:
+    block_index: int
+    row: int
+    column: int
+    heading_ids: tuple[str, ...] = ()
+    column_header_ids: tuple[str, ...] = ()
+    row_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Evidence:
     id: str
     document_id: str
     location: str
     text: str
+    table_context: TableEvidenceContext | None = None
 
 
 @dataclass(frozen=True)

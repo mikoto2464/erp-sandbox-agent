@@ -9,6 +9,7 @@ from zipfile import BadZipFile, ZipFile
 
 from erp_agent.application.ports import DocumentConverter
 from erp_agent.domain.errors import ERPError
+from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.models import (
     Cell,
     DocumentBlock,
@@ -121,8 +122,10 @@ class OOXMLDocumentParser:
                     warnings.append("文档含嵌套表格；请复核原始表格与字段映射。")
         if not any(e.text.strip() for e in evidence):
             raise ERPError("empty_document", "文档没有可读取文字，可能需要 OCR。")
-        return ParsedDocument(source, tuple(blocks), tuple(evidence), tuple(warnings),
-                              converted_sha256=converted_hash)
+        return contextualize_document(ParsedDocument(
+            source, tuple(blocks), tuple(evidence), tuple(warnings), parser_version="ooxml-2",
+            converted_sha256=converted_hash,
+        ))
 
     @staticmethod
     def _text(element: ET.Element) -> str:

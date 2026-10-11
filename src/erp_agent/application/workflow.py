@@ -89,7 +89,8 @@ class WorkflowService:
 
     def documents(self, project_id: str) -> list[JSONValue]:
         self.project(project_id)
-        return self.repository.list("document", project_id)
+        return [to_json(parsed_document(obj(document)))
+                for document in self.repository.list("document", project_id)]
 
     def read(self, project_id: str, data: JSONObject | None = None) -> JSONObject:
         with self._read_lock:

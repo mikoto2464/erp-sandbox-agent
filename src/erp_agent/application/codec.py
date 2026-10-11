@@ -3,6 +3,7 @@ from dataclasses import replace
 from erp_agent.application.contracts import (
     JSONObject, array, decode_reading, dumps, integer, obj, string, strings,
 )
+from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.models import (
     Cell, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot, SourceDocument,
 )
@@ -27,12 +28,12 @@ def parsed_document(data: JSONObject) -> ParsedDocument:
         item = obj(value)
         evidence.append(Evidence(string(item["id"]), string(item["document_id"]),
                                  string(item["location"]), string(item["text"])))
-    return ParsedDocument(
+    return contextualize_document(ParsedDocument(
         SourceDocument(string(source["id"]), string(source["filename"]), string(source["sha256"]),
                        integer(source["size"], 0, 100 * 1024 * 1024), string(source["format"])),
         tuple(blocks), tuple(evidence), strings(data["warnings"]), string(data["parser_version"]),
         None if data["converted_sha256"] is None else string(data["converted_sha256"]),
-    )
+    ))
 
 
 def problem_snapshot(data: JSONObject) -> ProblemSnapshot:

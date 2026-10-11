@@ -9,6 +9,7 @@ CHINESE_DIGITS = "零〇一二两三四五六七八九十百千万亿"
 CHINESE_COUNT = re.compile(
     rf"(?<![{CHINESE_DIGITS}\dA-Za-z.\-])([{CHINESE_DIGITS}]+)(?=年|季|个|期|月)",
 )
+UNIT_MARKERS = {"percent_to_ratio": ("%", "％"), "wan_to_yuan": ("万元", "万")}
 
 
 def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> ReadingResult:
@@ -17,7 +18,7 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     ids: set[str] = set()
     normalized: list[Fact] = []
     for fact in reading.problem.facts:
-        current = fact
+        current = _attach_unit_headers(fact, sources)
         if not fact.id or fact.id in ids:
             issues.append(Issue("validation.duplicate_id", "error", fact.id, "字段 ID 为空或重复。"))
         ids.add(fact.id)
@@ -32,18 +33,18 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             current = replace(current, state=KnowledgeState.MISSING)
             issues.append(Issue("validation.value_missing", "warning", fact.id, "字段值尚未提供。"))
         elif fact.state == KnowledgeState.KNOWN:
-            linked = tuple(sources[eid] for eid in fact.evidence_ids if eid in sources)
+            linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
-                _number_supported(fact, linked) if fact.value_type in {"number", "integer"}
+                _number_supported(current, linked) if fact.value_type in {"number", "integer"}
                 else any(fact.value in e.text for e in linked)
             )
             if not supported:
                 current = replace(current, state=KnowledgeState.CONFLICTED)
                 issues.append(Issue("validation.unsupported_value", "error", fact.id,
-                                    "原文证据无法支持该值及其单位转换。", fact.evidence_ids))
+                                    "原文证据无法支持该值及其单位转换。", current.evidence_ids))
         if current.state in {KnowledgeState.ASSUMED, KnowledgeState.CONFLICTED}:
             issues.append(Issue("validation.uncertain", "warning", fact.id,
-                                "该字段仍是显式假设或冲突，使用前需复核。", fact.evidence_ids))
+                                "该字段仍是显式假设或冲突，使用前需复核。", current.evidence_ids))
         normalized.append(current)
     keys: dict[tuple[str, str, str], Fact] = {}
     for fact in normalized:
@@ -93,20 +94,48 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     return replace(reading, problem=problem, issues=tuple(issues))
 
 
+def _attach_unit_headers(fact: Fact, sources: dict[str, Evidence]) -> Fact:
+    markers = UNIT_MARKERS.get(fact.conversion, ())
+    ids = list(fact.evidence_ids)
+    for eid in fact.evidence_ids:
+        source = sources.get(eid)
+        if not source or not source.table_context:
+            continue
+        for header_id in source.table_context.column_header_ids:
+            header = sources.get(header_id)
+            if (header and header.document_id == source.document_id
+                    and any(marker in header.text for marker in markers) and header_id not in ids):
+                ids.append(header_id)
+    return replace(fact, evidence_ids=tuple(ids))
+
+
+def _header_has_unit(source: Evidence, evidence: tuple[Evidence, ...],
+                     markers: tuple[str, ...]) -> bool:
+    if source.table_context:
+        header_ids = set(source.table_context.column_header_ids)
+        candidates = [item for item in evidence if item.id in header_ids
+                      and item.document_id == source.document_id]
+    else:
+        candidates = [item for item in evidence if item.document_id == source.document_id
+                      and item.table_context is None]
+    return any(any(marker in item.text for marker in markers) for item in candidates)
+
+
 def _number_supported(fact: Fact, evidence: tuple[Evidence, ...]) -> bool:
     target = Decimal(fact.value or "0")
-    percentage_header = any("%" in e.text or "％" in e.text for e in evidence)
     for source in evidence:
         for match in NUMBER.finditer(source.text):
             raw = match.group().strip()
             suffix = match.group(1)
             number = Decimal(raw.rstrip("%％万 ").replace(",", "").strip())
             if fact.conversion == "percent_to_ratio":
-                if suffix not in {"%", "％"} and not percentage_header:
+                if suffix == "万" or (suffix not in {"%", "％"} and not _header_has_unit(
+                        source, evidence, UNIT_MARKERS[fact.conversion])):
                     continue
                 number /= 100
             elif fact.conversion == "wan_to_yuan":
-                if suffix != "万":
+                if suffix in {"%", "％"} or (suffix != "万" and not _header_has_unit(
+                        source, evidence, UNIT_MARKERS[fact.conversion])):
                     continue
                 number *= 10000
             elif suffix in {"%", "％", "万"}:
