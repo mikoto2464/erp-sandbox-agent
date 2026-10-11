@@ -13,6 +13,8 @@ from erp_agent.api.server import Handler, create_access, create_workflow
 from erp_agent.application.contracts import dumps, loads
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.config import Settings
+from erp_agent.application.ports import LLMResponse
+from unittest.mock import patch
 from tests.helpers import FakeLLM, docx_bytes, proposal_json
 
 
@@ -232,6 +234,15 @@ class WebTests(unittest.TestCase):
         self.assertTrue(self.request("/api/status")["llm_configured"])
         self.request("/api/model-settings", {"provider": "gemini", "model": "gemini-model"})
         self.assertFalse(self.request("/api/status")["llm_configured"])
+
+    def test_preset_connection_endpoint_and_authentication(self):
+        self.request("/api/model-settings",{"model":"model","api_key":"secret"})
+        with patch("erp_agent.adapters.model_settings.LangChainLLMClient.generate",
+                   return_value=LLMResponse('{"status":"ok"}',"model")):
+            result=self.request("/api/model-presets/default/test",{"expected_revision":2})
+        self.assertTrue(result["succeeded"])
+        self.cookie=""
+        self.assertEqual(self.raw_request("/api/model-presets/default/test",method="POST")[0],401)
 
     def test_preset_endpoints_create_edit_switch_delete_and_authentication(self):
         catalog = self.request("/api/model-presets")

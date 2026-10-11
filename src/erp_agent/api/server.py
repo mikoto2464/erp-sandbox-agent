@@ -129,6 +129,8 @@ class Handler(BaseHTTPRequestHandler):
             preset_id = preset_parts[2]
             if len(preset_parts) == 4 and preset_parts[3] == "activate" and method == "POST":
                 self._json(self.server.models.activate(preset_id, self._body_json()))
+            elif len(preset_parts) == 4 and preset_parts[3] == "test" and method == "POST":
+                self._json(self.server.models.test_preset(preset_id, self._body_json()))
             elif len(preset_parts) == 3 and method == "POST":
                 self._json(self.server.models.update_preset(preset_id, self._body_json()))
             elif len(preset_parts) == 3 and method == "DELETE":

@@ -21,19 +21,24 @@ class StructuredReader:
         control.checkpoint("reading")
         prompt = files("erp_agent").joinpath("prompts/reader.txt").read_text(encoding="utf-8")
         schema = dumps(READING_SCHEMA)
-        response = client.generate(LLMRequest(
-            prompt + "\nJSON schema:\n" + schema,
-            dumps({"documents": [self._compact(doc) for doc in documents]}), "erp_reading", schema,
-        ))
-        control.checkpoint("validating")
+        documents_json = [self._compact(doc) for doc in documents]
+        response = None
         try:
+            response = client.generate(LLMRequest(
+                prompt + "\nJSON schema:\n" + schema,
+                dumps({"documents": documents_json}), "erp_reading", schema,
+            ))
+            control.checkpoint("validating")
             reading = decode_reading(response.content, response.model)
         except ERPError as error:
+            if response is None and error.code != "llm_structured_response":
+                raise
             control.checkpoint("repairing_reading")
             response = client.generate(LLMRequest(
                 prompt + "\nJSON schema:\n" + schema,
-                dumps({"documents": [self._compact(doc) for doc in documents],
-                       "previous_output": response.content, "error": error.message,
+                dumps({"documents": documents_json,
+                       "previous_output": response.content if response else None,
+                       "error": error.message,
                        "instruction": "修正结构错误，只返回符合 schema 的完整读题结果。"}),
                 "erp_reading", schema,
             ))

@@ -1,13 +1,14 @@
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from erp_agent.adapters.llm import CompatibleLLMClient
-from erp_agent.adapters.llm_protocols import protocol_catalog, requires_api_key
+from erp_agent.adapters.llm import LangChainLLMClient
+from erp_agent.adapters.model_catalog import protocol_catalog, requires_api_key
 from erp_agent.application.contracts import JSONObject, array, dumps, integer, loads, obj, string
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse, ModelBinding
 from erp_agent.config import LLM_BASE_URLS, Settings
@@ -15,9 +16,10 @@ from erp_agent.domain.errors import ERPError
 
 MODEL_FIELDS = {"llm_base_url", "llm_model", "llm_api_key", "llm_format", "llm_timeout",
                 "llm_max_input_chars", "llm_max_output_tokens", "llm_provider",
-                "llm_token_parameter"}
+                "llm_token_parameter", "llm_thinking_mode", "llm_thinking_budget"}
 EDIT_FIELDS = {"base_url", "model", "api_key", "clear_api_key", "format", "timeout",
-               "max_input_chars", "max_output_tokens", "provider", "token_parameter"}
+               "max_input_chars", "max_output_tokens", "provider", "token_parameter",
+               "thinking_mode", "thinking_budget"}
 
 
 class RuntimeLLMClient:
@@ -56,7 +58,9 @@ def _configuration(settings: Settings) -> JSONObject:
             "token_parameter": settings.llm_token_parameter, "timeout": settings.llm_timeout,
             "max_input_chars": settings.llm_max_input_chars,
             "max_output_tokens": settings.llm_max_output_tokens,
-            "configured": CompatibleLLMClient(settings).configured}
+            "thinking_mode": settings.llm_thinking_mode,
+            "thinking_budget": settings.llm_thinking_budget,
+            "configured": LangChainLLMClient(settings).configured}
 
 
 def _configured_settings(current: Settings, data: JSONObject) -> Settings:
@@ -82,11 +86,14 @@ def _configured_settings(current: Settings, data: JSONObject) -> Settings:
             llm_api_key="" if clear else key or retained_key,
             llm_format=string(data.get("format", current.llm_format)),
             llm_token_parameter=string(data.get("token_parameter", current.llm_token_parameter)),
-            llm_timeout=integer(data.get("timeout", current.llm_timeout), 5, 300),
+            llm_thinking_mode=string(data.get("thinking_mode", current.llm_thinking_mode)),
+            llm_thinking_budget=integer(data.get("thinking_budget", current.llm_thinking_budget),
+                                        1024, 393215),
+            llm_timeout=integer(data.get("timeout", current.llm_timeout), 5, 1800),
             llm_max_input_chars=integer(data.get("max_input_chars", current.llm_max_input_chars),
-                                        10000, 1000000),
+                                        10000, 8000000),
             llm_max_output_tokens=integer(data.get("max_output_tokens",
-                                                   current.llm_max_output_tokens), 256, 64000),
+                                                   current.llm_max_output_tokens), 256, 393216),
         )
     except ValueError as exc:
         raise ERPError("invalid_model_settings", str(exc)) from exc
@@ -127,7 +134,7 @@ class ModelSettingsService:
             self._presets["default"] = ModelPreset("default", "默认配置", 1, settings)
         active = self._presets[self._active_id]
         self.settings = active.settings
-        self.client = RuntimeLLMClient(injected or CompatibleLLMClient(self.settings))
+        self.client = RuntimeLLMClient(injected or LangChainLLMClient(self.settings))
         if migrate:
             self._persist(self._presets, self._active_id)
 
@@ -206,7 +213,7 @@ class ModelSettingsService:
         self._presets, self._active_id = presets, active_id
         self.settings = presets[active_id].settings
         if replace_client:
-            self.client.replace(CompatibleLLMClient(self.settings))
+            self.client.replace(LangChainLLMClient(self.settings))
 
     def create_preset(self, data: JSONObject) -> JSONObject:
         with self._lock:
@@ -250,7 +257,7 @@ class ModelSettingsService:
         with self._lock:
             obj(data, {"expected_revision"})
             preset = self._get(preset_id, integer(data["expected_revision"]))
-            if not CompatibleLLMClient(preset.settings).configured:
+            if not LangChainLLMClient(preset.settings).configured:
                 raise ERPError("preset_not_configured", "请先补全此预设的模型名称与密钥。", 409)
             if preset_id != self._active_id:
                 self._commit(dict(self._presets), preset_id, replace_client=True)
@@ -262,3 +269,21 @@ class ModelSettingsService:
             if preset_id == self._active_id:
                 raise ERPError("preset_in_use", "请先切换到其他预设，再删除当前预设。", 409)
             self._commit({k: p for k, p in self._presets.items() if k != preset_id}, self._active_id)
+
+    def test_preset(self, preset_id: str, data: JSONObject) -> JSONObject:
+        with self._lock:
+            obj(data, {"expected_revision"})
+            preset = self._get(preset_id, integer(data["expected_revision"]))
+            settings = replace(preset.settings, llm_retries=0)
+        client = LangChainLLMClient(settings)
+        schema = {"type": "object", "properties": {"status": {"type": "string", "enum": ["ok"]}},
+                  "required": ["status"], "additionalProperties": False}
+        request = LLMRequest("请只返回符合 JSON schema 的对象，不附加说明。\nJSON schema:\n" + dumps(schema),
+                             '返回 {"status":"ok"}。', "erp_connection_test", dumps(schema))
+        started = time.monotonic()
+        response = client.generate(request)
+        if loads(response.content) != {"status": "ok"}:
+            raise ERPError("llm_test_contract", "接口可连接，但未返回符合要求的 JSON。", 502)
+        return {"preset_id": preset.id, "preset_revision": preset.revision,
+                "model": response.model, "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "succeeded": True}

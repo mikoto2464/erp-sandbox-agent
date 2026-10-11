@@ -121,6 +121,40 @@ class ReadingTests(unittest.TestCase):
             StructuredReader(llm).read((document,), Control())
         self.assertEqual(len(llm.calls), 2)
 
+    def test_langchain_schema_error_repairs_once_without_retrying_transport_errors(self):
+        document = OOXMLDocumentParser().parse(
+            SourceDocument("d", "topic.docx", "hash", 0, "docx"), docx_bytes(),
+        )
+        valid = editable_reading(self.result(refs=(document.evidence[0].id,)))
+        calls = []
+
+        class Client:
+            configured = True
+
+            def generate(self, request):
+                calls.append(request)
+                if len(calls) == 1:
+                    raise ERPError("llm_structured_response", "结构不符合 schema", 502)
+                return LLMResponse(dumps(valid), "original-model")
+
+        result = StructuredReader(Client()).read((document,), Control())
+        self.assertEqual(result.model, "original-model")
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(loads(calls[1].user)["previous_output"])
+        for code in ("llm_incomplete", "llm_http_error", "llm_timeout"):
+            calls.clear()
+
+            class FailingClient:
+                configured = True
+
+                def generate(self, request):
+                    calls.append(request)
+                    raise ERPError(code, "调用失败", 502)
+
+            with self.subTest(code=code), self.assertRaises(ERPError):
+                StructuredReader(FailingClient()).read((document,), Control())
+            self.assertEqual(len(calls), 1)
+
     def test_document_capability_warnings_survive_reading(self):
         document = OOXMLDocumentParser().parse(
             SourceDocument("d", "topic.docx", "hash", 0, "docx"),

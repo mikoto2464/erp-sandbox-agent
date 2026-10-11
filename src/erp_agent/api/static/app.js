@@ -24,7 +24,7 @@ let modelCatalog = null, selectedPresetId = "", presetDirty = false;
 const providerHelp = {
   openai_chat: "适用于 OpenAI、DeepSeek、通义等兼容服务。填写基础地址（如 /v1）或完整 Chat Completions 地址。",
   openai_responses: "使用 OpenAI Responses 格式，可填写 /v1 基础地址或完整 /responses 地址。",
-  anthropic: "使用 Claude 原生 Messages 格式，填写 /v1 基础地址或完整 /messages 地址。",
+  anthropic: "使用 Anthropic Messages 格式。基础地址自动补全 /v1/messages；也可填写完整端点。兼容服务可选 JSON 对象或提示词约束 JSON。",
   gemini: "使用 Gemini 原生格式，填写 /v1beta 基础地址或完整 generateContent 地址。",
   ollama: "使用 Ollama 原生 /api/chat，本机服务通常为 http://localhost:11434。"
 };
@@ -409,6 +409,7 @@ function renderPresetPicker(id) {
 function fillPreset(settings) {
   selectedPresetId=settings.id || "";
   presetDirty=false;
+  $("preset-test-result").hidden=true;
   $("preset-name").value=settings.name || "";
   $("model-provider").value=settings.provider;
   $("model-url").value=settings.base_url;$("model-name").value=settings.model;$("model-key").value="";
@@ -416,6 +417,8 @@ function fillPreset(settings) {
   $("clear-model-key").checked=false;$("model-format").value=settings.format;$("model-timeout").value=settings.timeout;
   $("model-input-limit").value=settings.max_input_chars;$("model-output-limit").value=settings.max_output_tokens;
   $("model-token-parameter").value=settings.token_parameter;
+  $("model-thinking-mode").value=settings.thinking_mode || "default";
+  $("model-thinking-budget").value=settings.thinking_budget || 8192;
   $("settings-status").textContent=!selectedPresetId?"新预设 · 保存后可启用":settings.id===modelCatalog.active_id
     ?"当前启用 · 新任务使用此预设":settings.configured?"已保存 · 可切换启用":"尚未配置完成";
   updateProviderFields();
@@ -425,6 +428,7 @@ function updatePresetControls() {
   const preset=modelCatalog?.presets.find(p=>p.id===selectedPresetId);
   $("activate-preset").disabled=!preset || presetDirty || !preset.configured || preset.id===modelCatalog.active_id;
   $("delete-preset").disabled=!preset || preset.id===modelCatalog.active_id;
+  $("test-preset").disabled=!preset || presetDirty || !preset.configured;
   $("reset-preset").hidden=!presetDirty;
   $("save-preset").textContent=selectedPresetId?"保存修改":"保存新预设";
 }
@@ -435,7 +439,10 @@ function updateProviderFields() {
   const provider=$("model-provider").value;
   $("provider-help").textContent=providerHelp[provider] || "";
   $("token-parameter-field").hidden=provider!=="openai_chat";
+  $("thinking-mode-field").hidden=!["openai_chat","anthropic","ollama"].includes(provider);
+  $("thinking-budget-field").hidden=provider!=="anthropic" || $("model-thinking-mode").value!=="enabled";
 }
+$("model-thinking-mode").onchange=()=>{markPresetDirty();updateProviderFields();};
 $("model-provider").onchange=()=>{
   const provider=modelProviders.find(item=>item.id===$("model-provider").value);
   $("model-url").value=provider.base_url;
@@ -443,6 +450,7 @@ $("model-provider").onchange=()=>{
   $("model-key").value="";
   $("model-key").placeholder=provider.api_key_required?"输入此接口的 API 密钥":"本机服务可留空";
   $("clear-model-key").checked=false;
+  $("model-thinking-mode").value="default";
   $("settings-status").textContent="接口已切换，请填写模型及其密钥后保存";
   markPresetDirty();
   updateProviderFields();
@@ -476,6 +484,14 @@ $("active-model-preset").onchange=()=>busy($("active-model-preset"),async()=>{
   try{await activatePreset(preset);}finally{$("active-model-preset").value=modelCatalog.active_id;}
 });
 $("activate-preset").onclick=()=>busy($("activate-preset"),()=>activatePreset(modelCatalog.presets.find(p=>p.id===selectedPresetId)));
+$("test-preset").onclick=()=>busy($("test-preset"),async()=>{
+  const preset=modelCatalog.presets.find(p=>p.id===selectedPresetId);
+  const result=$("preset-test-result"); result.hidden=false;result.textContent="正在测试接口与 JSON 输出…";
+  try{
+    const test=await post(`/api/model-presets/${preset.id}/test`,{expected_revision:preset.revision});
+    result.textContent=`${preset.name} · 版本 ${test.preset_revision} 测试通过 · ${test.elapsed_ms} ms`;
+  }catch(error){result.textContent=`${preset.name} · 测试失败：${error.message}`;throw error;}
+});
 $("delete-preset").onclick=()=>{
   $("delete-preset-name").textContent=modelCatalog.presets.find(p=>p.id===selectedPresetId).name;
   $("delete-preset-dialog").showModal();
@@ -520,7 +536,7 @@ $("apply-json").onclick=()=>safe(async()=>{const data=JSON.parse($("reading-json
 $("solve").onclick=()=>busy($("solve"),async()=>{await post(base()+"/solve",{version:snapshot.version,mode:mode(),seed:Number($("seed").value),candidates:Number($("candidates").value)});await refresh();});
 $("open-settings").onclick=$("configure-model").onclick=()=>safe(openSettings);
 $("settings-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{
-  const data={name:$("preset-name").value,provider:$("model-provider").value,base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,token_parameter:$("model-token-parameter").value,timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)};
+  const data={name:$("preset-name").value,provider:$("model-provider").value,base_url:$("model-url").value,model:$("model-name").value,api_key:$("model-key").value,clear_api_key:$("clear-model-key").checked,format:$("model-format").value,token_parameter:$("model-token-parameter").value,thinking_mode:$("model-thinking-mode").value,thinking_budget:Number($("model-thinking-budget").value),timeout:Number($("model-timeout").value),max_input_chars:Number($("model-input-limit").value),max_output_tokens:Number($("model-output-limit").value)};
   if(selectedPresetId)data.expected_revision=modelCatalog.presets.find(p=>p.id===selectedPresetId).revision;
   const saved=await post(selectedPresetId?`/api/model-presets/${selectedPresetId}`:"/api/model-presets",data);
   $("model-key").value="";await loadStatus();renderPresetPicker(saved.id);fillPreset(saved);toast("模型预设已保存。");

@@ -8,6 +8,7 @@ from erp_agent.application.contracts import dumps, loads
 from erp_agent.config import Settings
 from erp_agent.domain.errors import ERPError
 from tests.helpers import FakeLLM
+from erp_agent.application.ports import LLMResponse
 
 
 class ModelPresetTests(unittest.TestCase):
@@ -111,3 +112,28 @@ class ModelPresetTests(unittest.TestCase):
         for name in ["", "  ", "默认配置", "DRAFT"]:
             with self.subTest(name=name), self.assertRaises(ERPError):
                 self.service.create_preset({"name": name})
+
+    def test_connection_test_uses_saved_protocol_without_changing_preset(self):
+        calls=[]
+        def generate(client, request):
+            calls.append((client.settings, request))
+            return LLMResponse('{"status":"ok"}', "returned-model")
+        before=self.service.public()
+        with patch("erp_agent.adapters.model_settings.LangChainLLMClient.generate",generate):
+            result=self.service.test_preset("default",{"expected_revision":1})
+        self.assertTrue(result["succeeded"])
+        self.assertEqual(result["model"],"returned-model")
+        self.assertEqual(self.service.public(),before)
+        self.assertEqual(calls[0][0].llm_retries,0)
+        self.assertEqual(calls[0][0].llm_max_output_tokens,12000)
+        self.assertEqual(calls[0][0].llm_api_key,"primary-secret")
+        self.assertNotIn("primary-secret",dumps(result))
+        with self.assertRaises(ERPError):
+            self.service.test_preset("default",{"expected_revision":2})
+
+    def test_connection_test_checks_json_contract(self):
+        with patch("erp_agent.adapters.model_settings.LangChainLLMClient.generate",
+                   return_value=LLMResponse('{"status":"wrong"}',"model")):
+            with self.assertRaises(ERPError) as caught:
+                self.service.test_preset("default",{"expected_revision":1})
+        self.assertEqual(caught.exception.code,"llm_test_contract")

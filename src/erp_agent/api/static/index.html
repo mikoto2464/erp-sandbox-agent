@@ -74,7 +74,8 @@
     <label for="preset-picker">已保存预设</label>
     <div class="preset-actions"><select id="preset-picker"></select><button id="new-preset" type="button" class="secondary">新增</button></div>
     <p id="settings-status" class="muted"></p>
-    <div class="preset-actions"><button id="activate-preset" type="button" class="primary">启用此预设</button><button id="delete-preset" type="button" class="danger-text">删除预设</button><button id="reset-preset" type="button" class="quiet" hidden>撤销修改</button></div>
+    <div class="preset-actions"><button id="activate-preset" type="button" class="primary">启用此预设</button><button id="test-preset" type="button" class="secondary">测试连接</button><button id="delete-preset" type="button" class="danger-text">删除预设</button><button id="reset-preset" type="button" class="quiet" hidden>撤销修改</button></div>
+    <p id="preset-test-result" class="muted" role="status" hidden></p>
     <form id="settings-form">
       <label for="preset-name">预设名称</label><input id="preset-name" required maxlength="80" placeholder="例如：生产主模型 / 备用模型 / 本地测试">
       <label for="model-provider">接口类型</label>
@@ -92,10 +93,13 @@
         <div class="form-grid">
           <label>输出格式<select id="model-format"><option value="json_schema">结构化 Schema</option><option value="json_object">JSON 对象</option><option value="text">提示词约束 JSON</option></select></label>
           <label id="token-parameter-field">Token 上限参数<select id="model-token-parameter"><option value="max_completion_tokens">max_completion_tokens</option><option value="max_tokens">max_tokens</option></select></label>
-          <label>超时（秒）<input id="model-timeout" type="number" min="5" max="300" value="90"></label>
-          <label>输入字符上限<input id="model-input-limit" type="number" min="10000" max="1000000" value="100000"></label>
-          <label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="64000" value="12000"></label>
+          <label id="thinking-mode-field">思考模式<select id="model-thinking-mode"><option value="default">接口默认</option><option value="disabled">关闭思考</option><option value="enabled">开启思考</option></select></label>
+          <label id="thinking-budget-field" hidden>思考 Token 预算<input id="model-thinking-budget" type="number" min="1024" max="393215" value="8192"></label>
+          <label>超时（秒）<input id="model-timeout" type="number" min="5" max="1800" value="90"></label>
+          <label>输入字符上限<input id="model-input-limit" type="number" min="10000" max="8000000" value="100000"></label>
+          <label>输出 Token 上限<input id="model-output-limit" type="number" min="256" max="393216" value="12000"></label>
         </div>
+        <p class="muted">读题可关闭思考，减少输出预算消耗。输入字符数不等于上下文 Token 数；实际额度以所选模型为准。</p>
       </details>
       <p class="muted">各预设独立保存密钥。新增预设保存后需启用；修改当前预设用于新任务。同一接口留空保留密钥，换接口或主机需重填。本机 Ollama 可不填。</p>
       <div class="dialog-footer"><button type="button" data-close="settings-dialog" class="secondary">取消</button><button id="save-preset" class="primary">保存预设</button></div>

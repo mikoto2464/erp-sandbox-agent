@@ -44,6 +44,8 @@ class Settings:
     llm_max_input_chars: int = 100_000
     llm_max_output_tokens: int = 12_000
     llm_token_parameter: str = "max_completion_tokens"
+    llm_thinking_mode: str = "default"
+    llm_thinking_budget: int = 8192
     default_solver: SolverMode = SolverMode.LLM_ONLY
     libreoffice: str = "libreoffice"
     max_upload_mb: int = 20
@@ -67,6 +69,10 @@ class Settings:
             raise ValueError("ERP_LLM_FORMAT 必须为 json_schema、json_object 或 text。")
         if self.llm_token_parameter not in {"max_completion_tokens", "max_tokens"}:
             raise ValueError("Token 上限参数必须为 max_completion_tokens 或 max_tokens。")
+        if self.llm_thinking_mode not in {"default", "enabled", "disabled"}:
+            raise ValueError("思考模式必须为 default、enabled 或 disabled。")
+        if not 1024 <= self.llm_thinking_budget <= 393215:
+            raise ValueError("思考预算必须在 1024 到 393215 Token 之间。")
         if not 0 <= self.port <= 65535:
             raise ValueError("端口必须在 0 到 65535 之间，0 表示自动分配。")
         if not 0 <= self.llm_retries <= 5:
@@ -93,6 +99,8 @@ class Settings:
             llm_max_input_chars=int(os.getenv("ERP_LLM_MAX_INPUT_CHARS", "100000")),
             llm_max_output_tokens=int(os.getenv("ERP_LLM_MAX_OUTPUT_TOKENS", "12000")),
             llm_token_parameter=os.getenv("ERP_LLM_TOKEN_PARAMETER", "max_completion_tokens"),
+            llm_thinking_mode=os.getenv("ERP_LLM_THINKING_MODE", "default"),
+            llm_thinking_budget=int(os.getenv("ERP_LLM_THINKING_BUDGET", "8192")),
             default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
             max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),

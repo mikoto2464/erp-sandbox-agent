@@ -203,6 +203,7 @@ small,.muted {
   display:flex;
   align-items:center;
   gap:8px;
+  flex-wrap:wrap;
   margin-bottom:12px;
 }
 
