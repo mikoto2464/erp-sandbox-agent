@@ -1,0 +1,561 @@
+import { computed, ref, toRaw } from 'vue';
+import type { Router } from 'vue-router';
+import { ApiError, post, request } from '../lib/api';
+import type {
+  EditableReading,
+  Job,
+  ModelCatalog,
+  ParsedDocument,
+  Project,
+  ReadingInputs,
+  Snapshot,
+  Solution,
+  SolverMode,
+  Status,
+} from '../lib/types';
+import { useToasts } from './useToasts';
+const emptyInputs = (): ReadingInputs => ({
+  revision: 0,
+  problem_text: '',
+  supplement_text: '',
+  annotations: [],
+});
+const copy = <T>(value: T): T => structuredClone(toRaw(value));
+export function useWorkspace(router: Router) {
+  const authenticated = ref(false),
+    initializing = ref(true),
+    loading = ref(false);
+  const projects = ref<Project[]>([]),
+    project = ref<Project | null>(null),
+    status = ref<Status | null>(null),
+    catalog = ref<ModelCatalog | null>(null);
+  const documents = ref<ParsedDocument[]>([]),
+    jobs = ref<Job[]>([]),
+    solutions = ref<Solution[]>([]);
+  const snapshot = ref<Snapshot | null>(null),
+    editable = ref<EditableReading | null>(null),
+    inputs = ref(emptyInputs());
+  const inputsDirty = ref(false),
+    readingDirty = ref(false),
+    taskOpen = ref(false),
+    pendingNavigation = ref<null | (() => void)>(null);
+  const solverMode = ref<SolverMode>('llm_only'),
+    seed = ref(42),
+    candidates = ref(100);
+  const selected = ref<string[]>([]),
+    operations = ref(new Set<string>()),
+    notifications = useToasts();
+  let generation = 0,
+    inputSequence = 0,
+    readingSequence = 0,
+    polling: ReturnType<typeof setInterval> | undefined,
+    pollInFlight = false,
+    observed = new Map<string, string>(),
+    knownDocuments = new Set<string>(),
+    readVersion = 0;
+  const base = () => `/api/projects/${project.value?.id}`;
+  const currentStep = computed(() => Number(router.currentRoute.value.params.step) || 1);
+  const reviewTab = computed(() =>
+    ['facts', 'rules', 'issues'].includes(String(router.currentRoute.value.query.review))
+      ? String(router.currentRoute.value.query.review)
+      : 'issues',
+  );
+  const issues = computed(() =>
+    [
+      ...(snapshot.value?.reading.issues.filter((issue) => issue.code.startsWith('validation.')) ||
+        []),
+      ...(editable.value?.issues || []),
+    ].filter(
+      (issue) =>
+        issue.code !== 'validation.rule_unimplemented' &&
+        !issue.code.startsWith('review.resolved.'),
+    ),
+  );
+  const errors = computed(
+    () => snapshot.value?.reading.issues.filter((issue) => issue.severity === 'error').length || 0,
+  );
+  const horizon = computed(
+    () =>
+      !!(snapshot.value?.reading.problem.years && snapshot.value.reading.problem.periods_per_year),
+  );
+  const activeRead = computed(() =>
+    jobs.value.some((job) => job.kind === 'read' && ['queued', 'running'].includes(job.status)),
+  );
+  const activeSolve = computed(() =>
+    jobs.value.some((job) => job.kind === 'solve' && ['queued', 'running'].includes(job.status)),
+  );
+  const inputChanged = computed(
+    () =>
+      inputsDirty.value ||
+      (snapshot.value && inputs.value.revision !== (snapshot.value.inputs?.revision || 0)),
+  );
+  const canRead = computed(
+    () =>
+      !!project.value &&
+      !!status.value?.llm_configured &&
+      !!(selected.value.length || inputs.value.problem_text.trim()) &&
+      !activeRead.value &&
+      !loading.value,
+  );
+  const canSolve = computed(
+    () =>
+      !!snapshot.value &&
+      !readingDirty.value &&
+      !inputChanged.value &&
+      !errors.value &&
+      horizon.value &&
+      !activeSolve.value &&
+      !!status.value?.llm_configured &&
+      (solverMode.value !== 'llm_monte_carlo' || !!status.value.simulation_ready),
+  );
+  const unsaved = computed(() => inputsDirty.value || readingDirty.value);
+  function notify(text: string, kind = 'info') {
+    notifications.notify(text, kind);
+  }
+  async function run(key: string, operation: () => Promise<unknown>) {
+    if (operations.value.has(key)) return;
+    operations.value.add(key);
+    try {
+      await operation();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '操作失败。', 'error');
+    } finally {
+      operations.value.delete(key);
+    }
+  }
+  async function loadStatus() {
+    const [value, presets] = await Promise.all([
+      request<Status>('/api/status'),
+      request<ModelCatalog>('/api/model-presets'),
+    ]);
+    status.value = value;
+    catalog.value = presets;
+  }
+  function navigate(operation: () => void) {
+    if (unsaved.value && project.value) pendingNavigation.value = operation;
+    else operation();
+  }
+  function discardAndNavigate() {
+    const action = pendingNavigation.value;
+    pendingNavigation.value = null;
+    inputsDirty.value = readingDirty.value = false;
+    action?.();
+  }
+  function goProjects() {
+    navigate(() => {
+      void router.push('/projects');
+    });
+  }
+  function setStep(step: number) {
+    if (project.value)
+      void router.replace({
+        name: 'workflow',
+        params: { projectId: project.value.id, step },
+        query: { review: reviewTab.value },
+      });
+  }
+  function setReviewTab(tab: string) {
+    void router.replace({ query: { ...router.currentRoute.value.query, review: tab } });
+  }
+  function acceptReading(value: Snapshot) {
+    snapshot.value = value;
+    editable.value = {
+      title: value.reading.problem.title,
+      facts: copy(value.reading.problem.facts),
+      rules: copy(value.reading.rules.rules),
+      issues: copy(value.reading.issues.filter((issue) => !issue.code.startsWith('validation.'))),
+    };
+    readingDirty.value = false;
+  }
+  function markInputsDirty() {
+    inputsDirty.value = true;
+    inputSequence++;
+  }
+  function markReadingDirty() {
+    readingDirty.value = true;
+    readingSequence++;
+  }
+  function annotation(id: string) {
+    return inputs.value.annotations.find((item) => item.document_id === id)?.text || '';
+  }
+  function setAnnotation(id: string, text: string) {
+    inputs.value.annotations = inputs.value.annotations.filter((item) => item.document_id !== id);
+    if (text.trim()) inputs.value.annotations.push({ document_id: id, text });
+    markInputsDirty();
+  }
+  async function saveInputs() {
+    if (!inputsDirty.value) return;
+    const captured = generation,
+      sequence = inputSequence,
+      saved = await post<ReadingInputs>(base() + '/inputs', copy(inputs.value));
+    if (captured !== generation) return;
+    inputs.value.revision = saved.revision;
+    if (sequence === inputSequence) {
+      inputs.value = saved;
+      inputsDirty.value = false;
+    } else throw new Error('保存期间输入有变化，请再次保存。');
+  }
+  async function saveReading() {
+    if (!snapshot.value || !editable.value) return;
+    const captured = generation,
+      sequence = readingSequence;
+    const saved = await post<Snapshot>(base() + '/revisions', {
+      expected_version: snapshot.value.version,
+      note: '默认',
+      reading: copy(editable.value),
+    });
+    if (captured !== generation) return;
+    if (sequence !== readingSequence) {
+      snapshot.value = saved;
+      throw new Error('保存期间数据有变化，请再次保存。');
+    }
+    acceptReading(saved);
+    notify(
+      errors.value ? '已保存，仍有错误需要处理。' : '已保存，可继续生成草稿。',
+      errors.value ? 'info' : 'success',
+    );
+  }
+  async function continueToSolve() {
+    if (readingDirty.value) await saveReading();
+    if (errors.value || !horizon.value) {
+      setReviewTab('issues');
+      notify('请先修正题目中的错误或周期冲突。');
+    } else setStep(3);
+  }
+  async function startRead() {
+    if (readingDirty.value) throw new Error('请先保存读题修改。');
+    const captured = generation;
+    await saveInputs();
+    if (captured !== generation) return;
+    await post(base() + '/read', {
+      document_ids: selected.value,
+      input_revision: inputs.value.revision,
+    });
+    if (captured === generation) {
+      setStep(2);
+      await refresh();
+    }
+  }
+  async function upload(files: File[]) {
+    if (!project.value) return;
+    const captured = generation,
+      url = base();
+    for (const file of files) {
+      if (!/\.(docx|doc|pdf|xls)$/i.test(file.name))
+        throw new Error('请选择 DOCX、DOC、PDF 或 XLS 文件。');
+      if (file.size > (status.value?.max_upload_mb || 20) * 1024 * 1024)
+        throw new Error(`${file.name} 超过大小限制。`);
+      await request(url + '/documents', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Filename': encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+    }
+    if (captured === generation) {
+      notify('文件已提交解析。');
+      await refresh();
+    }
+  }
+  async function solve() {
+    await post(base() + '/solve', {
+      version: snapshot.value?.version,
+      mode: solverMode.value,
+      seed: seed.value,
+      candidates: candidates.value,
+    });
+    await refresh();
+  }
+  async function cancelJob(job: Job) {
+    await post(`${base()}/jobs/${job.id}/cancel`, {});
+    await refresh();
+  }
+  async function retryJob(job: Job) {
+    if (job.kind === 'parse')
+      await post(`${base()}/documents/${job.metadata.document_id}/retry`, {});
+    else if (job.kind === 'read') {
+      await saveInputs();
+      await post(base() + '/read', {
+        document_ids: selected.value,
+        input_revision: inputs.value.revision,
+      });
+    } else
+      await post(base() + '/solve', {
+        version: job.metadata.version,
+        mode: job.metadata.mode,
+        ...job.metadata.search,
+      });
+    await refresh();
+  }
+  function notifyJobs(initial: boolean) {
+    for (const job of jobs.value) {
+      const previous = observed.get(job.id);
+      observed.set(job.id, job.status);
+      if (
+        initial ||
+        previous === job.status ||
+        !['succeeded', 'needs_input', 'failed', 'cancelled'].includes(job.status)
+      )
+        continue;
+      const targetId = project.value!.id,
+        targetStep = job.kind === 'parse' ? 1 : job.kind === 'read' ? 2 : 3;
+      const name = job.kind === 'parse' ? '文件解析' : job.kind === 'read' ? '读题' : '方案生成',
+        showResult = ['succeeded', 'needs_input'].includes(job.status);
+      const text =
+        job.status === 'failed'
+          ? `${name}失败：${(job.error?.message || '请查看任务详情。').slice(0, 160)}`
+          : job.status === 'needs_input'
+            ? '读题已完成，有内容需要确认。'
+            : `${name}${job.status === 'cancelled' ? '已取消' : '已完成'}。`;
+      notifications.notify(
+        text,
+        job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'success' : 'info',
+        () =>
+          navigate(() => {
+            if (project.value?.id === targetId) {
+              if (showResult) setStep(targetStep);
+              else taskOpen.value = true;
+            } else
+              void router.push({
+                name: 'workflow',
+                params: { projectId: targetId, step: targetStep },
+              });
+          }),
+        showResult ? '查看结果' : '查看任务',
+      );
+    }
+  }
+  async function refresh(initial = false) {
+    if (!authenticated.value || !project.value) return;
+    const captured = generation,
+      url = base();
+    const [docs, latestJobs, plans] = await Promise.all([
+      request<ParsedDocument[]>(url + '/documents'),
+      request<Job[]>(url + '/jobs'),
+      request<Solution[]>(url + '/solutions'),
+    ]);
+    if (captured !== generation) return;
+    documents.value = docs;
+    jobs.value = latestJobs;
+    solutions.value = plans;
+    for (const doc of docs)
+      if (!knownDocuments.has(doc.source.id)) {
+        knownDocuments.add(doc.source.id);
+        selected.value.push(doc.source.id);
+      }
+    notifyJobs(initial);
+    const completed = Math.max(
+      0,
+      ...latestJobs
+        .filter((job) => job.kind === 'read' && ['succeeded', 'needs_input'].includes(job.status))
+        .map((job) => job.result?.version || 0),
+    );
+    if (initial || completed > readVersion) {
+      readVersion = completed;
+      if (readingDirty.value) {
+        notify('新读题结果已保存；请先处理未保存修改。');
+        return;
+      }
+      try {
+        const result = await request<{ snapshot: Snapshot }>(url + '/problem');
+        if (captured === generation) acceptReading(result.snapshot);
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.code !== 'snapshot_not_found') throw error;
+      }
+    }
+  }
+  function resetProject() {
+    generation++;
+    taskOpen.value = false;
+    loading.value = false;
+    inputsDirty.value = readingDirty.value = false;
+    snapshot.value = editable.value = null;
+    inputs.value = emptyInputs();
+    documents.value = [];
+    jobs.value = [];
+    solutions.value = [];
+    selected.value = [];
+    observed = new Map();
+    knownDocuments = new Set();
+    readVersion = 0;
+    project.value = null;
+  }
+  async function syncRoute() {
+    if (!authenticated.value) return;
+    const route = router.currentRoute.value,
+      id = String(route.params.projectId || '');
+    if (id === project.value?.id) return;
+    resetProject();
+    const captured = generation;
+    project.value = projects.value.find((item) => item.id === id) || null;
+    if (!id) {
+      const values = await request<Project[]>('/api/projects');
+      if (captured === generation) projects.value = values;
+      return;
+    }
+    if (!project.value) {
+      notify('项目不存在或已删除。', 'error');
+      await router.replace('/projects');
+      return;
+    }
+    loading.value = true;
+    try {
+      const values = await request<ReadingInputs>(base() + '/inputs');
+      if (captured !== generation) return;
+      inputs.value = values;
+      await refresh(true);
+    } finally {
+      if (captured === generation) loading.value = false;
+    }
+  }
+  async function enterApp() {
+    authenticated.value = true;
+    await loadStatus();
+    projects.value = await request<Project[]>('/api/projects');
+    solverMode.value = status.value!.default_solver;
+    await syncRoute();
+  }
+  async function initialize() {
+    try {
+      const session = await request<{ authenticated: boolean; configured: boolean }>(
+        '/api/auth/session',
+      );
+      if (session.authenticated) await enterApp();
+      else if (!session.configured) notify('请在服务器 .env 中配置 ERP_ACCESS_KEY。', 'error');
+    } finally {
+      initializing.value = false;
+    }
+  }
+  async function login(key: string, remember: boolean) {
+    await post('/api/auth/login', { key, remember });
+    await enterApp();
+  }
+  function expire() {
+    authenticated.value = false;
+    resetProject();
+    projects.value = [];
+    status.value = catalog.value = null;
+    pendingNavigation.value = null;
+  }
+  async function logout() {
+    await post('/api/auth/logout', {});
+    expire();
+    inputsDirty.value = readingDirty.value = false;
+  }
+  async function createProject(name: string) {
+    const value = await post<Project>('/api/projects', { name });
+    projects.value.push(value);
+    await router.push({ name: 'workflow', params: { projectId: value.id, step: 1 } });
+  }
+  async function deleteProject(value: Project) {
+    await request(`/api/projects/${value.id}`, { method: 'DELETE' });
+    projects.value = projects.value.filter((item) => item.id !== value.id);
+    if (project.value?.id === value.id) {
+      inputsDirty.value = readingDirty.value = false;
+      await router.push('/projects');
+    }
+    notify('项目已删除。', 'success');
+  }
+  function beforeUnload(event: BeforeUnloadEvent) {
+    if (unsaved.value) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  }
+  const removeGuard = router.beforeEach((to) => {
+    if (project.value && unsaved.value && String(to.params.projectId || '') !== project.value.id) {
+      pendingNavigation.value = () => {
+        void router.push(to);
+      };
+      return false;
+    }
+  });
+  function start() {
+    window.addEventListener('erp-session-expired', expire);
+    window.addEventListener('beforeunload', beforeUnload);
+    polling = setInterval(() => {
+      if (pollInFlight || loading.value || !authenticated.value || !project.value) return;
+      pollInFlight = true;
+      void refresh()
+        .catch((error) => notify(error.message, 'error'))
+        .finally(() => {
+          pollInFlight = false;
+        });
+    }, 2000);
+  }
+  function dispose() {
+    clearInterval(polling);
+    generation++;
+    notifications.dispose();
+    removeGuard();
+    window.removeEventListener('erp-session-expired', expire);
+    window.removeEventListener('beforeunload', beforeUnload);
+  }
+  return {
+    authenticated,
+    initializing,
+    loading,
+    projects,
+    project,
+    status,
+    catalog,
+    documents,
+    jobs,
+    solutions,
+    snapshot,
+    editable,
+    inputs,
+    inputsDirty,
+    readingDirty,
+    taskOpen,
+    pendingNavigation,
+    solverMode,
+    seed,
+    candidates,
+    selected,
+    operations,
+    notifications,
+    currentStep,
+    reviewTab,
+    issues,
+    errors,
+    horizon,
+    activeRead,
+    activeSolve,
+    inputChanged,
+    canRead,
+    canSolve,
+    unsaved,
+    run,
+    notify,
+    loadStatus,
+    navigate,
+    discardAndNavigate,
+    goProjects,
+    setStep,
+    setReviewTab,
+    annotation,
+    setAnnotation,
+    markInputsDirty,
+    markReadingDirty,
+    saveInputs,
+    saveReading,
+    continueToSolve,
+    startRead,
+    upload,
+    solve,
+    cancelJob,
+    retryJob,
+    refresh,
+    syncRoute,
+    initialize,
+    login,
+    logout,
+    createProject,
+    deleteProject,
+    start,
+    dispose,
+  };
+}

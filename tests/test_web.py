@@ -239,8 +239,13 @@ class WebTests(unittest.TestCase):
         code, raw = self.raw_request("/")
         self.assertEqual(code, 200)
         html = raw.decode()
-        self.assertIn("单 LLM", html)
-        self.assertIn("蒙特卡罗", html)
+        self.assertIn('id="app"', html)
+        self.assertIn('type="module"', html)
+        for path, content_type in [("/app.js", "text/javascript"), ("/style.css", "text/css")]:
+            code, body = self.raw_request(path)
+            self.assertEqual(code, 200)
+            self.assertIn(content_type, self.response_headers)
+            self.assertGreater(len(body), 100)
 
     def test_invalid_upload_and_cross_origin(self):
         project = self.request("/api/projects", {"name": "测试"})["id"]
