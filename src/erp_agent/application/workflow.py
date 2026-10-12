@@ -227,7 +227,7 @@ class WorkflowService:
         if any(issue.severity == "error" for issue in snapshot.reading.issues):
             raise ERPError("reading_needs_revision", "请先修正读题错误并保存新版本。", 409)
         if not snapshot.reading.problem.years or not snapshot.reading.problem.periods_per_year:
-            raise ERPError("reading_horizon_missing", "请在读题复核中补充经营年数和每年期数，保存校验后再生成方案。", 409)
+            raise ERPError("reading_horizon_missing", "经营周期存在无效值或冲突，请在题目数据中修正并保存后生成方案。", 409)
         try:
             mode = SolverMode(string(data.get("mode", self.default_solver.value)))
         except ValueError as exc:

@@ -115,6 +115,42 @@ class ReadingTests(unittest.TestCase):
                                            Evidence("periods", "doc", "格", "每年4季")))
         self.assertEqual((checked.problem.years, checked.problem.periods_per_year), (4, 4))
 
+    def test_horizon_defaults_fill_absent_and_missing_fields_once(self):
+        reading = self.result()
+        missing = Fact("years", "initial", "company", "公司", "years", None, "integer",
+                       "", KnowledgeState.MISSING, ())
+        for facts in (reading.problem.facts, reading.problem.facts + (missing,)):
+            with self.subTest(facts=facts):
+                checked = validate_reading(replace(reading, problem=replace(
+                    reading.problem, facts=facts)), (Evidence("p1", "doc", "格", "100000"),))
+                self.assertEqual((checked.problem.years, checked.problem.periods_per_year), (4, 4))
+                periods = [f for f in checked.problem.facts if f.key in {"years", "periods_per_year"}]
+                self.assertTrue(all(f.state == KnowledgeState.ASSUMED and not f.evidence_ids
+                                    and "系统默认" in f.explanation for f in periods))
+                self.assertEqual(validate_reading(checked, (Evidence("p1", "doc", "格", "100000"),)),
+                                 checked)
+
+    def test_horizon_defaults_preserve_explicit_values_and_conflicts(self):
+        reading = self.result()
+        year = Fact("years", "initial", "company", "公司", "years", "3", "integer",
+                    "年", KnowledgeState.KNOWN, ("period",))
+        evidence = (Evidence("p1", "doc", "格", "100000"), Evidence("period", "doc", "段落", "经营3年"))
+        for state, value, expected in ((KnowledgeState.KNOWN, "3", 3),
+                                       (KnowledgeState.ASSUMED, "2", 2),
+                                       (KnowledgeState.CONFLICTED, "3", None),
+                                       (KnowledgeState.CONFLICTED, None, None),
+                                       (KnowledgeState.KNOWN, "4", None)):
+            with self.subTest(state=state, value=value):
+                facts = reading.problem.facts + (replace(year, state=state, value=value),)
+                checked = validate_reading(replace(reading, problem=replace(reading.problem, facts=facts),
+                    issues=(Issue("horizon_conflict", "error", "years", "经营周期未提供一致值，存在冲突。"),)), evidence)
+                self.assertEqual(checked.problem.years, expected)
+                self.assertEqual(checked.problem.periods_per_year, 4)
+                self.assertTrue(any(i.code == "horizon_conflict" and i.severity == "error"
+                                    for i in checked.issues))
+                rechecked = validate_reading(checked, evidence)
+                self.assertEqual(rechecked.problem.years, expected)
+
     def test_chinese_counts_match_whole_numbers(self):
         cases = [("经营四年", "4", True), ("经营十四年", "14", True),
                  ("经营十四年", "4", False), ("二十四个月", "24", True),
@@ -148,7 +184,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-6")
+        self.assertEqual(result.prompt_version, "reader-7")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)

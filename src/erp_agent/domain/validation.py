@@ -11,6 +11,32 @@ CHINESE_COUNT = re.compile(
 )
 UNIT_MARKERS = {"percent_to_ratio": ("%", "％"), "wan_to_yuan": ("万元", "万")}
 UNSPECIFIED_UNITS = {"无", "无单位", "不清楚", "不明确", "未知", "未注明", "未提供", "unknown"}
+DEFAULT_HORIZON = {"years": (4, "年"), "periods_per_year": (4, "季/年")}
+
+
+def _default_horizon_facts(facts: tuple[Fact, ...]) -> tuple[Fact, ...]:
+    result = list(facts)
+    ids = {fact.id for fact in facts}
+    for key, (value, unit) in DEFAULT_HORIZON.items():
+        matches = [index for index, fact in enumerate(result)
+                   if fact.category == "initial" and fact.key == key]
+        explanation = f"系统默认：{value} {unit}；题目另有规定时可修改。"
+        if not matches:
+            identifier = f"default_{key}"
+            while identifier in ids:
+                identifier += "_"
+            ids.add(identifier)
+            result.append(Fact(identifier, "initial", "company", "公司", key, str(value),
+                               "integer", unit, KnowledgeState.ASSUMED, (),
+                               explanation=explanation))
+        elif len(matches) == 1:
+            index = matches[0]
+            fact = result[index]
+            if fact.value is None and fact.state != KnowledgeState.CONFLICTED:
+                result[index] = replace(fact, value=str(value), value_type="integer", unit=unit,
+                                        state=KnowledgeState.ASSUMED, evidence_ids=(),
+                                        conversion="identity", explanation=explanation)
+    return tuple(result)
 
 
 def _normalized_text(text: str) -> str:
@@ -36,7 +62,7 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
               if i in unit_issues else i for i in issues]
     ids: set[str] = set()
     normalized: list[Fact] = []
-    for fact in reading.problem.facts:
+    for fact in _default_horizon_facts(reading.problem.facts):
         current = _attach_unit_headers(fact, sources)
         unit = current.unit.strip()
         current = replace(current, unit="" if unit.lower() in UNSPECIFIED_UNITS or (
@@ -52,7 +78,9 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
                                 "字段引用了不存在的证据。", tuple(invalid_refs)))
             current = replace(current, state=KnowledgeState.CONFLICTED)
         if fact.value is None:
-            current = replace(current, state=KnowledgeState.MISSING)
+            current = replace(current, state=KnowledgeState.CONFLICTED
+                              if fact.category == "initial" and fact.key in DEFAULT_HORIZON
+                              and fact.state == KnowledgeState.CONFLICTED else KnowledgeState.MISSING)
             acknowledged = fact.explanation.startswith("用户标注：")
             issues.append(Issue("validation.value_missing", "info" if acknowledged else "warning",
                                 fact.id, fact.explanation if acknowledged else "字段值尚未提供。"))
@@ -98,7 +126,8 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
                                 "已知规则必须引用存在的原文证据。", rule.evidence_ids))
         issues.append(Issue("validation.rule_unimplemented", "info", rule.id,
                             "规则已登记，尚未接入经营仿真；当前不能据此计算精确结果。"))
-    if not normalized:
+    if not any(not (fact.category == "initial" and fact.key in DEFAULT_HORIZON
+                    and fact.explanation.startswith("系统默认：")) for fact in reading.problem.facts):
         issues.append(Issue("validation.no_facts", "error", "problem", "没有提取到任何规范字段。"))
     initial = [f for f in normalized if f.category == "initial"]
     if not any(f.key == "initial_cash" for f in initial):
@@ -121,16 +150,20 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     years = period_value("years")
     periods = period_value("periods_per_year")
     if years is not None and periods is not None:
+        period_ids = {f.id for f in initial if f.key in DEFAULT_HORIZON}
         issues = [replace(issue, severity="info", code="review.resolved." + issue.code,
                           message=issue.message + "；已按当前周期字段处理。")
                   if not issue.code.startswith(("validation.", "review.resolved."))
-                  and re.search(r"missing_periods|horizon|经营年限|经营周期|每年期数|总期数", issue.code + " " + issue.message,
-                                re.IGNORECASE)
+                  and (issue.target in period_ids or issue.target.split(".")[-1] in DEFAULT_HORIZON
+                       or re.search(r"missing_periods|horizon|经营年限|经营周期|每年期数|总期数",
+                                    issue.code + " " + issue.message, re.IGNORECASE))
                   and re.search(r"missing|缺|未提供|未给|需补", issue.code + " " + issue.message,
-                                re.IGNORECASE) else issue for issue in issues]
+                                re.IGNORECASE)
+                  and not re.search(r"conflict|冲突|不一致|矛盾", issue.code + " " + issue.message,
+                                    re.IGNORECASE) else issue for issue in issues]
     if years is None or periods is None:
         issues.append(Issue("validation.horizon_missing", "warning", "horizon",
-                            "经营年数或每年期数尚未确认；不能检查完整逐季计划。"))
+                            "经营周期存在无效值或尚未解决的冲突，请修正后生成方案。"))
     problem = replace(reading.problem, facts=tuple(normalized), years=years, periods_per_year=periods)
     return replace(reading, problem=problem, issues=tuple(issues))
 

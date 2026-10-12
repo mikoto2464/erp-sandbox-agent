@@ -183,14 +183,14 @@ function updateControls() {
   $("solve").disabled = !snapshot || dirty || inputsChanged || readingErrors || horizonMissing || solving || !status?.llm_configured || (mc && !status?.simulation_ready);
   $("save-revision").disabled = !snapshot || !dirty;
   $("next-solve").disabled = !snapshot || (!dirty && (readingErrors || horizonMissing));
-  $("next-solve").textContent = dirty ? "保存并继续 →" : readingErrors ? "待修正错误" : horizonMissing ? "先确认经营周期" : "继续生成方案 →";
+  $("next-solve").textContent = dirty ? "保存并继续 →" : readingErrors ? "待修正错误" : horizonMissing ? "先修正经营周期" : "继续生成方案 →";
   $("solve").textContent = solving ? "正在生成…" : "生成方案草稿";
-  $("solver-note").textContent = inputsChanged ? "题目输入或文件说明已修改，请返回上传步骤并重新读取。" : horizonMissing ? "请返回确认题目，填写经营年数和每年期数。" : readingErrors ? "题目还有错误，请修正并保存。" : mc
+  $("solver-note").textContent = inputsChanged ? "题目输入或文件说明已修改，请返回上传步骤并重新读取。" : horizonMissing ? "经营周期存在无效值或冲突，请返回题目数据修正并保存。" : readingErrors ? "题目还有错误，请修正并保存。" : mc
     ? (status?.simulation_ready ? "在仿真器中搜索并比较候选方案。" : "经营仿真内核尚未就绪，暂不能使用蒙特卡罗。")
     : "当前输出为方案草稿，产能、现金与履约尚未经过经营仿真验证。";
-  $("solve-context").textContent = snapshot ? `${snapshot.reading.problem.years || "待确认"} 年 · 每年 ${snapshot.reading.problem.periods_per_year || "待确认"} 期` : "请先确认题目";
+  $("solve-context").textContent = snapshot ? `${snapshot.reading.problem.years || "待修正"} 年 · 每年 ${snapshot.reading.problem.periods_per_year || "待修正"} 季` : "请先读取题目";
   $("step1-caption").textContent = documents.length ? `${documents.length} 个文件` : "添加赛题与补充文件";
-  $("step2-caption").textContent = snapshot ? (dirty ? "修改待保存" : readiness.errors ? readiness.errors + " 项待修正" : horizonMissing ? "周期待填写" : "可生成草稿") : "处理疑问，核对数据";
+  $("step2-caption").textContent = snapshot ? (dirty ? "修改待保存" : readiness.errors ? readiness.errors + " 项待修正" : horizonMissing ? "周期待修正" : "可生成草稿") : "处理疑问，核对数据";
   if(snapshot)renderReviewGuide(readiness);
 }
 async function loadStatus() {
@@ -491,16 +491,16 @@ function reviewReadiness() {
 }
 function renderReviewGuide(ready) {
   const title=$("review-status-title"), badge=$("review-status-badge");
-  title.textContent=dirty ? "修改待校验" : ready.errors ? `先处理 ${ready.errors} 项错误` : !ready.horizon ? "请确认经营周期" : "可以生成方案草稿";
+  title.textContent=dirty ? "修改待校验" : ready.errors ? `先处理 ${ready.errors} 项错误` : !ready.horizon ? "请修正经营周期" : "可以生成方案草稿";
   badge.textContent=dirty ? "待保存" : ready.errors || !ready.horizon ? "待处理" : "结构校验通过";
   badge.className=`badge ${dirty || ready.errors || !ready.horizon ? "conflicted" : "known"}`;
-  $("review-status-detail").textContent=dirty ? "已应用的修改尚未保存。保存后更新校验结果和是否可以继续。" : ready.errors ? "错误会阻止生成方案；警告可以在明确假设后保留。" : !ready.horizon ? "缺少经营年数或每年期数，无法生成覆盖完整周期的计划。" : `${ready.warnings} 项提示仍需复核；方案为草稿，经营数值尚未验证。`;
+  $("review-status-detail").textContent=dirty ? "已应用的修改尚未保存。保存后更新校验结果和是否可以继续。" : ready.errors ? "错误会阻止生成方案；警告可以在明确假设后保留。" : !ready.horizon ? "经营周期存在无效值或冲突，修正并保存后可生成计划。" : `${ready.warnings} 项提示仍需复核；方案为草稿，经营数值尚未验证。`;
   $("review-issues-summary").textContent=`${ready.errors} 项错误 · ${ready.warnings} 项提示`;
   $("review-rules-summary").textContent=`${editable.facts.length} 个字段 · ${editable.rules.length} 条规则`;
   $("metric-facts").textContent=editable.facts.length;
   $("metric-pending").textContent=reviewIssues().filter(i=>i.severity!=="info").length;
   $("metric-rules").textContent=editable.rules.length;
-  $("dirty-note").textContent=dirty ? "有未保存修改，请保存并校验" : ready.errors ? "校验未通过：先修正错误，再保存校验" : !ready.horizon ? "请补充周期，再保存校验" : "可以生成草稿；暂定内容会随方案保留";
+  $("dirty-note").textContent=dirty ? "有未保存修改，请保存并校验" : ready.errors ? "校验未通过：先修正错误，再保存校验" : !ready.horizon ? "请修正周期，再保存校验" : "可以生成草稿；暂定内容会随方案保留";
 }
 function issueAdvice(issue) {
   if(issue.code==="validation.unsupported_value")return issueFact(issue)?.value_type==="text"
@@ -511,7 +511,7 @@ function issueAdvice(issue) {
   if(issue.code==="validation.duplicate_field" || issue.code==="validation.duplicate_id")return "合并重复字段及其来源，不同对象应使用不同编号；可在高级结构化数据中处理。";
   if(issue.code==="validation.uncertain")return "对照原文确认含义。已核实可补来源标为已知；无法确定则保留假设或冲突并说明。";
   if(issue.code==="validation.value_missing")return "在字段编辑中补充已查到的值；未查到时保留缺失，不要用零替代。";
-  if(issue.code==="validation.horizon_missing" || /PERIOD|horizon|simulation_period/.test(issue.code+issue.target))return "在待确认项填写经营年数和每年期数，说明可留空，保存后使用。";
+  if(issue.code==="validation.horizon_missing" || /PERIOD|horizon|simulation_period/.test(issue.code+issue.target))return "默认经营 4 年、每年 4 季，无需确认；周期存在冲突或无效值时，请修正并保存。";
   return "对照原文核对相关字段或规则。处理模型提示后记录依据；系统错误须重新校验。";
 }
 function renderIssues() {
@@ -559,7 +559,7 @@ function renderIssues() {
     }
     item.append(actions);$("issues").append(item);
   }
-  if(!$("issues").children.length)$("issues").append(node("p",filter?"没有此类问题。":"没有待处理的问题。可继续核对经营周期、数据和规则。","empty"));
+  if(!$("issues").children.length)$("issues").append(node("p",filter?"没有此类问题。":"没有待处理的问题，可继续生成方案。","empty"));
 }
 function openFactEditor(id) {
   editingFact=editable.facts.find(f=>f.id===id);
@@ -990,14 +990,14 @@ $("read").onclick=()=>startReading($("read"));$("reread").onclick=()=>startReadi
 $("next-solve").onclick=()=>busy($("next-solve"),async()=>{
   if(dirty)await saveRevision();
   const ready=reviewReadiness();
-  if(ready.errors || !ready.horizon){reviewTab("issues");toast(ready.errors?"仍有错误需要处理。":"请填写经营年数和每年期数。");return;}
+  if(ready.errors || !ready.horizon){reviewTab("issues");toast(ready.errors?"仍有错误需要处理。":"请修正经营周期的无效值或冲突。");return;}
   setStep(3);
 });$("back-review").onclick=()=>setStep(2);
 $("fact-search").oninput=renderFacts;$("category-filter").onchange=renderFacts;$("state-filter").onchange=renderFacts;
 async function saveRevision() {
   const result=await post(base()+"/revisions",{expected_version:snapshot.version,note:"默认",reading:editable});
   renderReading({snapshot:result});
-  toast(result.reading.issues.some(i=>i.severity==="error")?"已保存，仍有错误需要处理。":!result.reading.problem.years || !result.reading.problem.periods_per_year?"已保存，请补充经营周期。":"已保存，可继续生成草稿。");
+  toast(result.reading.issues.some(i=>i.severity==="error")?"已保存，仍有错误需要处理。":!result.reading.problem.years || !result.reading.problem.periods_per_year?"已保存，请修正经营周期。":"已保存，可继续生成草稿。");
 }
 $("save-revision").onclick=()=>busy($("save-revision"),saveRevision);
 $("apply-json").onclick=()=>safe(async()=>{const data=JSON.parse($("reading-json").value);if(!Array.isArray(data.facts)||!Array.isArray(data.rules)||!Array.isArray(data.issues)||typeof data.title!=="string")throw new Error("结构化数据必须包含 title、facts、rules、issues。");editable=data;markDirty();renderFacts();renderRules();renderIssues();toast("修改已应用，请保存。");});

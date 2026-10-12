@@ -498,43 +498,27 @@ class WebTests(unittest.TestCase):
         self.assertEqual(invalid.exception.code, 409)
         self.assertEqual(len(self.llm.calls), calls)
 
-    def test_missing_horizon_blocks_generation_and_assumption_revision_unlocks(self):
+    def test_missing_horizon_uses_defaults_and_generates_without_confirmation(self):
         project, result = self.setup_problem()
         base = f'/api/projects/{project}'
         facts = [f for f in result['snapshot']['reading']['problem']['facts']
                  if f['key'] == 'initial_cash']
         revised = self.request(base + '/revisions', {
-            'expected_version': 1, 'note': '测试未提供周期',
+            'expected_version': 1, 'note': '',
             'reading': {'title': '未提供周期', 'facts': facts, 'rules': [], 'issues': [
                 {'code': 'missing_periods', 'target': 'initial.periods_per_year',
                  'severity': 'error', 'message': '经营年限未提供，需补充经营周期。', 'evidence_ids': []},
             ]},
         })
-        before = len(self.llm.calls)
-        with self.assertRaises(HTTPError) as error:
-            self.request(base + '/solve', {'version': revised['version']})
-        self.assertEqual(error.exception.code, 409)
-        self.assertIn('reading_needs_revision', error.exception.msg)
-        self.assertEqual(len(self.llm.calls), before)
-        for key, value in [('years', '4'), ('periods_per_year', '4')]:
-            facts.append({'id': key, 'category': 'initial', 'entity_id': 'company',
-                          'entity_name': '公司', 'key': key, 'value': value,
-                          'value_type': 'integer', 'unit': '', 'state': 'assumed',
-                          'evidence_ids': [], 'conversion': 'identity',
-                          'explanation': '默认'})
-        reading = revised['reading']
-        result = self.request(base + '/revisions', {
-            'expected_version': 2, 'note': '',
-            'reading': {'title': '假设周期', 'facts': facts, 'rules': [], 'issues': reading['issues']},
-        })
-        self.assertEqual(result['revision_note'], '默认')
-        self.assertEqual(result['reading']['problem']['years'], 4)
-        self.assertEqual(result['reading']['problem']['periods_per_year'], 4)
-        self.assertFalse(any(i['severity'] == 'error' for i in result['reading']['issues']))
+        self.assertEqual(revised['revision_note'], '默认')
+        problem = revised['reading']['problem']
+        self.assertEqual((problem['years'], problem['periods_per_year']), (4, 4))
+        self.assertFalse(any(i['severity'] == 'error' for i in revised['reading']['issues']))
+        self.assertEqual(self.request(base + '/problem')['snapshot']['reading']['problem'], problem)
         proposal = loads(proposal_json())
         proposal['plan']['actions'] = [
             {**proposal['plan']['actions'][0], 'period': period} for period in range(1, 17)]
         proposal['parameters'] = []
         self.llm.response = dumps(proposal)
-        job = self.request(base + '/solve', {'version': 3})
+        job = self.request(base + '/solve', {'version': revised['version']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
