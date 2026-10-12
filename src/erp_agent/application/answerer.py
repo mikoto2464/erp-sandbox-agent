@@ -40,7 +40,7 @@ class AnswererService:
     def public_mapping(self, mapping: WorkbookMapping) -> JSONObject:
         report = self.context(mapping.project_id, mapping.solution_id)
         result = obj(to_json(mapping))
-        sources = output_sources(report.solution)
+        sources = output_sources(report.solution, report.snapshot)
         result['sources'] = to_json(sources)
         result['values'] = [None if not entry.source_ids else self._preview_value(entry, sources)
                             for entry in mapping.entries]
@@ -66,20 +66,19 @@ class AnswererService:
         report = self.context(project_id, string(data.get('solution_id'), 100))
         template = budget_template(self.repository.get('template', project_id, string(data.get('template_id'), 100)))
         self._check_active(project_id, 'mapping', report.solution.id, template.source.id)
-        needs_llm = not any(i.template_id == template.source.id for i in report.solution.plan.budget_items)
         binding = self.models.capture()
-        if needs_llm and not binding.client.configured:
-            raise ERPError('llm_not_configured', '新模板映射需要已配置的模型。', 503)
+        if not binding.client.configured:
+            raise ERPError('llm_not_configured', '预算表分析需要已配置的模型。', 503)
 
         def operation(control: RunControl) -> JSONValue:
-            mapping = self.mapper.analyze(report.solution, template, binding.client, control)
+            mapping = self.mapper.analyze(report.solution, template, binding.client, control, report.snapshot)
             control.checkpoint('saving_mapping')
             self.repository.put('mapping', project_id, mapping.id, mapping)
             return {'mapping_id': mapping.id, 'needs_input': True}
 
         return self.jobs.submit(project_id, 'mapping', operation, {
             'solution_id': report.solution.id, 'template_id': template.source.id,
-            'model_preset': binding.metadata() if needs_llm else None,
+            'model_preset': binding.metadata(),
         })
 
     def confirm(self, project_id: str, mapping_id: str, data: JSONObject) -> JSONObject:
@@ -92,7 +91,7 @@ class AnswererService:
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板内容已变化，请重新分析。', 409)
             entries = workbook_entries(data.get('entries'))
-            issues = validate_mapping(template, entries, report.solution)
+            issues = validate_mapping(template, entries, report.solution, report.snapshot)
             if any(i.severity == 'error' for i in issues):
                 raise ERPError('mapping_invalid', '映射不能保存：' + '；'.join(i.message for i in issues if i.severity == 'error'))
             saved = replace(mapping, entries=entries, issues=issues, confirmed=True, revision=mapping.revision + 1)
@@ -121,7 +120,7 @@ class AnswererService:
             template = budget_template(self.repository.get('template', project_id, mapping.template_id))
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板已变更，请重新分析。', 409)
-            if any(i.severity == 'error' for i in validate_mapping(template, mapping.entries, report.solution)):
+            if any(i.severity == 'error' for i in validate_mapping(template, mapping.entries, report.solution, report.snapshot)):
                 raise ERPError('mapping_invalid', '映射检查未通过。', 409)
             original = self.repository.get('template_original', project_id, mapping.template_id)
             content = base64.b64decode(string(original['content'], 150 * 1024 * 1024))

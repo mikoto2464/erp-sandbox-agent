@@ -6,10 +6,10 @@ from erp_agent.application.contracts import (
 from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    BudgetCell, BudgetSheet, BudgetTemplate, GenerationConfig, PlanTone,
-    Cell, DocumentAnnotation, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot,
-    ReadingInputs, SourceDocument,
-    Evaluation, Issue, SolutionBundle, SolverMode, WorkbookEntry, WorkbookMapping,
+    BudgetCell, BudgetFormulaReference, BudgetSheet, BudgetTemplate, BudgetValidation, Cell,
+    DocumentAnnotation, DocumentBlock, Evaluation, Evidence, GenerationConfig, Issue,
+    ParsedDocument, PlanTone, ProblemSnapshot, ReadingInputs, SolutionBundle, SolverMode,
+    SourceDocument, WorkbookEntry, WorkbookMapping,
 )
 
 
@@ -88,7 +88,13 @@ def budget_template(data: JSONObject) -> BudgetTemplate:
         sheets.append(BudgetSheet(string(sheet["name"]), integer(sheet["rows"], maximum=1048576),
                                   integer(sheet["columns"], maximum=16384), cells,
                                   strings(sheet["merged_ranges"]), bool(sheet["hidden"]),
-                                  bool(sheet["protected"])))
+                                  bool(sheet["protected"]),
+                                  tuple(BudgetFormulaReference(string(r["formula_cell"]), string(r["sheet"]),
+                                                               string(r["range"]))
+                                        for v in array(sheet.get("formula_references", [])) for r in (obj(v),)),
+                                  tuple(BudgetValidation(string(r["range"]), string(r["kind"]),
+                                                         string(r["formula1"]), string(r["formula2"]))
+                                        for v in array(sheet.get("validations", [])) for r in (obj(v),))))
     return BudgetTemplate(SourceDocument(
         string(source["id"]), string(source["filename"]), string(source["sha256"]),
         integer(source["size"], 0, 100 * 1024 * 1024), string(source["format"])),

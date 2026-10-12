@@ -195,6 +195,21 @@ class BudgetCell:
 
 
 @dataclass(frozen=True)
+class BudgetFormulaReference:
+    formula_cell: str
+    sheet: str
+    range: str
+
+
+@dataclass(frozen=True)
+class BudgetValidation:
+    range: str
+    kind: str
+    formula1: str = ""
+    formula2: str = ""
+
+
+@dataclass(frozen=True)
 class BudgetSheet:
     name: str
     rows: int
@@ -203,6 +218,8 @@ class BudgetSheet:
     merged_ranges: tuple[str, ...] = ()
     hidden: bool = False
     protected: bool = False
+    formula_references: tuple[BudgetFormulaReference, ...] = ()
+    validations: tuple[BudgetValidation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -210,7 +227,7 @@ class BudgetTemplate:
     source: SourceDocument
     sheets: tuple[BudgetSheet, ...]
     warnings: tuple[str, ...] = ()
-    parser_version: str = "budget-1"
+    parser_version: str = "budget-2"
 
 
 @dataclass(frozen=True)
@@ -309,7 +326,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-2"
+    prompt_version: str = "solver-3"
 
 
 @dataclass(frozen=True)

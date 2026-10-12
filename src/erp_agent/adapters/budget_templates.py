@@ -1,15 +1,18 @@
 import io
+import re
 from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.formula.tokenizer import Tokenizer, TokenizerError
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
 from erp_agent.adapters.spreadsheet_documents import XLSDocumentParser
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    BudgetCell, BudgetSheet, BudgetTemplate, ParsedDocument, SourceDocument,
+    BudgetCell, BudgetFormulaReference, BudgetSheet, BudgetTemplate, BudgetValidation,
+    ParsedDocument, SourceDocument,
 )
 
 
@@ -30,7 +33,7 @@ class SpreadsheetBudgetParser:
             raise ERPError("invalid_template", "预算表无法解析，请检查文件是否损坏或加密。") from exc
         sheets = []
         size = text_size = cell_count = 0
-        warnings = ["模板预览保留原公式；实际填写与重算状态以导出文件为准。"]
+        warnings = ["只填写空白输入格，已有公式及数据保持原样；公式重算状态以导出文件为准。"]
         try:
             if len(workbook.worksheets) > 100:
                 raise ERPError("template_limit", "预算表工作表过多。")
@@ -39,6 +42,7 @@ class SpreadsheetBudgetParser:
                 if size > 100000:
                     raise ERPError("template_limit", "预算表范围过大，请删除远处空白格式或拆分上传。")
                 cells = []
+                references = []
                 for row in sheet.iter_rows():
                     for cell in row:
                         if isinstance(cell, MergedCell) or (cell.value is None and not cell.has_style):
@@ -50,10 +54,19 @@ class SpreadsheetBudgetParser:
                             raise ERPError("template_limit", "预算表条目过多，请拆分上传。")
                         cells.append(BudgetCell(cell.coordinate, text, cell.number_format,
                                                 cell.data_type == "f",
-                                                not (sheet.protection.sheet and cell.protection.locked)))
+                                                not (sheet.protection.sheet and cell.protection.locked)
+                                                and not sheet.row_dimensions[cell.row].hidden
+                                                and not any(d.hidden and (d.min or 0) <= cell.column <= (d.max or 0)
+                                                            for d in sheet.column_dimensions.values())))
+                        if cell.data_type == "f":
+                            references.extend(_formula_references(cell.coordinate, text, sheet.title))
+                validations = tuple(BudgetValidation(str(v.sqref), v.type or "custom",
+                                                    str(v.formula1 or ""), str(v.formula2 or ""))
+                                    for v in sheet.data_validations.dataValidation)
                 sheets.append(BudgetSheet(sheet.title, sheet.max_row, sheet.max_column, tuple(cells),
                                           tuple(str(r) for r in sheet.merged_cells.ranges),
-                                          sheet.sheet_state != "visible", bool(sheet.protection.sheet)))
+                                          sheet.sheet_state != "visible", bool(sheet.protection.sheet),
+                                          tuple(references), validations))
             if not any(c.text.strip() for s in sheets for c in s.cells):
                 raise ERPError("empty_template", "预算表没有可识别的标题或条目，请提供带表头的空表。")
             if any(s.hidden or s.protected for s in sheets):
@@ -93,3 +106,26 @@ class SpreadsheetBudgetParser:
         return BudgetTemplate(document.source, tuple(sheets), document.warnings + (
             "XLS 使用文件中已保存的结果；公式及保护信息未完整提取，正式填表需重新分析模板。",
         ))
+
+
+def _formula_references(cell: str, formula: str, sheet: str) -> tuple[BudgetFormulaReference, ...]:
+    try:
+        tokens = Tokenizer(formula).items
+    except TokenizerError:
+        return ()
+    references = []
+    for token in tokens:
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            continue
+        target = sheet
+        address = token.value
+        if "!" in address:
+            target, address = address.rsplit("!", 1)
+            target = target.strip("'").replace("''", "'")
+        address = address.replace("$", "")
+        if "[" in target or not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]{0,6}(:[A-Z]{1,3}[1-9][0-9]{0,6})?", address):
+            continue
+        reference = BudgetFormulaReference(cell, target, address)
+        if reference not in references:
+            references.append(reference)
+    return tuple(references)

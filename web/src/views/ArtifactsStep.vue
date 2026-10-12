@@ -116,7 +116,7 @@ const formulaNames: Record<string, string> = {
         <div class="section-heading">
           <div>
             <h3>填写预算空表</h3>
-            <p class="muted">核对条目对应关系后填写，公式和原版式保留。</p>
+            <p class="muted">AI 根据方案匹配空白输入格，已有公式和数据保持原样。</p>
           </div>
           <label class="review-action template-upload"
             >上传空表<input

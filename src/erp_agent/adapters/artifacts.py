@@ -233,9 +233,11 @@ class XlsxWorkbookRenderer:
                     if isinstance(cell.value, str):
                         cell.data_type = 's'
         original_formulas = {(s.title, c.coordinate): c.value for s in workbook for row in s for c in row if c.data_type == 'f'}
+        original_values = {(s.title, c.coordinate): c.value for s in workbook for row in s for c in row
+                           if c.value is not None and c.data_type != 'f'}
         original_merges = {s.title: tuple(str(r) for r in s.merged_cells.ranges) for s in workbook}
         written = {}
-        sources = output_sources(report.solution)
+        sources = output_sources(report.solution, report.snapshot)
         if mapping:
             for entry in mapping.entries:
                 value = mapped_value(entry, sources)
@@ -244,7 +246,10 @@ class XlsxWorkbookRenderer:
                 sheet = workbook[entry.sheet]
                 cell = sheet[entry.cell]
                 if (isinstance(cell, MergedCell) or cell.value is not None or cell.data_type == 'f'
-                        or sheet.sheet_state != 'visible' or (sheet.protection.sheet and cell.protection.locked)):
+                        or sheet.sheet_state != 'visible' or (sheet.protection.sheet and cell.protection.locked)
+                        or sheet.row_dimensions[cell.row].hidden
+                        or any(d.hidden and (d.min or 0) <= cell.column <= (d.max or 0)
+                               for d in sheet.column_dimensions.values())):
                     raise ERPError('workbook_readonly', f'{entry.sheet} · {entry.cell} 不能覆盖。')
                 if isinstance(value, Decimal):
                     cell.value = _excel_number(value)
@@ -288,6 +293,7 @@ class XlsxWorkbookRenderer:
             try:
                 changed = any(recalculated[s][c].value != value for (s, c), value in written.items())
                 changed |= any(recalculated[s][c].value != value for (s, c), value in original_formulas.items())
+                changed |= any(recalculated[s][c].value != value for (s, c), value in original_values.items())
                 changed |= any(tuple(str(r) for r in recalculated[s].merged_cells.ranges) != ranges
                                for s, ranges in original_merges.items())
             finally:
@@ -301,6 +307,8 @@ class XlsxWorkbookRenderer:
                 raise ERPError('workbook_verification', '导出表格写入值复查失败。', 500)
             if any(reopened[s][c].value != value for (s, c), value in original_formulas.items()):
                 raise ERPError('workbook_verification', '导出表格公式发生变化。', 500)
+            if any(reopened[s][c].value != value for (s, c), value in original_values.items()):
+                raise ERPError('workbook_verification', '导出表格已有数据发生变化。', 500)
             if any(tuple(str(r) for r in reopened[s].merged_cells.ranges) != ranges for s, ranges in original_merges.items()):
                 raise ERPError('workbook_verification', '导出表格合并区域发生变化。', 500)
         finally:

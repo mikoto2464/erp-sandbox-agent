@@ -1,14 +1,18 @@
 import io
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
 from docx import Document
 
 from erp_agent.adapters.artifacts import DocxReportRenderer, XlsxWorkbookRenderer
 from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
-from erp_agent.application.contracts import decode_proposal, dumps
+from erp_agent.application.budget_context import budget_material
+from erp_agent.application.codec import budget_template
+from erp_agent.application.contracts import decode_proposal, dumps, loads, to_json
 from erp_agent.application.workbook_mapper import WorkbookMapper
-from erp_agent.domain.models import ReportData, SolutionBundle, SolverMode, SourceDocument, WorkbookEntry
+from erp_agent.domain.models import BudgetItem, ReportData, SolutionBundle, SolverMode, SourceDocument, WorkbookEntry
 from erp_agent.domain.workbook import validate_mapping
 from tests.helpers import snapshot, proposal_json, Control, FakeLLM
 from erp_agent.application.solver import DraftPlanEvaluator
@@ -46,6 +50,72 @@ def template_fixture(transposed=False):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_formula_driven_inputs_use_agent_even_with_partial_previous_budget(self):
+        data = report()
+        workbook = Workbook()
+        first = workbook.active
+        first.title = '第一年'
+        first.append(['项目', '第一季', '年度合计'])
+        first.append(['借款', None, '=SUM(B2)'])
+        first['B2'].number_format = '0.00'
+        first['B3'] = 0
+        second = workbook.create_sheet('生产')
+        second.append(['期间', '操作', '期初资本', '跨表合计'])
+        second.append(['第一季', None, None, "='第一年'!C2"])
+        second['B2'].number_format = '@'
+        second['C2'].number_format = '0'
+        second['A3'] = '内部'
+        second['B3'].number_format = '0'
+        second.row_dimensions[3].hidden = True
+        validation = DataValidation(type='whole', operator='greaterThanOrEqual', formula1=0)
+        validation.add(second['C2'])
+        second.add_data_validation(validation)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        content = buffer.getvalue()
+        template = SpreadsheetBudgetParser().parse(SourceDocument('template', 'budget.xlsx', 'hash', len(content), 'xlsx'), content)
+        self.assertEqual(budget_template(to_json(template)), template)
+        material = budget_material((template,), include_formula_references=True)[0]
+        self.assertEqual(material['sheets'][0]['formula_references'], [['C2', '第一年', ['B2']]])
+        self.assertEqual(material['sheets'][1]['validations'][0]['kind'], 'whole')
+        self.assertFalse(next(c for c in template.sheets[1].cells if c.coordinate == 'B3').writable)
+        old = BudgetItem('template', '第一年', 'B2', '借款', 1, '元', '10', (0,), '旧预算')
+        data = replace(data, solution=replace(data.solution, plan=replace(data.solution.plan, budget_items=(old,))))
+
+        class MappingLLM(FakeLLM):
+            def generate(self, request):
+                current = loads(request.user)['template']['sheets'][0]['name']
+                entries = [
+                    {'sheet': current, 'cell': 'B2', 'label': '借款' if current == '第一年' else '操作',
+                     'source_ids': ['action:0:amount' if current == '第一年' else 'action:0:description'],
+                     'conversion': 'identity', 'explanation': '第一季方案'},
+                    {'sheet': current, 'cell': 'C2', 'label': '汇总' if current == '第一年' else '期初资本',
+                     'source_ids': [] if current == '第一年' else ['fact:cash'],
+                     'conversion': 'identity', 'explanation': '保留公式或引用题目初始值'},
+                ]
+                self.response = dumps({'entries': entries})
+                return super().generate(request)
+
+        llm = MappingLLM('')
+        with patch('erp_agent.application.workbook_mapper.MAPPING_BATCH_CHARS', 1):
+            mapping = WorkbookMapper().analyze(data.solution, template, llm, Control(), data.snapshot)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(len(mapping.entries), 3)
+        self.assertFalse(any(i.severity == 'error' for i in mapping.issues))
+        filled = XlsxWorkbookRenderer().render(data, template, content, replace(mapping, confirmed=True))
+        reopened = load_workbook(io.BytesIO(filled.content), data_only=False)
+        self.assertEqual(reopened['第一年']['C2'].value, '=SUM(B2)')
+        self.assertEqual(reopened['第一年']['B3'].value, 0)
+        self.assertEqual(reopened['生产']['D2'].value, "='第一年'!C2")
+        self.assertEqual(reopened['生产']['B2'].value, data.solution.plan.actions[0].description)
+        self.assertEqual(reopened['生产']['C2'].value, 100000)
+        self.assertTrue(reopened['生产'].row_dimensions[3].hidden)
+        self.assertEqual(str(reopened['生产'].data_validations), str(second.data_validations))
+        self.assertTrue(any(i.severity == 'error' for i in validate_mapping(
+            template, (WorkbookEntry('生产', 'B3', '内部', ('action:0:amount',)),), data.solution)))
+        reopened.close()
+        workbook.close()
+
     def test_report_covers_all_sixteen_periods_and_preserves_operating_values(self):
         data = report()
         problem = replace(data.snapshot, reading=replace(data.snapshot.reading, problem=replace(data.snapshot.reading.problem, years=4, periods_per_year=4)))

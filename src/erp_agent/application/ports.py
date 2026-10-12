@@ -90,7 +90,7 @@ class ReportRenderer(Protocol):
 
 class WorkbookMappingAnalyzer(Protocol):
     def analyze(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
-                control: RunControl) -> WorkbookMapping: ...
+                control: RunControl, snapshot: ProblemSnapshot | None = None) -> WorkbookMapping: ...
 
 
 class WorkbookRenderer(Protocol):

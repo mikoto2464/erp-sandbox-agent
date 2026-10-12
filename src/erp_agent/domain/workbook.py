@@ -1,13 +1,15 @@
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 
 from erp_agent.domain.budget_validation import cell_position
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    BudgetTemplate, Issue, OutputSource, SolutionBundle, WorkbookEntry,
+    BudgetCell, BudgetSheet, BudgetTemplate, Issue, KnowledgeState, OutputSource, ProblemSnapshot,
+    SolutionBundle, WorkbookEntry,
 )
 
 
-def output_sources(solution: SolutionBundle) -> tuple[OutputSource, ...]:
+def output_sources(solution: SolutionBundle, snapshot: ProblemSnapshot | None = None) -> tuple[OutputSource, ...]:
     result = []
     for index, action in enumerate(solution.plan.actions):
         result.extend((
@@ -17,10 +19,18 @@ def output_sources(solution: SolutionBundle) -> tuple[OutputSource, ...]:
             OutputSource(f"action:{index}:quantity", action.description + " · 数量",
                          None if action.quantity is None else str(action.quantity), True,
                          action.period, "题目数量单位"),
+            OutputSource(f"action:{index}:description", action.description + " · 操作说明",
+                         action.description, False, action.period, ""),
         ))
     for index, item in enumerate(solution.plan.budget_items):
         result.append(OutputSource(f"budget:{index}", item.label, item.value, _numeric(item.value),
                                    item.period, item.unit))
+    if snapshot:
+        for fact in snapshot.reading.problem.facts:
+            if fact.state == KnowledgeState.KNOWN and fact.value is not None:
+                result.append(OutputSource(f"fact:{fact.id}", f"{fact.entity_name} · {fact.key}",
+                                           fact.value, fact.value_type == "number" and _numeric(fact.value),
+                                           None, fact.unit))
     return tuple(result)
 
 
@@ -62,11 +72,30 @@ def mapped_value(entry: WorkbookEntry, sources: tuple[OutputSource, ...]) -> Dec
     return numbers[0] * factors[entry.conversion]
 
 
+def writable_target(sheet: BudgetSheet, address: str,
+                    cells: Mapping[str, BudgetCell] | None = None) -> bool:
+    pos = cell_position(address)
+    if sheet.hidden or pos is None or pos[0] > sheet.rows or pos[1] > sheet.columns:
+        return False
+    cell = cells.get(address) if cells is not None else next((c for c in sheet.cells if c.coordinate == address), None)
+    if cell and (cell.formula or not cell.writable or cell.text):
+        return False
+    if sheet.protected and cell is None:
+        return False
+    for region in sheet.merged_ranges:
+        start, end = region.split(":") if ":" in region else (region, region)
+        first, last = cell_position(start), cell_position(end)
+        if first and last and first[0] <= pos[0] <= last[0] and first[1] <= pos[1] <= last[1] and address != start:
+            return False
+    return True
+
+
 def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...],
-                     solution: SolutionBundle) -> tuple[Issue, ...]:
+                     solution: SolutionBundle, snapshot: ProblemSnapshot | None = None) -> tuple[Issue, ...]:
     issues = []
     sheets = {s.name: s for s in template.sheets}
-    sources = output_sources(solution)
+    cells = {s.name: {c.coordinate: c for c in s.cells} for s in template.sheets}
+    sources = output_sources(solution, snapshot)
     source_index = {s.id: s for s in sources}
     seen = set()
     if not entries:
@@ -83,15 +112,7 @@ def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...
         seen.add((entry.sheet, entry.cell))
         if len(set(entry.source_ids)) != len(entry.source_ids):
             issues.append(Issue("mapping.duplicate_source", "error", target, "同一来源不能重复计入合计。"))
-        cell = next((c for c in sheet.cells if c.coordinate == entry.cell), None)
-        blocked = sheet.hidden or (cell and (cell.formula or not cell.writable or bool(cell.text)))
-        blocked = blocked or (sheet.protected and cell is None)
-        for region in sheet.merged_ranges:
-            start, end = region.split(":") if ":" in region else (region, region)
-            first, last = cell_position(start), cell_position(end)
-            if first and last and first[0] <= pos[0] <= last[0] and first[1] <= pos[1] <= last[1]:
-                blocked = blocked or entry.cell != start
-        if blocked and entry.source_ids:
+        if not writable_target(sheet, entry.cell, cells[entry.sheet]) and entry.source_ids:
             issues.append(Issue("mapping.readonly", "error", target,
                                 "已有内容、公式、隐藏/保护区域或合并续格不能直接填入。"))
         try:
