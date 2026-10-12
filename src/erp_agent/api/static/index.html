@@ -39,15 +39,18 @@
         </nav>
         <section id="step-1" class="step-panel card">
           <div class="section-heading"><h2>题目文件</h2><span id="upload-limit" class="muted"></span></div>
-          <label id="drop-zone" class="drop-zone" for="files"><span class="upload-icon">↑</span><strong>点击选择，或拖入文件</strong><span class="muted">DOCX / DOC · 可一次添加多个文件</span><input id="files" type="file" accept=".docx,.doc" multiple></label>
+          <label id="drop-zone" class="drop-zone" for="files"><span class="upload-icon">↑</span><strong>点击选择，或拖入文件</strong><span class="muted">DOCX / DOC / PDF / XLS · 可一次添加多个文件</span><input id="files" type="file" accept=".docx,.doc,.pdf,.xls" multiple></label>
           <div id="documents" class="file-list"></div>
+          <details id="manual-entry" class="input-section"><summary>手动输入题目（选填）</summary><label for="problem-text" class="sr-only">手动题目</label><textarea id="problem-text" rows="5" maxlength="100000" placeholder="可直接粘贴题目，也可补充文件中无法读取的正文。不上传文件也可以使用。"></textarea></details>
+          <div class="input-section"><label for="supplement-text">补充内容与限制（选填）</label><textarea id="supplement-text" rows="3" maxlength="50000" placeholder="例如：订单数量以上传详单为上限；优先减少借款。"></textarea></div>
+          <div class="input-save"><span id="input-save-status" class="muted"></span><button id="save-inputs" type="button" class="text-button" disabled>保存输入</button></div>
           <details id="source-preview"><summary>查看原文</summary><div id="source-content"></div></details>
           <div id="model-required" class="notice" hidden>请先配置读题模型。<button id="configure-model" class="text-button">打开模型预设</button></div>
           <div class="panel-footer"><span id="selected-count" class="muted"></span><button id="read" class="primary" disabled>读取题目 →</button></div>
         </section>
         <section id="step-2" class="step-panel" hidden>
           <div class="review-toolbar"><div><h2>确认题目</h2><span id="reading-model" class="muted"></span></div><button id="reread" class="secondary">重新读取</button></div>
-          <div id="reading-empty" class="card empty">先上传文件并点击“读取题目”。</div>
+          <div id="reading-empty" class="card empty">上传文件或输入题目后，点击“读取题目”。</div>
           <div id="review" hidden>
             <div class="card review-guide">
               <div class="section-heading"><div><h2 id="review-status-title"></h2><p id="review-status-detail" class="muted"></p></div><span id="review-status-badge" class="badge"></span></div>

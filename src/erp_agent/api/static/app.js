@@ -16,6 +16,7 @@ const fieldNames = {initial_cash:"初始现金",years:"经营年数",periods_per
 const statusNames = {queued:"排队",running:"执行中",succeeded:"完成",failed:"失败",cancelled:"已取消",needs_input:"需要复核"};
 const stageNames = {queued:"排队",starting:"开始",parsing:"解析文件",saving_document:"保存文件",reading:"整理题目",repairing_reading:"修复读题格式",repairing_strategy:"修复方案格式",validating:"校验来源",saving_reading:"保存读题",proposing:"生成策略",validating_plan:"校验计划",searching:"搜索候选",validating_best:"复验方案",saving:"保存结果",done:"已完成",cancelling:"等待取消"};
 let projects = [], projectId = "", snapshot = null, editable = null, status = null;
+let inputDraft={revision:0,problem_text:"",supplement_text:"",annotations:[]},inputsDirty=false,inputEditSequence=0;
 let documents = [], jobs = [], selectedFiles = new Set(), knownFiles = new Set();
 let authenticated = false, dirty = false, polling = false, generation = 0, currentStep = 1;
 let pendingDelete = null, latestReadSeen = 0, documentsSignature = "", jobsSignature = "", solutionsSignature = "";
@@ -77,7 +78,7 @@ function markDirty() {
   updateControls();
 }
 function navigate(operation) {
-  if (dirty && projectId) {
+  if ((dirty || inputsDirty) && projectId) {
     pendingNavigation = operation;
     $("discard-dialog").showModal();
   } else safe(operation);
@@ -103,23 +104,27 @@ function activeRead() { return jobs.some(job => job.kind === "read" && ["queued"
 function mode() { return document.querySelector('input[name="solver-mode"]:checked').value; }
 function updateControls() {
   const mc = mode() === "llm_monte_carlo";
-  const canRead = authenticated && !!projectId && selectedFiles.size > 0 && status?.llm_configured && !activeRead();
+  const canRead = authenticated && !!projectId && (selectedFiles.size > 0 || inputDraft.problem_text.trim()) && status?.llm_configured && !activeRead();
   $("read").disabled = !canRead;
   $("reread").disabled = !canRead || dirty;
   $("read").textContent = activeRead() ? "正在读题…" : "读取题目 →";
   $("model-required").hidden = !!status?.llm_configured;
-  $("selected-count").textContent = `已选择 ${selectedFiles.size} 个文件`;
+  $("selected-count").textContent = `已选择 ${selectedFiles.size} 个文件${inputDraft.problem_text.trim()?" · 含手动题目":""}`;
+  $("save-inputs").disabled=!inputsDirty;
+  $("input-save-status").textContent=inputsDirty?"输入待保存，读取时会自动保存":"输入已保存";
+  if(inputsDirty)$("selected-count").textContent+=" · 将先保存输入";
   $("search-config").hidden = !mc;
   const readiness = reviewReadiness();
   const readingErrors = readiness.errors > 0;
   const horizonMissing = !readiness.horizon;
   const solving = jobs.some(job=>job.kind==="solve" && ["queued","running"].includes(job.status));
-  $("solve").disabled = !snapshot || dirty || readingErrors || horizonMissing || solving || !status?.llm_configured || (mc && !status?.simulation_ready);
+  const inputsChanged=inputsDirty || (snapshot && inputDraft.revision!==(snapshot.inputs?.revision || 0));
+  $("solve").disabled = !snapshot || dirty || inputsChanged || readingErrors || horizonMissing || solving || !status?.llm_configured || (mc && !status?.simulation_ready);
   $("save-revision").disabled = !snapshot || !dirty;
   $("next-solve").disabled = !snapshot || (!dirty && (readingErrors || horizonMissing));
   $("next-solve").textContent = dirty ? "保存并继续 →" : readingErrors ? "待修正错误" : horizonMissing ? "先确认经营周期" : "继续生成方案 →";
   $("solve").textContent = solving ? "正在生成…" : "生成方案草稿";
-  $("solver-note").textContent = horizonMissing ? "请返回确认题目，填写经营年数和每年期数。" : readingErrors ? "题目还有错误，请修正并保存。" : mc
+  $("solver-note").textContent = inputsChanged ? "题目输入或文件说明已修改，请返回上传步骤并重新读取。" : horizonMissing ? "请返回确认题目，填写经营年数和每年期数。" : readingErrors ? "题目还有错误，请修正并保存。" : mc
     ? (status?.simulation_ready ? "在仿真器中搜索并比较候选方案。" : "经营仿真内核尚未就绪，暂不能使用蒙特卡罗。")
     : "当前输出为方案草稿，产能、现金与履约尚未经过经营仿真验证。";
   $("solve-context").textContent = snapshot ? `${snapshot.reading.problem.years || "待确认"} 年 · 每年 ${snapshot.reading.problem.periods_per_year || "待确认"} 期` : "请先确认题目";
@@ -185,6 +190,8 @@ async function openProject(project) {
   projectId = project.id; snapshot = null; editable = null; dirty = false;
   documents = []; jobs = []; selectedFiles = new Set(); knownFiles = new Set(); latestReadSeen = 0;
   documentsSignature = ""; jobsSignature = ""; solutionsSignature = "";
+  inputDraft={revision:0,problem_text:"",supplement_text:"",annotations:[]};inputsDirty=false;inputEditSequence=0;
+  $("problem-text").value="";$("supplement-text").value="";$("manual-entry").open=false;
   $("project-title").textContent = project.name;
   $("project-subtitle").textContent = `创建于 ${new Date(project.created_at).toLocaleDateString("zh-CN")}`;
   $("project-view").hidden = true; $("flow-view").hidden = false;
@@ -195,7 +202,12 @@ async function openProject(project) {
   updateFutureModules([]);
   $("fact-search").value = ""; $("state-filter").value = ""; $("issue-filter").value="";
   $("evidence-drawer").hidden = true;
-  setStep(1); await refresh(true);
+  setStep(1);
+  const captured=generation;
+  const inputs=await api(base()+"/inputs");if(captured!==generation)return;
+  inputDraft=inputs;$("problem-text").value=inputs.problem_text;$("supplement-text").value=inputs.supplement_text;
+  $("manual-entry").open=!!inputs.problem_text;
+  await refresh(true);
   if (snapshot) setStep(2);
 }
 function askDelete(project) {
@@ -208,13 +220,18 @@ function renderDocuments() {
   for (const document of documents) {
     const id = document.source.id;
     if (!knownFiles.has(id)) { knownFiles.add(id); selectedFiles.add(id); }
-    const row = node("label", undefined, "file-row");
+    const entry=node("div",undefined,"file-entry"),row = node("div", undefined, "file-row");
     const checkbox = node("input"); checkbox.type = "checkbox"; checkbox.checked = selectedFiles.has(id);
     checkbox.onchange = () => { if (checkbox.checked) selectedFiles.add(id); else selectedFiles.delete(id); updateControls(); };
     const info = node("span", document.source.filename, "file-info");
     info.append(node("small", `${Math.ceil(document.source.size / 1024)} KB · ${document.evidence.length} 处证据`));
     row.append(checkbox, info, node("span", "已解析", "badge known"));
-    $("documents").append(row);
+    const note=node("label",undefined,"file-note"),text=node("textarea");text.rows=2;text.maxLength=5000;
+    text.value=inputDraft.annotations.find(a=>a.document_id===id)?.text || "";
+    text.placeholder="文件说明（选填），例如：订单数量不得超过此详单。";
+    text.setAttribute("aria-label",`${document.source.filename}的文件说明`);
+    text.oninput=()=>{inputDraft.annotations=inputDraft.annotations.filter(a=>a.document_id!==id);if(text.value.trim())inputDraft.annotations.push({document_id:id,text:text.value});markInputsDirty();};
+    note.append(node("span","说明"),text);entry.append(row,note);$("documents").append(entry);
     const details = node("details", undefined, "source-document");
     details.append(node("summary", document.source.filename));
     for (const warning of document.warnings) details.append(node("p", warning, "notice"));
@@ -237,7 +254,7 @@ function renderDocuments() {
   updateControls();
 }
 function evidenceIndex() {
-  return new Map(documents.flatMap(doc=>doc.evidence.map(e=>[e.id,{...e,filename:doc.source.filename}])));
+  return new Map([...documents,...(snapshot?.additional_sources || [])].flatMap(doc=>doc.evidence.map(e=>[e.id,{...e,filename:doc.source.filename}])));
 }
 function evidenceContextText(evidence, index) {
   const context=evidence.table_context;
@@ -641,7 +658,7 @@ function renderJobs() {
     if(["failed","cancelled"].includes(job.status)){
       const retry=node("button","重试","secondary");retry.onclick=()=>busy(retry,async()=>{
         if(job.kind==="parse")await post(`${base()}/documents/${job.metadata.document_id}/retry`,{});
-        else if(job.kind==="read")await post(`${base()}/read`,{document_ids:job.metadata.document_ids});
+        else if(job.kind==="read"){await saveInputs();await post(`${base()}/read`,{document_ids:[...selectedFiles],input_revision:inputDraft.revision});}
         else await post(`${base()}/solve`,{version:job.metadata.version,mode:job.metadata.mode,...job.metadata.search});
         await refresh();
       });row.append(retry);
@@ -674,7 +691,7 @@ async function uploadFiles(files) {
   if(!projectId)return;
   const captured=generation, url=base();
   for(const file of files){
-    if(!/\.(docx|doc)$/i.test(file.name))throw new Error("请选择 DOCX 或 DOC 文件。");
+    if(!/\.(docx|doc|pdf|xls)$/i.test(file.name))throw new Error("请选择 DOCX、DOC、PDF 或 XLS 文件。");
     if(file.size>status.max_upload_mb*1024*1024)throw new Error(`${file.name} 超过大小限制。`);
     await api(url+"/documents",{method:"POST",headers:{"Content-Type":"application/octet-stream","X-Filename":encodeURIComponent(file.name)},body:file});
   }
@@ -683,8 +700,23 @@ async function uploadFiles(files) {
 }
 async function startReading(button) {
   if(dirty){toast("请先保存读题修改。");return;}
-  await busy(button,async()=>{await post(base()+"/read",{document_ids:[...selectedFiles]});setStep(2);await refresh();});
+  const captured=generation;
+  await busy(button,async()=>{await saveInputs();if(captured!==generation)return;await post(base()+"/read",{document_ids:[...selectedFiles],input_revision:inputDraft.revision});if(captured!==generation)return;setStep(2);await refresh();});
 }
+function markInputsDirty(){inputsDirty=true;inputEditSequence++;updateControls();}
+async function saveInputs(){
+  if(!inputsDirty)return;
+  const captured=generation,sequence=inputEditSequence;
+  const saved=await post(base()+"/inputs",structuredClone(inputDraft));
+  if(captured!==generation)return;
+  inputDraft.revision=saved.revision;
+  if(sequence===inputEditSequence){inputDraft=saved;inputsDirty=false;}
+  updateControls();
+  if(inputsDirty)throw new Error("输入在保存期间有变化，请再次点击保存或读取。");
+}
+$("problem-text").oninput=()=>{inputDraft.problem_text=$("problem-text").value;markInputsDirty();};
+$("supplement-text").oninput=()=>{inputDraft.supplement_text=$("supplement-text").value;markInputsDirty();};
+$("save-inputs").onclick=()=>busy($("save-inputs"),async()=>{await saveInputs();toast("输入已保存。");});
 async function openSettings() {
   modelCatalog=await api("/api/model-presets");
   modelProviders=modelCatalog.providers;
@@ -807,8 +839,8 @@ $("login-form").onsubmit=async event=>{
 };
 $("logout").onclick=()=>navigate(async()=>{await post("/api/auth/logout",{});dirty=false;showLogin();});
 $("home").onclick=$("back-projects").onclick=()=>navigate(showProjects);
-$("discard-confirm").onclick=()=>{const operation=pendingNavigation;pendingNavigation=null;dirty=false;$("discard-dialog").close();if(operation)safe(operation);};
-window.addEventListener("beforeunload", event=>{if(dirty){event.preventDefault();event.returnValue="";}});
+$("discard-confirm").onclick=()=>{const operation=pendingNavigation;pendingNavigation=null;dirty=false;inputsDirty=false;$("discard-dialog").close();if(operation)safe(operation);};
+window.addEventListener("beforeunload", event=>{if(dirty || inputsDirty){event.preventDefault();event.returnValue="";}});
 $("new-project").onclick=$("empty-create").onclick=()=>{$("project-dialog").showModal();$("project-name").focus();};
 $("create-form").onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{const project=await post("/api/projects",{name:$("project-name").value});$("project-dialog").close();$("project-name").value="";projects.push(project);await openProject(project);});};
 $("delete-current").onclick=()=>askDelete(projects.find(p=>p.id===projectId));

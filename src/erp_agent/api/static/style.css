@@ -422,6 +422,16 @@ main {
   display:block;
   margin-top:4px;
 }
+.file-entry { border-bottom:1px solid var(--line); padding-bottom:14px; }
+.file-entry .file-row { border:0; }
+.file-note { display:flex; gap:12px; align-items:flex-start; margin-left:32px; }
+.file-note span { padding-top:10px; flex-shrink:0; color:var(--muted); }
+.file-note textarea { min-width:0; flex:1; resize:vertical; }
+.input-section { margin:18px 0; }
+.input-section > label { display:block; margin-bottom:9px; font-weight:500; }
+.input-section textarea { width:100%; margin-top:9px; resize:vertical; }
+.input-section summary { cursor:pointer; color:var(--primary); }
+.input-save { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 
 .badge {
   font-size:11px;

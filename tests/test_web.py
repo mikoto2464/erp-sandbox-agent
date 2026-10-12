@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from erp_agent.api.server import Handler, create_access, create_workflow
 from erp_agent.application.contracts import dumps, loads
+from erp_agent.application.input_sources import text_source
 from erp_agent.adapters.documents import OOXMLDocumentParser
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.config import Settings
@@ -179,6 +180,47 @@ class WebTests(unittest.TestCase):
         retry = self.request(base + f"/documents/{document_id}/retry", {})
         self.assertEqual(self.wait_job(project, retry["id"])["status"], "succeeded")
         self.assertEqual(len(self.request(base + "/documents")), 1)
+
+    def test_manual_inputs_annotations_sources_and_revision_isolation(self):
+        project = self.request('/api/projects', {'name': '手动题目'})['id']
+        base = f'/api/projects/{project}'
+        inputs = self.request(base + '/inputs', {'revision': 0, 'problem_text': '初始现金100000元',
+            'supplement_text': '贷款上限20000元', 'annotations': []})
+        self.assertEqual(inputs['revision'], 1)
+        def output(value='100000'):
+            return dumps({'title': '手动题目', 'facts': [{'id': 'cash', 'category': 'initial',
+                'entity_id': 'company', 'entity_name': '公司', 'key': 'initial_cash', 'value': value,
+                'value_type': 'number', 'unit': '元', 'state': 'known',
+                'evidence_ids': [manual_id], 'conversion': 'identity', 'explanation': ''}],
+                'rules': [], 'issues': []})
+        manual_id = text_source('手动题目', inputs['problem_text'], 'manual_').evidence[0].id
+        self.llm.response = output()
+        job = self.request(base + '/read', {'document_ids': [], 'input_revision': 1})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        snapshot = self.request(base + '/problem')['snapshot']
+        self.assertEqual(snapshot['reading']['problem']['facts'][0]['state'], 'known')
+        self.assertEqual(len(snapshot['additional_sources']), 2)
+        reading = {'title': '手动题目', 'facts': snapshot['reading']['problem']['facts'], 'rules': [], 'issues': []}
+        revised = self.request(base + '/revisions', {'expected_version': 1, 'reading': reading})
+        self.assertEqual(revised['additional_sources'], snapshot['additional_sources'])
+        job = self.request(base + '/documents', content=Path(__file__).with_name('fixtures').joinpath('orders.xls').read_bytes(),
+                           headers={'Content-Type': 'application/octet-stream', 'X-Filename': 'orders.xls'})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        document_id = self.request(base + '/documents')[0]['source']['id']
+        inputs['annotations'] = [{'document_id': document_id, 'text': '订单数量不得超过详单。'}]
+        saved = self.request(base + '/inputs', inputs)
+        with self.assertRaises(HTTPError) as stale:
+            self.request(base + '/inputs', inputs)
+        self.assertEqual(stale.exception.code, 409)
+        with self.assertRaises(HTTPError) as changed:
+            self.request(base + '/solve', {'version': revised['version']})
+        self.assertEqual(changed.exception.code, 409)
+        self.assertEqual(self.request(base + '/problem?version=1')['snapshot']['inputs']['revision'], 1)
+        self.llm.response = output()
+        job = self.request(base + '/read', {'document_ids': [document_id], 'input_revision': saved['revision']})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        self.assertIn('订单数量不得超过详单', self.llm.calls[-1].user)
+        self.assertIn('贷款上限20000', self.llm.calls[-1].user)
 
     def test_historical_version_can_have_large_model_response(self):
         project, result = self.setup_problem()

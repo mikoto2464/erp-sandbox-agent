@@ -5,7 +5,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from erp_agent.application.codec import parsed_document, problem_snapshot
+from erp_agent.application.codec import parsed_document, problem_snapshot, reading_inputs
+from erp_agent.application.input_sources import input_sources
 from erp_agent.application.contracts import (
     JSONObject, JSONValue, decode_reading, dumps, integer, obj, string, strings, to_json,
 )
@@ -15,7 +16,7 @@ from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    KnowledgeState, ProblemSnapshot, SearchConfig, SolveRequest, SolverMode, SourceDocument,
+    KnowledgeState, ProblemSnapshot, ReadingInputs, SearchConfig, SolveRequest, SolverMode, SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 
@@ -34,6 +35,7 @@ class WorkflowService:
         self.default_solver = default_solver
         self.model_settings = model_settings
         self._read_lock = threading.Lock()
+        self._input_lock = threading.Lock()
 
     def create_project(self, name: str) -> JSONObject:
         name = name.strip()
@@ -57,8 +59,8 @@ class WorkflowService:
         if not filename or len(filename) > 200 or any(c in filename for c in "/\\\x00"):
             raise ERPError("invalid_filename", "文件名无效。")
         fmt = filename.rsplit(".", 1)[-1].lower()
-        if fmt not in {"doc", "docx"}:
-            raise ERPError("unsupported_format", "请上传 DOCX 或 DOC 题目。")
+        if fmt not in {"doc", "docx", "pdf", "xls"}:
+            raise ERPError("unsupported_format", "请上传 DOCX、DOC、PDF 或 XLS 文件。")
         source = SourceDocument(uuid4().hex, filename, hashlib.sha256(content).hexdigest(),
                                 len(content), fmt)
 
@@ -93,12 +95,37 @@ class WorkflowService:
         return [to_json(parsed_document(obj(document)))
                 for document in self.repository.list("document", project_id)]
 
+    def inputs(self, project_id: str) -> ReadingInputs:
+        self.project(project_id)
+        try:
+            data = self.repository.get("inputs", project_id, project_id)
+        except ERPError as exc:
+            if exc.code != "not_found":
+                raise
+            return ReadingInputs()
+        return reading_inputs(data)
+
+    def save_inputs(self, project_id: str, data: JSONObject) -> ReadingInputs:
+        with self._input_lock:
+            previous = self.inputs(project_id)
+            current = reading_inputs(data)
+            if current.revision != previous.revision:
+                raise ERPError("inputs_conflict", "输入内容已更新，请重新打开项目后修改。", 409)
+            available = {parsed_document(obj(d)).source.id
+                         for d in self.repository.list("document", project_id)}
+            if any(a.document_id not in available for a in current.annotations):
+                raise ERPError("invalid_annotation", "文件说明引用了未解析或不属于当前项目的文件。")
+            saved = replace(current, revision=previous.revision + 1)
+            self.repository.put("inputs", project_id, project_id, saved)
+            return saved
+
     def problem(self, project_id: str, version: int | None = None) -> ProblemSnapshot:
         self.project(project_id)
         snapshot = problem_snapshot(self.repository.snapshot(project_id, version))
         reading = snapshot.reading
         evidence = tuple(e for document_id in snapshot.document_ids for e in parsed_document(
             self.repository.get("document", project_id, document_id)).evidence)
+        evidence += tuple(e for d in snapshot.additional_sources for e in d.evidence)
         failed_ids = {i.target for i in reading.issues if i.code == "validation.unsupported_value"}
         if failed_ids and reading.raw_response:
             try:
@@ -135,12 +162,16 @@ class WorkflowService:
             if set(selected) - available:
                 raise ERPError("document_not_ready", "所选文件尚未解析完成或不属于当前项目。")
             documents = tuple(d for d in documents if d.source.id in selected)
+        inputs = self.inputs(project_id)
+        if data and "input_revision" in data and integer(data["input_revision"], 0) != inputs.revision:
+            raise ERPError("inputs_conflict", "输入内容已更新，请重新加载后读取。", 409)
+        extra_sources = input_sources(inputs, documents)
         for value in self.repository.list("job", project_id):
             job = obj(value)
             if job.get("kind") == "read" and job.get("status") in {"running", "queued"}:
                 raise ERPError("reading_in_progress", "当前项目正在读题，请等待完成。", 409)
-        if not documents:
-            raise ERPError("no_documents", "请先上传并等待文档解析完成。")
+        if not documents and not inputs.problem_text:
+            raise ERPError("no_documents", "请上传文件或填写手动题目后读取。")
         versions = self.repository.versions(project_id)
         expected_version = versions[0] if versions else 0
         binding = self.model_settings.capture() if self.model_settings else None
@@ -148,12 +179,14 @@ class WorkflowService:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
 
         def operation(control: RunControl) -> JSONValue:
-            result = (self.reader.read(documents, control, binding.client) if binding
-                      else self.reader.read(documents, control))
+            sources = documents + extra_sources
+            result = (self.reader.read(sources, control, binding.client) if binding
+                      else self.reader.read(sources, control))
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
             control.checkpoint("saving_reading")
             snapshot = ProblemSnapshot(project_id, expected_version + 1, timestamp(),
-                                       tuple(d.source.id for d in documents), result)
+                                       tuple(d.source.id for d in documents), result,
+                                       inputs=inputs, additional_sources=extra_sources)
             saved = self.repository.save_snapshot(
                 project_id, obj(to_json(snapshot)), expected_version,
             )
@@ -163,6 +196,7 @@ class WorkflowService:
         return self.jobs.submit(project_id, "read", operation,
                                 {"document_ids": to_json(tuple(d.source.id for d in documents)),
                                  "expected_version": expected_version,
+                                 "input_revision": inputs.revision,
                                  "model_preset": binding.metadata() if binding else None})
 
     def revise(self, project_id: str, data: JSONObject) -> JSONObject:
@@ -178,15 +212,18 @@ class WorkflowService:
                 self.repository.get("document", project_id, document_id),
             ).evidence
         )
+        evidence += tuple(e for d in old.additional_sources for e in d.evidence)
         reading = validate_reading(reading, evidence)
         reading = replace(reading, rules=replace(reading.rules, version=expected + 1),
                           raw_response=old.reading.raw_response)
         snapshot = ProblemSnapshot(project_id, expected + 1, timestamp(), old.document_ids,
-                                   reading, note)
+                                   reading, note, old.inputs, old.additional_sources)
         return self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
 
     def solve(self, project_id: str, data: JSONObject) -> JSONObject:
         snapshot = self.problem(project_id, integer(data.get("version")))
+        if snapshot.inputs.revision != self.inputs(project_id).revision:
+            raise ERPError("reading_inputs_changed", "题目输入或文件说明已修改，请重新读取后生成方案。", 409)
         if any(issue.severity == "error" for issue in snapshot.reading.issues):
             raise ERPError("reading_needs_revision", "请先修正读题错误并保存新版本。", 409)
         if not snapshot.reading.problem.years or not snapshot.reading.problem.periods_per_year:

@@ -4,8 +4,10 @@ from erp_agent.application.contracts import (
     JSONObject, array, decode_reading, dumps, integer, obj, string, strings,
 )
 from erp_agent.domain.evidence import contextualize_document
+from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    Cell, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot, SourceDocument,
+    Cell, DocumentAnnotation, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot,
+    ReadingInputs, SourceDocument,
 )
 
 
@@ -19,7 +21,8 @@ def parsed_document(data: JSONObject) -> ParsedDocument:
             cell = obj(item)
             cells.append(Cell(integer(cell["row"], 0), integer(cell["column"], 0),
                               string(cell["text"]), string(cell["evidence_id"]),
-                              integer(cell["column_span"]), string(cell["vertical_merge"])))
+                              integer(cell["column_span"]), string(cell["vertical_merge"]),
+                              string(cell.get("number_format", ""))))
         blocks.append(DocumentBlock(integer(block["index"], 0), string(block["kind"]),
                                     string(block["text"]), string(block["evidence_id"]),
                                     tuple(cells)))
@@ -54,4 +57,18 @@ def problem_snapshot(data: JSONObject) -> ProblemSnapshot:
                       raw_response=string(result["raw_response"], maximum=4 * 1024 * 1024))
     return ProblemSnapshot(string(data["project_id"]), integer(data["version"]),
                            string(data["created_at"]), strings(data["document_ids"]), reading,
-                           string(data["revision_note"]))
+                           string(data["revision_note"]), reading_inputs(obj(data.get("inputs", {}))),
+                           tuple(parsed_document(obj(d)) for d in array(data.get("additional_sources", []))))
+
+
+def reading_inputs(data: JSONObject) -> ReadingInputs:
+    obj(data, {"revision", "problem_text", "supplement_text", "annotations"})
+    annotations = tuple(DocumentAnnotation(string(entry["document_id"], maximum=100),
+                                            string(entry["text"], maximum=5000).strip())
+                        for value in array(data.get("annotations", []))
+                        for entry in (obj(value, {"document_id", "text"}),))
+    if len(annotations) > 100 or len({a.document_id for a in annotations}) != len(annotations):
+        raise ERPError("invalid_inputs", "文件说明数量过多或重复。")
+    return ReadingInputs(integer(data.get("revision", 0), 0, 1000000),
+                         string(data.get("problem_text", ""), maximum=100000).strip(),
+                         string(data.get("supplement_text", ""), maximum=50000).strip(), annotations)

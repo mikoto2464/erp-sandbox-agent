@@ -60,6 +60,7 @@ class Cell:
     evidence_id: str
     column_span: int = 1
     vertical_merge: str = ""
+    number_format: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,20 @@ class ReadingResult:
 
 
 @dataclass(frozen=True)
+class DocumentAnnotation:
+    document_id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ReadingInputs:
+    revision: int = 0
+    problem_text: str = ""
+    supplement_text: str = ""
+    annotations: tuple[DocumentAnnotation, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProblemSnapshot:
     project_id: str
     version: int
@@ -149,6 +164,8 @@ class ProblemSnapshot:
     document_ids: tuple[str, ...]
     reading: ReadingResult
     revision_note: str = ""
+    inputs: ReadingInputs = field(default_factory=ReadingInputs)
+    additional_sources: tuple[ParsedDocument, ...] = ()
 
 
 @dataclass(frozen=True)

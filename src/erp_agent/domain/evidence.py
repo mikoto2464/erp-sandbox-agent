@@ -31,7 +31,9 @@ def contextualize_document(document: ParsedDocument) -> ParsedDocument:
         headers: list[Cell] = []
         for cells in rows.values():
             texts = [cell.text.strip() for cell in cells if cell.text.strip()]
-            if not texts or any(CELL_NUMBER.fullmatch(text) for text in texts):
+            if not texts:
+                continue
+            if any(CELL_NUMBER.fullmatch(text) for text in texts):
                 break
             headers.extend(cells)
         inherited = (not headers and bool(previous_headers) and bool(rows)

@@ -6,7 +6,8 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from erp_agent.adapters.documents import LibreOfficeConverter, OOXMLDocumentParser
+from erp_agent.adapters.documents import LibreOfficeConverter
+from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
 from erp_agent.adapters.jobs import ThreadJobRunner
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.adapters.model_settings import ModelSettingsService
@@ -179,6 +180,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ERPError("method_not_allowed", "不支持该操作。", 405)
             elif resource == "read" and method == "POST":
                 self._json(workflow.read(project_id, self._body_json()), 202)
+            elif resource == "inputs" and method == "GET":
+                self._json(to_json(workflow.inputs(project_id)))
+            elif resource == "inputs" and method == "POST":
+                self._json(to_json(workflow.save_inputs(project_id, self._body_json())))
             elif resource == "problem" and method == "GET":
                 query = parse_qs(parsed.query)
                 version = int(query["version"][0]) if "version" in query else None
@@ -278,7 +283,7 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
     jobs = ThreadJobRunner(repository)
     models = ModelSettingsService(settings, llm)
     client = models.client
-    parser = OOXMLDocumentParser(LibreOfficeConverter(settings.libreoffice))
+    parser = MultiFormatDocumentParser(LibreOfficeConverter(settings.libreoffice))
     solver = SolverService(LLMStrategyGenerator(client),
                            evaluator if evaluator is not None else DraftPlanEvaluator())
     return WorkflowService(repository, jobs, parser, StructuredReader(client, client.current), solver,
