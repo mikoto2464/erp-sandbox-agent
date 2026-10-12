@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import AppSelect from '../components/AppSelect.vue';
 import MappingEditor from '../components/MappingEditor.vue';
+import MappingReview from '../components/MappingReview.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
 import { useWorkspaceContext } from '../composables/context';
 import type { BudgetTemplate, WorkbookMapping } from '../lib/types';
@@ -16,13 +17,15 @@ const {
   operations,
   run,
   analyzeTemplate,
+  confirmMapping,
   exportArtifact,
-  uploadTemplates,
   setStep,
   project,
 } = useWorkspaceContext();
 const editing = ref<WorkbookMapping | null>(null),
-  preview = ref<BudgetTemplate | null>(null);
+  preview = ref<BudgetTemplate | null>(null),
+  previewMapping = ref<WorkbookMapping | null>(null),
+  editingIndex = ref(0);
 const visibleArtifacts = computed(() =>
   artifacts.value.filter((item) => item.solution_id === currentSolution.value?.id),
 );
@@ -40,11 +43,18 @@ const pending = computed(() =>
 function mappingFor(id: string) {
   return visibleMappings.value.filter((item) => item.template_id === id).at(-1);
 }
-function upload(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = [...(input.files || [])];
-  input.value = '';
-  if (files.length) void run('upload-template', () => uploadTemplates(files));
+const plannedTemplates = computed(() =>
+  templates.value.filter((template) =>
+    currentSolution.value?.generation?.template_ids.includes(template.source.id),
+  ),
+);
+function openPreview(template: BudgetTemplate, filled = false) {
+  preview.value = template;
+  previewMapping.value = filled ? mappingFor(template.source.id) || null : null;
+}
+function editMapping(mapping: WorkbookMapping, index = 0) {
+  editingIndex.value = index;
+  editing.value = mapping;
 }
 const formulaNames: Record<string, string> = {
   pending: '公式待重算',
@@ -116,26 +126,17 @@ const formulaNames: Record<string, string> = {
         <div class="section-heading">
           <div>
             <h3>填写预算空表</h3>
-            <p class="muted">AI 根据方案匹配空白输入格，已有公式和数据保持原样。</p>
+            <p class="muted">使用生成方案时选定的空表，填写值与方案预算保持一致。</p>
           </div>
-          <label class="review-action template-upload"
-            >上传空表<input
-              type="file"
-              class="sr-only"
-              accept=".xlsx,.xls"
-              multiple
-              :disabled="operations.has('upload-template')"
-              @change="upload"
-          /></label>
         </div>
         <p
-          v-if="!templates.length"
+          v-if="!plannedTemplates.length"
           class="muted"
         >
-          可使用经营方案页上传的空表，也可在这里上传新模板。
+          这份方案未选择预算空表。请返回经营方案，上传并选择空表后重新生成。
         </p>
         <article
-          v-for="template in templates"
+          v-for="template in plannedTemplates"
           :key="template.source.id"
           class="artifact-template"
         >
@@ -147,49 +148,23 @@ const formulaNames: Record<string, string> = {
                   mappingFor(template.source.id)
                     ? mappingFor(template.source.id)?.confirmed
                       ? '对应关系已确认'
-                      : '请核对条目与来源'
-                    : '尚未分析条目'
+                      : '请确认填写结果'
+                    : '按方案预算准备填写'
                 }}
               </p>
             </div>
             <button
               class="review-action"
-              @click="preview = template"
+              @click="openPreview(template)"
             >
               预览空表
             </button>
           </div>
           <template v-if="mappingFor(template.source.id)">
-            <div class="table-scroll mapping-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>项目与位置</th>
-                    <th>引用值</th>
-                    <th>对应依据 / 未确定原因</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="(entry, index) in mappingFor(template.source.id)!.entries"
-                    :key="index"
-                  >
-                    <td>
-                      {{ entry.label }}<small>{{ entry.sheet }} · {{ entry.cell }}</small>
-                    </td>
-                    <td>{{ mappingFor(template.source.id)?.values[index] ?? '留空' }}</td>
-                    <td>{{ entry.explanation }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p
-              v-for="issue in mappingFor(template.source.id)!.issues"
-              :key="issue.target + issue.code"
-              :class="issue.severity === 'error' ? 'error' : 'muted'"
-            >
-              {{ issue.message }}
-            </p>
+            <MappingReview
+              :mapping="mappingFor(template.source.id)!"
+              @edit="editMapping(mappingFor(template.source.id)!, $event)"
+            />
           </template>
           <footer class="panel-footer">
             <button
@@ -197,15 +172,34 @@ const formulaNames: Record<string, string> = {
               :disabled="pending || operations.has(template.source.id)"
               @click="run(template.source.id, () => analyzeTemplate(template.source.id))"
             >
-              {{ mappingFor(template.source.id) ? '重新分析' : '分析条目对应关系' }}
+              {{ mappingFor(template.source.id) ? '重新核对方案预算' : '准备填写' }}
             </button>
             <div class="artifact-actions">
               <button
                 v-if="mappingFor(template.source.id)"
-                class="secondary"
-                @click="editing = mappingFor(template.source.id)!"
+                class="review-action"
+                @click="openPreview(template, true)"
               >
-                核对 / 修改</button
+                预览填写结果
+              </button>
+              <button
+                v-if="mappingFor(template.source.id)"
+                class="secondary"
+                :disabled="
+                  pending ||
+                  operations.has('confirm-' + template.source.id) ||
+                  mappingFor(template.source.id)!.issues.some((issue) => issue.severity === 'error')
+                "
+                @click="
+                  run('confirm-' + template.source.id, () =>
+                    confirmMapping(
+                      mappingFor(template.source.id)!,
+                      mappingFor(template.source.id)!.entries,
+                    ),
+                  )
+                "
+              >
+                {{ mappingFor(template.source.id)?.confirmed ? '已确认' : '确认填写' }}</button
               ><button
                 class="primary"
                 :disabled="
@@ -276,9 +270,11 @@ const formulaNames: Record<string, string> = {
     </footer>
     <MappingEditor
       :mapping="editing"
+      :initial-index="editingIndex"
       @close="editing = null"
     /><BudgetTemplatePreview
       :template="preview"
+      :mapping="previewMapping"
       @close="preview = null"
     />
   </section>

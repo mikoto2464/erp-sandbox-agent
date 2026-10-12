@@ -346,5 +346,5 @@ class WorkflowService:
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
                                  "search": to_json(request.search),
-                                 "generation": to_json(config), "prompt_version": "solver-3",
+                                 "generation": to_json(config), "prompt_version": "solver-4",
                                  "model_preset": binding.metadata() if binding else None})

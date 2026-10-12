@@ -45,7 +45,7 @@ class WorkbookMapper:
         issues = validate_mapping(template, entries, solution, snapshot)
         return WorkbookMapping(uuid4().hex, solution.project_id, solution.id, solution.problem_version,
                                template.source.id, template.source.sha256, entries, issues,
-                               model=model, prompt_version="mapper-2")
+                               model=model, prompt_version="mapper-3")
 
     def _map_batch(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
                    control: RunControl, snapshot: ProblemSnapshot | None,
@@ -58,6 +58,11 @@ class WorkbookMapper:
                     "problem": snapshot.reading.problem if snapshot else None,
                     "rules": snapshot.reading.rules if snapshot else None,
                     "evaluation": solution.evaluation}
+        batch_sheets = {s.name for s in template.sheets}
+        planned = tuple((i, item) for i, item in enumerate(solution.plan.budget_items)
+                        if item.template_id == template.source.id
+                        and item.sheet in batch_sheets)
+        original["planned_inputs"] = tuple({"item": item, "source_id": f"budget:{i}"} for i, item in planned)
         payload = original
         for attempt in range(2):
             response = None
@@ -71,6 +76,12 @@ class WorkbookMapper:
                 # 公式和已有数据不进入待填写清单；尝试覆盖它们仍须报错。
                 entries = tuple(e for e in entries if e.source_ids or e.sheet not in sheets
                                 or writable_target(sheets[e.sheet], e.cell, cells[e.sheet]))
+                seen = {(e.sheet, e.cell) for e in entries}
+                entries += tuple(WorkbookEntry(item.sheet, item.cell, item.label,
+                                                (f"budget:{i}",) if item.value is not None else (),
+                                                explanation=item.explanation)
+                                 for i, item in planned if (item.sheet, item.cell) not in seen
+                                 and writable_target(sheets[item.sheet], item.cell, cells[item.sheet]))
                 errors = [i for i in validate_mapping(template, entries, solution, snapshot)
                           if i.severity == "error"]
                 if errors and not attempt:

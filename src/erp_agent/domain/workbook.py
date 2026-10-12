@@ -97,6 +97,9 @@ def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...
     cells = {s.name: {c.coordinate: c for c in s.cells} for s in template.sheets}
     sources = output_sources(solution, snapshot)
     source_index = {s.id: s for s in sources}
+    planned = {(item.sheet, item.cell): item for item in solution.plan.budget_items
+               if item.template_id == template.source.id and item.sheet in sheets
+               and writable_target(sheets[item.sheet], item.cell, cells[item.sheet])}
     seen = set()
     if not entries:
         issues.append(Issue("mapping.empty", "error", "entries", "尚无预算表映射条目。"))
@@ -110,6 +113,9 @@ def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...
         if (entry.sheet, entry.cell) in seen:
             issues.append(Issue("mapping.duplicate", "error", target, "一个单元格只能对应一个映射条目。"))
         seen.add((entry.sheet, entry.cell))
+        if planned and (entry.sheet, entry.cell) not in planned:
+            issues.append(Issue("mapping.unplanned", "error", target,
+                                "此输入项未纳入经营方案，请返回经营方案补充规划。"))
         if len(set(entry.source_ids)) != len(entry.source_ids):
             issues.append(Issue("mapping.duplicate_source", "error", target, "同一来源不能重复计入合计。"))
         if not writable_target(sheet, entry.cell, cells[entry.sheet]) and entry.source_ids:
@@ -117,6 +123,12 @@ def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...
                                 "已有内容、公式、隐藏/保护区域或合并续格不能直接填入。"))
         try:
             value = mapped_value(entry, sources)
+            item = planned.get((entry.sheet, entry.cell))
+            if item and item.value is not None:
+                expected = Decimal(item.value) if _numeric(item.value) else item.value
+                if value != expected:
+                    issues.append(Issue("mapping.plan_mismatch", "error", target,
+                                        "填写值与经营方案预算不一致，请引用该方案预算值或先调整方案。"))
             if value is None:
                 issues.append(Issue("mapping.unresolved", "warning", target,
                                     entry.explanation or "暂无可用方案数据，保留原格。"))
@@ -125,4 +137,8 @@ def validate_mapping(template: BudgetTemplate, entries: tuple[WorkbookEntry, ...
                 issues.append(Issue("mapping.period", "error", target, "跨期间来源须明确采用汇总。"))
         except ERPError as exc:
             issues.append(Issue(exc.code, "error", target, exc.message))
+    for key, item in planned.items():
+        if key not in seen:
+            issues.append(Issue("mapping.plan_omitted", "error", "entries",
+                                f"遗漏方案预算：{item.sheet} · {item.label}（{item.cell}）。"))
     return tuple(issues)

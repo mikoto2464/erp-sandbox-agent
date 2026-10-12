@@ -5,7 +5,7 @@ import AppSelect from './AppSelect.vue';
 import { cloneJson } from '../lib/json';
 import { useWorkspaceContext } from '../composables/context';
 import type { WorkbookEntry, WorkbookMapping } from '../lib/types';
-const props = defineProps<{ mapping: WorkbookMapping | null }>();
+const props = defineProps<{ mapping: WorkbookMapping | null; initialIndex?: number }>();
 const emit = defineEmits<{ close: [] }>();
 const { confirmMapping } = useWorkspaceContext();
 const entries = ref<WorkbookEntry[]>([]),
@@ -17,7 +17,7 @@ watch(
   () => props.mapping,
   (value) => {
     entries.value = value ? cloneJson(value.entries) : [];
-    selected.value = 0;
+    selected.value = Math.min(props.initialIndex || 0, Math.max(0, entries.value.length - 1));
     error.value = '';
     search.value = '';
   },
@@ -36,21 +36,6 @@ function toggle(id: string) {
   if (!entry.value) return;
   const ids = entry.value.source_ids;
   entry.value.source_ids = ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id];
-}
-function addEntry() {
-  entries.value.push({
-    sheet: entries.value[0]?.sheet || '',
-    cell: '',
-    label: '新增条目',
-    source_ids: [],
-    conversion: 'identity',
-    explanation: '',
-  });
-  selected.value = entries.value.length - 1;
-}
-function removeEntry() {
-  entries.value.splice(selected.value, 1);
-  selected.value = Math.max(0, selected.value - 1);
 }
 async function save() {
   if (!props.mapping) return;
@@ -75,7 +60,7 @@ async function save() {
   >
     <template v-if="mapping">
       <p class="muted">
-        选择条目，再核对目标位置与方案来源。无依据的项目可留空；这里不会修改经营方案。
+        核对已规划条目的来源与说明。预算值或条目需要调整时，请返回经营方案生成下一版。
       </p>
       <AppSelect
         :model-value="String(selected)"
@@ -88,25 +73,20 @@ async function save() {
         "
         @update:model-value="selected = Number($event)"
       />
-      <div class="artifact-actions mapping-target">
-        <button
-          class="review-action"
-          @click="addEntry"
-        >
-          添加条目</button
-        ><button
-          v-if="entry"
-          class="review-action"
-          @click="removeEntry"
-        >
-          删除当前条目
-        </button>
-      </div>
       <template v-if="entry">
         <div class="form-grid mapping-target">
-          <label>工作表<input v-model="entry.sheet" /></label
-          ><label>目标单元格<input v-model="entry.cell" /></label
-          ><label>预算项目<input v-model="entry.label" /></label
+          <label
+            >工作表<input
+              :value="entry.sheet"
+              readonly /></label
+          ><label
+            >目标单元格<input
+              :value="entry.cell"
+              readonly /></label
+          ><label
+            >预算项目<input
+              :value="entry.label"
+              readonly /></label
           ><label
             >转换 / 汇总<AppSelect
               v-model="entry.conversion"

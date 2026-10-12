@@ -2262,17 +2262,6 @@ button:active:enabled {
   gap: 10px;
   flex-wrap: wrap;
 }
-.mapping-table {
-  max-height: 360px;
-}
-.mapping-table table {
-  width: 100%;
-}
-.mapping-table small {
-  display: block;
-  color: var(--muted);
-  margin-top: 4px;
-}
 .mapping-source-list {
   max-height: 300px;
   overflow: auto;
@@ -2294,4 +2283,78 @@ button:active:enabled {
 .artifact-file a {
   white-space: nowrap;
   text-decoration: none;
+}
+
+.mapping-summary,
+.mapping-filters,
+.mapping-pagination {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.mapping-summary strong {
+  color: var(--primary);
+  margin-left: 6px;
+}
+.mapping-filters > * {
+  flex: 1;
+  min-width: 180px;
+}
+.mapping-row {
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.mapping-row-heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.mapping-row-heading > div {
+  flex: 1;
+  min-width: 0;
+}
+.mapping-row-heading small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.mapping-value {
+  max-width: 35%;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.mapping-reason {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.mapping-empty {
+  padding: 18px 0;
+}
+.mapping-pagination {
+  justify-content: center;
+}
+.budget-preview .budget-filled {
+  background: #eaf1ff;
+  color: #2459bd;
+  font-weight: 600;
+}
+.budget-preview .budget-unresolved {
+  background: #fff2df;
+  color: #8c5c16;
+}
+@media (max-width: 600px) {
+  .mapping-row-heading {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .mapping-row-heading > div {
+    flex-basis: 100%;
+  }
+  .mapping-value {
+    max-width: 65%;
+    margin-right: auto;
+  }
 }

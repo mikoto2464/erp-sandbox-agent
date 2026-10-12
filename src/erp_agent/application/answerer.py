@@ -65,6 +65,7 @@ class AnswererService:
     def _analyze(self, project_id: str, data: JSONObject) -> JSONObject:
         report = self.context(project_id, string(data.get('solution_id'), 100))
         template = budget_template(self.repository.get('template', project_id, string(data.get('template_id'), 100)))
+        self._require_planned_template(report, template.source.id)
         self._check_active(project_id, 'mapping', report.solution.id, template.source.id)
         binding = self.models.capture()
         if not binding.client.configured:
@@ -87,6 +88,7 @@ class AnswererService:
             if integer(data.get('expected_revision')) != mapping.revision:
                 raise ERPError('mapping_conflict', '映射已经更新，请重新打开后修改。', 409)
             report = self.context(project_id, mapping.solution_id)
+            self._require_planned_template(report, mapping.template_id)
             template = budget_template(self.repository.get('template', project_id, mapping.template_id))
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板内容已变化，请重新分析。', 409)
@@ -117,6 +119,7 @@ class AnswererService:
             mapping = workbook_mapping(self.repository.get('mapping', project_id, string(data['mapping_id'])))
             if mapping.solution_id != report.solution.id or not mapping.confirmed:
                 raise ERPError('mapping_not_confirmed', '请先确认这份方案的预算表映射。', 409)
+            self._require_planned_template(report, mapping.template_id)
             template = budget_template(self.repository.get('template', project_id, mapping.template_id))
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板已变更，请重新分析。', 409)
@@ -154,6 +157,15 @@ class AnswererService:
         return self.jobs.submit(project_id, 'artifact', operation, {
             'solution_id': report.solution.id, 'kind': kind, 'mapping_id': mapping.id if mapping else None,
         })
+
+    @staticmethod
+    def _require_planned_template(report: ReportData, template_id: str) -> None:
+        if template_id not in report.solution.generation.template_ids:
+            raise ERPError('template_not_planned', '请在经营方案处选择这份空表并生成方案后再填写。', 409)
+        if not any(item.template_id == template_id for item in report.solution.plan.budget_items):
+            raise ERPError('template_plan_missing', '此方案没有这份表的预算安排，请返回经营方案重新生成。', 409)
+        if any(i.severity == 'error' and i.code.startswith('budget.') for i in report.solution.evaluation.issues):
+            raise ERPError('template_plan_invalid', '方案预算存在遗漏或输入错误，请先返回经营方案修正。', 409)
 
     def _check_active(self, project_id: str, kind: str, solution_id: str,
                       template_id: str | None = None) -> None:

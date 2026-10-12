@@ -2,8 +2,8 @@
 import { computed, ref, watch } from 'vue';
 import AppModal from './AppModal.vue';
 import AppSelect from './AppSelect.vue';
-import type { BudgetTemplate } from '../lib/types';
-const props = defineProps<{ template: BudgetTemplate | null }>();
+import type { BudgetTemplate, WorkbookMapping } from '../lib/types';
+const props = defineProps<{ template: BudgetTemplate | null; mapping?: WorkbookMapping | null }>();
 defineEmits<{ close: [] }>();
 const sheetName = ref('');
 watch(
@@ -17,6 +17,19 @@ const sheet = computed(() => props.template?.sheets.find((item) => item.name ===
 const cells = computed(
   () => new Map(sheet.value?.cells.map((cell) => [cell.coordinate, cell]) || []),
 );
+const mapped = computed(
+  () =>
+    new Map(
+      props.mapping?.entries
+        .map((entry, index) => ({ entry, value: props.mapping?.values[index] }))
+        .filter(({ entry }) => entry.sheet === sheetName.value)
+        .map(({ entry, value }) => [entry.cell, value]) || [],
+    ),
+);
+function displayCell(address: string) {
+  const cell = cells.value.get(address);
+  return cell?.text || (mapped.value.has(address) ? (mapped.value.get(address) ?? '待确定') : '');
+}
 const merges = computed(() => {
   const anchors = new Map<string, { rows: number; columns: number }>();
   const covered = new Set<string>();
@@ -75,6 +88,12 @@ function columnName(index: number): string {
         {{ warning }}
       </p>
       <template v-if="sheet">
+        <p
+          v-if="mapping"
+          class="muted"
+        >
+          蓝色为拟填写数据，橙色为待确定输入；原公式与已有数据保持原样。
+        </p>
         <p class="muted">
           {{ sheet.rows }} 行 · {{ sheet.columns }} 列{{ sheet.hidden ? ' · 隐藏' : ''
           }}{{ sheet.protected ? ' · 受保护' : '' }}
@@ -105,9 +124,17 @@ function columnName(index: number): string {
                     v-if="!merges.covered.has(`${columnName(column)}${row}`)"
                     :rowspan="merges.anchors.get(`${columnName(column)}${row}`)?.rows || 1"
                     :colspan="merges.anchors.get(`${columnName(column)}${row}`)?.columns || 1"
-                    :class="{ 'budget-formula': cells.get(`${columnName(column)}${row}`)?.formula }"
+                    :class="{
+                      'budget-formula': cells.get(`${columnName(column)}${row}`)?.formula,
+                      'budget-filled':
+                        mapped.has(`${columnName(column)}${row}`) &&
+                        mapped.get(`${columnName(column)}${row}`) != null,
+                      'budget-unresolved':
+                        mapped.has(`${columnName(column)}${row}`) &&
+                        mapped.get(`${columnName(column)}${row}`) == null,
+                    }"
                   >
-                    {{ cells.get(`${columnName(column)}${row}`)?.text || '' }}
+                    {{ displayCell(`${columnName(column)}${row}`) }}
                   </td></template
                 >
               </tr>

@@ -180,7 +180,9 @@ async function revise() {
         <div class="section-heading">
           <div>
             <h3>预算空表 <span class="muted">选填</span></h3>
-            <p class="muted">按表中的项目、期间和单位安排预算。</p>
+            <p class="muted">
+              先选空表，再按表中的项目、期间和单位生成方案。更换空表需要重新生成。
+            </p>
           </div>
           <label
             class="review-action template-upload"
@@ -294,12 +296,10 @@ async function revise() {
           :model-value="currentSolution.id"
           label="选择经营方案"
           :options="
-            [...solutions]
-              .reverse()
-              .map((solution, index) => ({
-                value: solution.id,
-                label: `${solution.plan.title}${index === 0 ? ' · 最新' : ''}`,
-              }))
+            [...solutions].reverse().map((solution, index) => ({
+              value: solution.id,
+              label: `${solution.plan.title}${index === 0 ? ' · 最新' : ''}`,
+            }))
           "
           @update:model-value="selectSolution"
         />
@@ -356,10 +356,18 @@ async function revise() {
       <details
         v-if="currentSolution.plan.budget_items?.length"
         class="plan-notes budget-plan"
-        open
       >
-        <summary>预算条目 · {{ currentSolution.plan.budget_items.length }} 项</summary>
-        <p class="muted">按模板列出规划草稿，尚未填表或完成财务核算。</p>
+        <summary>按空表规划的预算 · {{ currentSolution.plan.budget_items.length }} 项</summary>
+        <p class="muted">
+          {{
+            templates
+              .filter((template) =>
+                currentSolution?.generation?.template_ids.includes(template.source.id),
+              )
+              .map((template) => template.source.filename)
+              .join('、')
+          }}。填写时使用这份方案的预算，未确定项目留空。
+        </p>
         <div class="table-scroll">
           <table>
             <thead>

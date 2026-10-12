@@ -80,7 +80,11 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(material['sheets'][1]['validations'][0]['kind'], 'whole')
         self.assertFalse(next(c for c in template.sheets[1].cells if c.coordinate == 'B3').writable)
         old = BudgetItem('template', '第一年', 'B2', '借款', 1, '元', '10', (0,), '旧预算')
-        data = replace(data, solution=replace(data.solution, plan=replace(data.solution.plan, budget_items=(old,))))
+        data = replace(data, solution=replace(data.solution, plan=replace(data.solution.plan, budget_items=(
+            old,
+            BudgetItem('template', '生产', 'B2', '操作', 1, '', data.solution.plan.actions[0].description, (0,), '方案操作'),
+            BudgetItem('template', '生产', 'C2', '期初资本', None, '元', '100000', (), '题目初始资本'),
+        ))))
 
         class MappingLLM(FakeLLM):
             def generate(self, request):
@@ -113,6 +117,10 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(str(reopened['生产'].data_validations), str(second.data_validations))
         self.assertTrue(any(i.severity == 'error' for i in validate_mapping(
             template, (WorkbookEntry('生产', 'B3', '内部', ('action:0:amount',)),), data.solution)))
+        changed = tuple(replace(e, source_ids=('action:1:amount',)) if e.cell == 'B2' and e.sheet == '第一年'
+                        else e for e in mapping.entries)
+        self.assertIn('mapping.plan_mismatch', {i.code for i in validate_mapping(template, changed, data.solution)})
+        self.assertIn('mapping.plan_omitted', {i.code for i in validate_mapping(template, mapping.entries[1:], data.solution)})
         reopened.close()
         workbook.close()
 

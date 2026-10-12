@@ -9,6 +9,8 @@ import AppSelect from './components/AppSelect.vue';
 import IssueCard from './components/IssueCard.vue';
 import SolverStep from './views/SolverStep.vue';
 import ArtifactsStep from './views/ArtifactsStep.vue';
+import BudgetTemplatePreview from './components/BudgetTemplatePreview.vue';
+import MappingEditor from './components/MappingEditor.vue';
 import FactEditor from './components/FactEditor.vue';
 import { workspaceKey } from './composables/context';
 import {
@@ -163,11 +165,42 @@ describe('Vue migration', () => {
       id: 'plan',
       mode: 'llm_only',
       problem_version: 1,
+      generation: {
+        tone: 'balanced',
+        custom_prompt: '',
+        template_ids: ['template'],
+        previous_solution_id: null,
+        revision_prompt: '',
+      },
       plan: { title: '经营计划', summary: '', actions: [], assumptions: [], risks: [] },
       evaluation: { verified: false, score: null, issues: [] },
     });
     templates.push({
       source: { id: 'template', filename: '预算.xlsx', size: 1, sha256: '', format: 'xlsx' },
+      sheets: [
+        {
+          name: '预算',
+          rows: 3,
+          columns: 2,
+          cells: [
+            { coordinate: 'A1', text: '项目', number_format: '', formula: false, writable: true },
+            {
+              coordinate: 'B3',
+              text: '=SUM(B2)',
+              number_format: '',
+              formula: true,
+              writable: true,
+            },
+          ],
+          merged_ranges: [],
+          hidden: false,
+          protected: false,
+        },
+      ],
+      warnings: [],
+    });
+    templates.push({
+      source: { id: 'other', filename: '未选择.xlsx', size: 1, sha256: '', format: 'xlsx' },
       sheets: [],
       warnings: [],
     });
@@ -216,16 +249,24 @@ describe('Vue migration', () => {
     const fill = () =>
       wrapper.findAll('button').find((button) => button.text() === '填写并生成 Excel')!;
     expect(fill().attributes('disabled')).toBeDefined();
+    expect(wrapper.text()).not.toContain('未选择.xlsx');
+    expect(wrapper.find('input[type=file]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('没有待处理项');
     await wrapper
       .findAll('button')
-      .find((button) => button.text() === '核对 / 修改')!
+      .find((button) => button.text() === '预览填写结果')!
       .trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.budget-filled').text()).toBe('10');
+    expect(wrapper.find('.budget-formula').text()).toBe('=SUM(B2)');
+    wrapper.findComponent(BudgetTemplatePreview).vm.$emit('close');
     await flushPromises();
     await wrapper
       .findAll('button')
-      .find((button) => button.text() === '保存并确认映射')!
+      .find((button) => button.text() === '确认填写')!
       .trigger('click');
     await flushPromises();
+    expect(wrapper.findComponent(MappingEditor).props('mapping')).toBeNull();
     expect(fill().attributes('disabled')).toBeUndefined();
     await fill().trigger('click');
     await flushPromises();

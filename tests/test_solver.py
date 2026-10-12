@@ -14,6 +14,34 @@ from tests.helpers import Control, FakeLLM, QuadraticEvaluator, proposal_json, s
 
 
 class SolverTests(unittest.TestCase):
+    def test_template_planning_repairs_an_omitted_sheet_before_saving(self):
+        template = BudgetTemplate(SourceDocument('template', 'budget.xlsx', 'hash', 1, 'xlsx'), (
+            BudgetSheet('资金', 2, 2, (BudgetCell('A2', '借款'), BudgetCell('B2', ''))),
+            BudgetSheet('生产', 2, 2, (BudgetCell('A2', '生产量'), BudgetCell('B2', ''))),
+        ))
+        proposal = loads(proposal_json())
+        proposal['plan']['budget_items'] = [{
+            'template_id': 'template', 'sheet': '资金', 'cell': 'B2', 'label': '借款',
+            'period': 1, 'unit': '元', 'value': '10', 'action_indices': [0], 'explanation': '借款操作',
+        }]
+        calls = []
+        class Client:
+            def generate(self, request):
+                calls.append(request)
+                if len(calls) == 2:
+                    proposal['plan']['budget_items'].append({
+                        'template_id': 'template', 'sheet': '生产', 'cell': 'B2', 'label': '生产量',
+                        'period': 1, 'unit': '件', 'value': None, 'action_indices': [], 'explanation': '缺少产能依据',
+                    })
+                return LLMResponse(dumps(proposal), 'model')
+        context = PlanningContext(GenerationConfig(template_ids=('template',)), (template,))
+        result = SolverService(LLMStrategyGenerator(Client()), DraftPlanEvaluator()).solve(
+            SolveRequest(snapshot(), SolverMode.LLM_ONLY, context=context), Control())
+        self.assertEqual(len(calls), 2)
+        self.assertIn('生产', loads(calls[1].user)['error'])
+        self.assertEqual({i.sheet for i in result.plan.budget_items}, {'资金', '生产'})
+        self.assertTrue(result.evaluation.feasible)
+
     def test_template_coordinates_periods_and_readonly_cells_are_checked(self):
         template = BudgetTemplate(SourceDocument('template', 'budget.xlsx', 'hash', 1, 'xlsx'), (
             BudgetSheet('预算', 4, 3, (BudgetCell('B4', '=SUM(B2:B3)', formula=True),

@@ -56,6 +56,12 @@ class LLMStrategyGenerator:
                 proposal = decode_proposal(normalize_model_json(response.content), response.model)
                 if context.templates and not proposal.baseline.budget_items:
                     raise ERPError("invalid_contract", "上传预算表后方案必须包含预算条目及未确定项。")
+                if context.templates and attempt == 0:
+                    issues = validate_budget_items(SolveRequest(snapshot, SolverMode.LLM_ONLY, context=context),
+                                                   proposal.baseline)
+                    errors = [i.message for i in issues if i.severity == "error"]
+                    if errors:
+                        raise ERPError("invalid_contract", "预算安排与空表不一致：" + "；".join(errors))
                 return replace(proposal, raw_response=response.content)
             except ERPError as error:
                 if response is None and error.code != "llm_structured_response":
@@ -69,7 +75,7 @@ class LLMStrategyGenerator:
                 payload = {**original_payload,
                            "previous_output": response.content if response else None,
                            "error": error.message,
-                           "instruction": "修正方案 JSON 的语法和字段类型，保持题目及方案依据。"
+                           "instruction": "修正方案 JSON、字段类型及已定位的模板遗漏/输入错误，保持题目依据。"
                                           "只返回一个完整 JSON 对象，不附加 Markdown 或说明。"}
         raise ERPError("strategy_output_invalid", "未生成有效的方案结构。", 502)
 

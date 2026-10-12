@@ -326,7 +326,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-3"
+    prompt_version: str = "solver-4"
 
 
 @dataclass(frozen=True)

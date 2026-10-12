@@ -45,9 +45,9 @@ def validate_budget_items(request: SolveRequest, plan: Plan) -> tuple[Issue, ...
             issues.append(Issue("budget.target", "error", target, "预算条目位置越界或重复。"))
         elif merged_continuation:
             issues.append(Issue("budget.merged_cell", "error", target, "合并单元格只能引用左上角锚点。"))
-        elif cell and (cell.formula or not cell.writable) and item.value is not None:
-            issues.append(Issue("budget.readonly", "error", target, "公式或保护单元格不能作为待填数值。"))
-        elif sheet.protected and cell is None and item.value is not None:
+        elif sheet.hidden or (cell and (cell.formula or not cell.writable or cell.text)):
+            issues.append(Issue("budget.readonly", "error", target, "公式、已有内容或隐藏/保护格不能列为预算输入。"))
+        elif sheet.protected and cell is None:
             issues.append(Issue("budget.readonly", "error", target, "受保护区域未经确认不能填入数值。"))
         if item.period is not None and item.period > horizon:
             issues.append(Issue("budget.period", "error", target, "预算条目期间超出经营周期。"))
@@ -62,4 +62,9 @@ def validate_budget_items(request: SolveRequest, plan: Plan) -> tuple[Issue, ...
         if tid not in covered:
             issues.append(Issue("budget.template_omitted", "error", tid,
                                 f"方案未说明所选预算表 {template.source.filename} 的条目或映射缺口。"))
+        for sheet in template.sheets:
+            if (not sheet.hidden and any(not c.text and c.writable for c in sheet.cells)
+                    and not any(t == tid and name == sheet.name for t, name, _ in seen)):
+                issues.append(Issue("budget.sheet_omitted", "error", tid,
+                                    f"{template.source.filename} · {sheet.name} 未安排预算输入，请按空表补全方案。"))
     return tuple(issues)

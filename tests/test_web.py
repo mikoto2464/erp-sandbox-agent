@@ -209,6 +209,19 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         template = self.request(base + '/templates')[0]
+        with self.assertRaises(HTTPError) as unplanned:
+            self.request(base + '/mappings', {'solution_id': solution['id'], 'template_id': template['source']['id']})
+        self.assertEqual(unplanned.exception.code, 409)
+        proposal = loads(proposal_json())
+        proposal['plan']['budget_items'] = [{
+            'template_id': template['source']['id'], 'sheet': '资金计划', 'cell': 'B2',
+            'label': '借款', 'period': 1, 'unit': '元', 'value': '10',
+            'action_indices': [0], 'explanation': '第一期借款',
+        }]
+        self.llm.response = dumps(proposal)
+        job = self.request(base + '/solve', {'version': 1, 'generation': {'template_ids': [template['source']['id']]}})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        solution = self.request(base + '/solutions')[-1]
         entry = {'sheet': '资金计划', 'cell': 'B2', 'label': '借款',
                  'source_ids': ['action:0:amount'], 'conversion': 'identity', 'explanation': '第一期操作金额'}
         self.llm.response = dumps({'entries': [entry]})
@@ -216,6 +229,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'needs_input')
         mapping = self.request(base + '/mappings')[0]
         self.assertEqual(mapping['values'], ['10'])
+        with self.assertRaises(HTTPError) as changed_budget:
+            self.request(base + '/mappings/' + mapping['id'], {
+                'expected_revision': 1, 'entries': [{**entry, 'source_ids': []}],
+            })
+        self.assertEqual(changed_budget.exception.code, 400)
         with self.assertRaises(HTTPError) as unconfirmed:
             self.request(base + '/artifacts', {'solution_id': solution['id'], 'kind': 'xlsx', 'mapping_id': mapping['id']})
         self.assertEqual(unconfirmed.exception.code, 409)
