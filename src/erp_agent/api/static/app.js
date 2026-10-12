@@ -231,6 +231,7 @@ async function showProjects(updateLocation = true) {
   dirty = false; inputsDirty = false; projectLoading = false;
   toggleTasks(false, false);
   $("workflow-nav").hidden = true; $("open-tasks").hidden = true;
+  $("document-preview-dialog").close();
   if (updateLocation) rememberLocation();
   $("project-view").hidden = false;
   $("flow-view").hidden = true;
@@ -265,12 +266,13 @@ async function openProject(project, route = {}) {
   $("open-tasks").setAttribute("aria-label", "展开任务记录");
   $("task-count").textContent = "";
   inputDraft={revision:0,problem_text:"",supplement_text:"",annotations:[]};inputsDirty=false;inputEditSequence=0;
-  $("problem-text").value="";$("supplement-text").value="";$("manual-entry").open=false;
+  $("problem-text").value="";$("supplement-text").value="";
   $("project-title").textContent = project.name;
   $("project-subtitle").textContent = `创建于 ${new Date(project.created_at).toLocaleDateString("zh-CN")}`;
   $("project-view").hidden = true; $("flow-view").hidden = false;
   $("reading-empty").hidden = false; $("review").hidden = true;
-  $("documents").replaceChildren(); $("source-content").replaceChildren(); $("solutions").replaceChildren();
+  $("document-preview-dialog").close(); $("document-preview-content").replaceChildren();
+  $("documents").replaceChildren(); $("solutions").replaceChildren();
   $("jobs").replaceChildren(); $("active-job").hidden = true;
   $("solutions-empty").hidden=false;
   updateFutureModules([]);
@@ -283,7 +285,6 @@ async function openProject(project, route = {}) {
   try {
     const inputs=await api(base()+"/inputs");if(captured!==generation)return;
     inputDraft=inputs;$("problem-text").value=inputs.problem_text;$("supplement-text").value=inputs.supplement_text;
-    $("manual-entry").open=!!inputs.problem_text;
     await refresh(true);
     if(captured!==generation)return;
     if (currentStep === initialStep && !route.step && snapshot) setStep(2);
@@ -296,42 +297,60 @@ function askDelete(project) {
   $("delete-dialog").showModal();
 }
 function renderDocuments() {
-  $("documents").replaceChildren(); $("source-content").replaceChildren();
+  $("documents").replaceChildren();
   for (const document of documents) {
     const id = document.source.id;
     if (!knownFiles.has(id)) { knownFiles.add(id); selectedFiles.add(id); }
     const entry=node("div",undefined,"file-entry"),row = node("div", undefined, "file-row");
     const checkbox = node("input"); checkbox.type = "checkbox"; checkbox.checked = selectedFiles.has(id);
+    checkbox.setAttribute("aria-label", `选择${document.source.filename}用于读题`);
     checkbox.onchange = () => { if (checkbox.checked) selectedFiles.add(id); else selectedFiles.delete(id); updateControls(); };
     const info = node("span", document.source.filename, "file-info");
     info.append(node("small", `${Math.ceil(document.source.size / 1024)} KB · ${document.evidence.length} 处证据`));
-    row.append(checkbox, info, node("span", "已解析", "badge known"));
+    const preview=node("button", "预览", "secondary file-preview");preview.type="button";
+    preview.setAttribute("aria-label", `预览${document.source.filename}的解析内容`);
+    preview.onclick=()=>showDocumentPreview(id);
+    const actions=node("div", undefined, "file-actions");
+    actions.append(node("span", "已解析", "badge known"), preview);
+    row.append(checkbox, info, actions);
     const note=node("label",undefined,"file-note"),text=node("textarea");text.rows=2;text.maxLength=5000;
     text.value=inputDraft.annotations.find(a=>a.document_id===id)?.text || "";
     text.placeholder="文件说明（选填），例如：订单数量不得超过此详单。";
     text.setAttribute("aria-label",`${document.source.filename}的文件说明`);
     text.oninput=()=>{inputDraft.annotations=inputDraft.annotations.filter(a=>a.document_id!==id);if(text.value.trim())inputDraft.annotations.push({document_id:id,text:text.value});markInputsDirty();};
     note.append(node("span","说明"),text);entry.append(row,note);$("documents").append(entry);
-    const details = node("details", undefined, "source-document");
-    details.append(node("summary", document.source.filename));
-    for (const warning of document.warnings) details.append(node("p", warning, "notice"));
-    for (const block of document.blocks) {
-      if (block.kind === "paragraph" && block.text) details.append(node("p", block.text));
-      if (block.kind === "table") {
-        const wrapper = node("div", undefined, "table-wrap"), table = node("table", undefined, "source-table");
-        const rows = new Map();
-        for (const cell of block.cells) {
-          if (!rows.has(cell.row)) rows.set(cell.row, node("tr"));
-          const td = node("td", cell.text || "—", cell.vertical_merge === "continue" ? "continuation" : "");
-          td.colSpan = cell.column_span; td.title = cell.evidence_id; rows.get(cell.row).append(td);
-        }
-        for (const row of rows.values()) table.append(row);
-        wrapper.append(table); details.append(wrapper);
-      }
-    }
-    $("source-content").append(details);
   }
   updateControls();
+}
+function showDocumentPreview(id) {
+  const parsed=documents.find(item=>item.source.id===id);
+  if(!parsed)return;
+  $("document-preview-title").textContent=parsed.source.filename;
+  const content=$("document-preview-content");content.replaceChildren();
+  for(const warning of parsed.warnings)content.append(node("p",warning,"notice"));
+  const evidence=new Map(parsed.evidence.map(item=>[item.id,item]));
+  for(const block of parsed.blocks){
+    if(block.kind==="paragraph" && block.text)content.append(node("p",block.text,"preview-paragraph"));
+    if(block.kind==="table" && block.cells.length){
+      const wrapper=node("div",undefined,"table-wrap preview-table-wrap"),table=node("table",undefined,"source-table preview-table");
+      const location=evidence.get(block.cells[0].evidence_id)?.location;
+      table.append(node("caption",location || `表格 · 正文块 ${block.index}`));
+      const rows=new Map();
+      for(const cell of block.cells){
+        if(!rows.has(cell.row))rows.set(cell.row,node("tr"));
+        const td=node("td",cell.text,cell.vertical_merge==="continue"?"continuation":"");
+        td.colSpan=cell.column_span;
+        const source=evidence.get(cell.evidence_id);
+        if(source)td.title=source.location;
+        rows.get(cell.row).append(td);
+      }
+      for(const row of rows.values())table.append(row);
+      wrapper.append(table);content.append(wrapper);
+    }
+  }
+  if(!content.children.length)content.append(node("p","未提取到可预览的文字或表格。","empty"));
+  $("document-preview-dialog").showModal();
+  content.scrollTop=0;
 }
 function evidenceIndex() {
   return new Map([...documents,...(snapshot?.additional_sources || [])].flatMap(doc=>doc.evidence.map(e=>[e.id,{...e,filename:doc.source.filename}])));
