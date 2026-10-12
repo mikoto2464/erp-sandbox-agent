@@ -7,6 +7,7 @@ import WorkflowPage from './views/WorkflowPage.vue';
 import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
 import IssueCard from './components/IssueCard.vue';
+import FactEditor from './components/FactEditor.vue';
 import { workspaceKey } from './composables/context';
 import {
   issueAnswer,
@@ -19,7 +20,15 @@ import {
 import { useWorkspace } from './composables/useWorkspace';
 import { useModelPresets } from './composables/useModelPresets';
 import { evidenceTables } from './lib/evidence';
-import type { Fact, Issue, Job, ModelPreset, ParsedDocument } from './lib/types';
+import type {
+  EditableReading,
+  Fact,
+  Issue,
+  Job,
+  ModelPreset,
+  ParsedDocument,
+  Snapshot,
+} from './lib/types';
 const projectId = 'a'.repeat(32);
 const preset: ModelPreset = {
   id: 'model',
@@ -57,7 +66,7 @@ function setup() {
     },
   ];
   const inputs = { revision: 0, problem_text: '', supplement_text: '', annotations: [] };
-  const snapshot = {
+  let snapshot: Snapshot = {
     version: 1,
     inputs,
     additional_sources: [],
@@ -90,17 +99,19 @@ function setup() {
     else if (url.endsWith('/documents') || url.endsWith('/solutions')) data = [];
     else if (url.endsWith('/jobs')) data = structuredClone(jobs);
     else if (url.endsWith('/problem')) data = { snapshot };
-    else if (url.endsWith('/revisions'))
-      data = {
+    else if (url.endsWith('/revisions')) {
+      const reading = JSON.parse(String(options.body)).reading as EditableReading;
+      snapshot = {
         ...snapshot,
-        version: 2,
-        inputs: { revision: 1 },
+        version: snapshot.version + 1,
         reading: {
-          ...snapshot.reading,
-          problem: { ...snapshot.reading.problem, ...JSON.parse(String(options.body)).reading },
+          problem: { ...snapshot.reading.problem, title: reading.title, facts: reading.facts },
+          rules: { rules: reading.rules },
+          issues: reading.issues,
         },
       };
-    else if (url === '/api/model-presets/model')
+      data = snapshot;
+    } else if (url === '/api/model-presets/model')
       data = { ...preset, ...JSON.parse(String(options.body)), revision: 2 };
     else data = {};
     return { ok: true, status: 200, json: async () => structuredClone(data) };
@@ -114,7 +125,7 @@ afterEach(() => {
 });
 describe('Vue migration', () => {
   it('keeps clarification separate from extraction and confirms term rate without changing numeric evidence', async () => {
-    const { router } = setup();
+    const { router, fetcher } = setup();
     await router.push(`/projects/${projectId}/steps/2`);
     const workspace = useWorkspace(router);
     await workspace.initialize();
@@ -183,6 +194,33 @@ describe('Vue migration', () => {
     });
     reading.facts.push({ ...fact, id: 'other_rate', entity_id: 'other' });
     expect(issueFact(reading, { ...issue, target: 'interest_rate' })).toBeUndefined();
+    const editor = mount(FactEditor, {
+      props: { fact: reading.facts[0] },
+      global: { provide: { [workspaceKey as symbol]: workspace } },
+    });
+    await editor.find('input').setValue('0.06');
+    expect(reading.facts[0].value).toBe('0.05');
+    await editor.find('form').trigger('submit');
+    expect(editor.emitted('close')).toHaveLength(1);
+    expect(reading.facts[0].value).toBe('0.06');
+    await workspace.saveReading();
+    const payload = JSON.parse(
+      String(fetcher.mock.calls.find(([url]) => url.endsWith('/revisions'))![1]!.body),
+    );
+    expect(payload).toMatchObject({ expected_version: 1, reading: { facts: reading.facts } });
+    expect(payload.reading.issues).toEqual(reading.issues);
+    expect(workspace.snapshot.value!.reading.problem.facts[0]).toMatchObject({
+      value: '0.06',
+      evidence_ids: ['rate_cell'],
+      conversion: 'percent_to_ratio',
+    });
+    expect(workspace.snapshot.value!.reading.issues).toContainEqual(
+      expect.objectContaining({ code: 'review.confirmed', evidence_ids: ['rate_cell'] }),
+    );
+    expect(workspace.readingDirty.value).toBe(false);
+    workspace.editable.value!.facts[0].evidence_ids.push('draft_only');
+    expect(workspace.snapshot.value!.reading.problem.facts[0].evidence_ids).toEqual(['rate_cell']);
+    editor.unmount();
     wrapper.unmount();
     workspace.dispose();
   });
@@ -209,8 +247,14 @@ describe('Vue migration', () => {
     expect(workspace.notifications.messages.value).toHaveLength(1);
     workspace.inputs.value.problem_text = '手动题目';
     workspace.setAnnotation('doc', '数量上限');
+    workspace.setAnnotation('supplement', '补充规则');
+    workspace.setAnnotation('doc', '订单数量上限');
     workspace.markInputsDirty();
     await workspace.saveInputs();
+    expect(workspace.inputs.value.annotations).toEqual([
+      { document_id: 'supplement', text: '补充规则' },
+      { document_id: 'doc', text: '订单数量上限' },
+    ]);
     expect(workspace.inputsDirty.value).toBe(false);
     expect(workspace.inputChanged.value).toBe(true);
     expect(workspace.canSolve.value).toBe(false);

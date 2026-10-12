@@ -1,6 +1,7 @@
-import { computed, ref, toRaw } from 'vue';
+import { computed, ref } from 'vue';
 import type { Router } from 'vue-router';
 import { ApiError, post, request } from '../lib/api';
+import { cloneJson } from '../lib/json';
 import type {
   EditableReading,
   Job,
@@ -20,7 +21,6 @@ const emptyInputs = (): ReadingInputs => ({
   supplement_text: '',
   annotations: [],
 });
-const copy = <T>(value: T): T => structuredClone(toRaw(value));
 export function useWorkspace(router: Router) {
   const authenticated = ref(false),
     initializing = ref(true),
@@ -161,9 +161,11 @@ export function useWorkspace(router: Router) {
     snapshot.value = value;
     editable.value = {
       title: value.reading.problem.title,
-      facts: copy(value.reading.problem.facts),
-      rules: copy(value.reading.rules.rules),
-      issues: copy(value.reading.issues.filter((issue) => !issue.code.startsWith('validation.'))),
+      facts: cloneJson(value.reading.problem.facts),
+      rules: cloneJson(value.reading.rules.rules),
+      issues: cloneJson(
+        value.reading.issues.filter((issue) => !issue.code.startsWith('validation.')),
+      ),
     };
     readingDirty.value = false;
   }
@@ -187,7 +189,7 @@ export function useWorkspace(router: Router) {
     if (!inputsDirty.value) return;
     const captured = generation,
       sequence = inputSequence,
-      saved = await post<ReadingInputs>(base() + '/inputs', copy(inputs.value));
+      saved = await post<ReadingInputs>(base() + '/inputs', cloneJson(inputs.value));
     if (captured !== generation) return;
     inputs.value.revision = saved.revision;
     if (sequence === inputSequence) {
@@ -202,7 +204,7 @@ export function useWorkspace(router: Router) {
     const saved = await post<Snapshot>(base() + '/revisions', {
       expected_version: snapshot.value.version,
       note: '默认',
-      reading: copy(editable.value),
+      reading: cloneJson(editable.value),
     });
     if (captured !== generation) return;
     if (sequence !== readingSequence) {

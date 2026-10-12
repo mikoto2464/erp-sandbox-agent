@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, toRaw, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import AppModal from './AppModal.vue';
 import AppSelect from './AppSelect.vue';
 import { useWorkspaceContext } from '../composables/context';
 import { evidenceContext, evidenceIndex } from '../lib/evidence';
 import { confirmFact, factInputError } from '../lib/review';
 import { fieldNames } from '../lib/labels';
+import { cloneJson } from '../lib/json';
 import type { Fact } from '../lib/types';
 const props = defineProps<{ fact: Fact | null }>();
 const emit = defineEmits<{ close: [] }>();
@@ -31,7 +32,7 @@ const choices = computed(() =>
 watch(
   () => props.fact,
   (value) => {
-    draft.value = value ? structuredClone(toRaw(value)) : null;
+    draft.value = value ? cloneJson(value) : null;
     search.value = '';
     error.value = '';
   },
@@ -58,7 +59,7 @@ function save() {
     return;
   }
   fact.explanation = fact.explanation.trim() || '默认';
-  Object.assign(props.fact, structuredClone(toRaw(fact)));
+  Object.assign(props.fact, cloneJson(fact));
   confirmFact(editable.value, props.fact);
   markReadingDirty();
   emit('close');
