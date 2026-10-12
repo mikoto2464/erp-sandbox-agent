@@ -67,6 +67,9 @@ const pendingIssues = computed(() =>
     )
     .sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error')),
 );
+const visibleFactCount = computed(() =>
+  visibleFacts.value.reduce((total, [, facts]) => total + facts.length, 0),
+);
 const warnings = computed(
   () => issues.value.filter((issue) => issue.severity === 'warning').length,
 );
@@ -275,26 +278,57 @@ function applyJSON() {
           </p>
         </div>
         <div v-else-if="reviewTab === 'facts'">
-          <div class="filters">
-            <input
-              v-model="search"
-              type="search"
-              placeholder="搜索对象或字段"
-              aria-label="搜索字段"
-            /><AppSelect
-              v-model="category"
-              label="字段分类"
-              :options="categories"
-            /><AppSelect
-              v-model="state"
-              label="字段状态"
-              :options="[{ value: '', label: '全部状态' }, ...states]"
-            /><button
-              class="review-action"
-              @click="search = category = state = ''"
-            >
-              清除筛选
-            </button>
+          <div class="fact-search-toolbar">
+            <div class="fact-search">
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <circle
+                  cx="10.5"
+                  cy="10.5"
+                  r="6.5"
+                />
+                <path d="m16 16 4 4" />
+              </svg>
+              <input
+                v-model="search"
+                type="search"
+                placeholder="搜索对象、字段或数值"
+                aria-label="搜索题目数据"
+              />
+              <button
+                v-if="search"
+                type="button"
+                class="icon-button"
+                aria-label="清空搜索"
+                @click="search = ''"
+              >
+                ×
+              </button>
+            </div>
+            <div class="fact-search-filters">
+              <AppSelect
+                v-model="category"
+                label="字段分类"
+                :options="categories"
+              /><AppSelect
+                v-model="state"
+                label="字段状态"
+                :options="[{ value: '', label: '全部状态' }, ...states]"
+              /><button
+                class="review-action"
+                :disabled="!search && !category && !state"
+                @click="search = category = state = ''"
+              >
+                重置筛选
+              </button>
+              <span
+                class="muted fact-search-count"
+                role="status"
+                >显示 {{ visibleFactCount }} / {{ editable.facts.length }} 条</span
+              >
+            </div>
           </div>
           <p class="muted">
             默认经营 4 年、每年 4 季，无需确认；特殊周期可在数据中修改。百分数以比例保存，如 50% 为

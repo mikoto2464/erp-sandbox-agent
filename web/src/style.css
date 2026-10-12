@@ -1628,6 +1628,82 @@ button {
 button:active:enabled {
   transform: translateY(1px);
 }
+.fact-search-toolbar {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0 16px;
+}
+.fact-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 50px;
+  padding: 0 14px;
+  border: 1px solid #dbe1ec;
+  border-radius: 10px;
+  background: #fff;
+  transition:
+    border-color 0.14s ease,
+    box-shadow 0.14s ease;
+}
+.fact-search:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px #4f6ce512;
+}
+.fact-search svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: #758094;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+.fact-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  margin: 0;
+  padding: 13px 0;
+  font-size: 14px;
+  box-shadow: none;
+  outline: none;
+}
+.fact-search input::-webkit-search-cancel-button {
+  appearance: none;
+}
+.fact-search .icon-button {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+.fact-search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.fact-search-filters .app-select {
+  width: 170px;
+}
+.fact-search-count {
+  margin-left: auto;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .fact-search-filters .app-select {
+    flex: 1;
+    width: auto;
+    min-width: 130px;
+  }
+  .fact-search-filters > button {
+    order: 1;
+  }
+  .fact-search-count {
+    order: 2;
+  }
+}
 .review-action {
   min-height: 38px;
   padding: 8px 14px;
