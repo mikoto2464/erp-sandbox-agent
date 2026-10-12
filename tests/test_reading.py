@@ -199,7 +199,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-9")
+        self.assertEqual(result.prompt_version, "reader-10")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)

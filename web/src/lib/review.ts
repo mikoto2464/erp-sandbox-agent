@@ -10,10 +10,43 @@ export function factInputError(fact: Fact): string {
   return '';
 }
 export function issueFact(reading: EditableReading, issue: Issue) {
-  return (
-    reading.facts.find((fact) => fact.id === issue.target) ||
-    reading.facts.find((fact) => fact.key === issue.target.split('.').pop())
+  const direct = reading.facts.find((fact) => fact.id === issue.target);
+  if (direct) return direct;
+  const key = issue.target.split('.').pop();
+  const matches = reading.facts.filter((fact) => fact.key === key);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+const noteCode = (issue: Issue) => 'review.note.' + issue.code;
+const answerPrefix = (issue: Issue) => `针对问题：${issue.message}\n待确认答复：`;
+export const TERM_TOTAL_ANSWER =
+  '采用用户默认口径：该利率 / 贴息覆盖对应完整期限，不是年利率或每季利率，不按期数重复相乘。';
+export const UNKNOWN_RATE_ANSWER = '暂不清楚计息口径；保留为未确定条件，不据此计算确定的利息。';
+export function issueAnswer(reading: EditableReading, issue: Issue): string {
+  const note = reading.issues.find(
+    (item) =>
+      item.code === noteCode(issue) &&
+      item.target === issue.target &&
+      item.message.startsWith(answerPrefix(issue)),
   );
+  return note?.message.slice(answerPrefix(issue).length) || '';
+}
+export function setIssueAnswer(reading: EditableReading, issue: Issue, answer: string) {
+  reading.issues = reading.issues.filter(
+    (item) =>
+      !(
+        item.code === noteCode(issue) &&
+        item.target === issue.target &&
+        item.message.startsWith(answerPrefix(issue))
+      ),
+  );
+  if (answer.trim())
+    reading.issues.push({
+      code: noteCode(issue),
+      severity: 'info',
+      target: issue.target,
+      message: answerPrefix(issue) + answer,
+      evidence_ids: issue.evidence_ids,
+    });
 }
 export function fieldConfirmation(fact: Fact) {
   return `用户已确认：${fieldNames[fact.key] || fact.key}=${fact.value ?? '未提供'} ${fact.unit}；说明：${fact.explanation || '默认'}`;
@@ -35,13 +68,62 @@ export function resolveIssue(reading: EditableReading, issue: Issue, explanation
     (item) =>
       item.code === issue.code && item.target === issue.target && item.message === issue.message,
   );
-  if (position >= 0)
-    reading.issues[position] = {
-      ...reading.issues[position],
+  if (position >= 0) {
+    const answer = explanation.trim() || '默认';
+    if (answer !== '默认') {
+      setIssueAnswer(reading, issue, '');
+      const target =
+        issueFact(reading, issue) || reading.rules.find((rule) => rule.id === issue.target);
+      const clarification = `用户答复（${issue.message}）：${answer}`;
+      if (target && !target.explanation.includes(clarification))
+        target.explanation = [target.explanation, clarification].filter(Boolean).join('\n');
+      const fact = issueFact(reading, issue);
+      if (fact && ratePeriodIssue(issue, fact) && ['finance', 'discount'].includes(fact.category)) {
+        const key = fact.category === 'finance' ? 'interest_rate_basis' : 'discount_rate_basis';
+        const basis = reading.facts.find(
+          (item) =>
+            item.category === fact.category &&
+            item.entity_id === fact.entity_id &&
+            item.key === key,
+        );
+        const values = {
+          value: answer === TERM_TOTAL_ANSWER ? 'term_total' : null,
+          value_type: 'text',
+          unit: '',
+          state: answer === TERM_TOTAL_ANSWER ? ('assumed' as const) : ('missing' as const),
+          evidence_ids: [],
+          conversion: 'identity',
+          explanation:
+            answer === TERM_TOTAL_ANSWER
+              ? '用户确认：对应完整期限的总利率。'
+              : `用户标注：计息口径${answer === UNKNOWN_RATE_ANSWER ? '不清楚' : '以用户答复为准，尚未结构化'}；${answer}`,
+        };
+        if (basis) Object.assign(basis, values);
+        else {
+          let id = fact.id + '_basis';
+          while (reading.facts.some((item) => item.id === id)) id += '_';
+          reading.facts.push({
+            ...values,
+            id,
+            key,
+            category: fact.category,
+            entity_id: fact.entity_id,
+            entity_name: fact.entity_name,
+          });
+        }
+      }
+    }
+    const currentPosition = reading.issues.findIndex(
+      (item) =>
+        item.code === issue.code && item.target === issue.target && item.message === issue.message,
+    );
+    reading.issues[currentPosition] = {
+      ...reading.issues[currentPosition],
       code: 'review.resolved.' + issue.code,
       severity: 'info',
-      message: issue.message + '；用户标注：' + explanation,
+      message: issue.message + '；用户答复：' + answer,
     };
+  }
 }
 export function annotateIssue(
   reading: EditableReading,
@@ -51,11 +133,7 @@ export function annotateIssue(
   explanation: string,
 ) {
   const fact = issueFact(reading, issue),
-    matches = fact
-      ? [fact]
-      : unitIssue
-        ? reading.facts.filter((fact) => fact.key === issue.target.split('.').pop())
-        : [];
+    matches = fact ? [fact] : [];
   const note = `用户标注：${unitIssue ? '单位' + choice + '，按无单位保存' : choice}${explanation ? '；' + explanation : ''}`;
   if (unitIssue)
     for (const field of matches) {
@@ -85,5 +163,16 @@ export function issueAdvice(issue: Issue, fact?: Fact) {
   if (issue.code === 'validation.value_missing')
     return '可补充已查到的值，或标注无、不清楚；不要用零替代未知值。';
   if (/horizon/.test(issue.code)) return '默认 4 年、每年 4 季；周期异常时请修正并保存。';
+  if (ratePeriodIssue(issue, fact))
+    return '默认按对应完整期限的总利率处理；题目另有规定时，在下方填写计息口径。';
   return '核对相关数据及依据，处理后保存校验。';
+}
+export function ratePeriodIssue(issue: Issue, fact?: Fact): boolean {
+  return (
+    (fact?.category === 'finance' ||
+      fact?.category === 'discount' ||
+      /利率|贴息|贴现/.test(issue.message)) &&
+    /利率|贴息|贴现|interest|discount/i.test((fact?.key || '') + issue.message) &&
+    /周期|计息|年利率|季利率|总利率|期限|按季|按年|利率口径/.test(issue.message)
+  );
 }

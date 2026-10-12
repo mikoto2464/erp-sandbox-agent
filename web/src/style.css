@@ -1633,6 +1633,19 @@ button:active:enabled {
   gap: 12px;
   margin: 20px 0 16px;
 }
+.issue-extraction {
+  margin: 10px 0;
+  color: var(--muted);
+}
+.issue-extraction p {
+  white-space: pre-wrap;
+  padding: 10px 12px;
+  background: #f6f8fc;
+  border-radius: 8px;
+}
+.issue-answer-options {
+  margin: 10px 0 16px;
+}
 .fact-search {
   display: flex;
   align-items: center;

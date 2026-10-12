@@ -6,10 +6,20 @@ import ProjectsPage from './views/ProjectsPage.vue';
 import WorkflowPage from './views/WorkflowPage.vue';
 import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
+import IssueCard from './components/IssueCard.vue';
+import { workspaceKey } from './composables/context';
+import {
+  issueAnswer,
+  issueFact,
+  resolveIssue,
+  setIssueAnswer,
+  TERM_TOTAL_ANSWER,
+  UNKNOWN_RATE_ANSWER,
+} from './lib/review';
 import { useWorkspace } from './composables/useWorkspace';
 import { useModelPresets } from './composables/useModelPresets';
 import { evidenceTables } from './lib/evidence';
-import type { Job, ModelPreset, ParsedDocument } from './lib/types';
+import type { Fact, Issue, Job, ModelPreset, ParsedDocument } from './lib/types';
 const projectId = 'a'.repeat(32);
 const preset: ModelPreset = {
   id: 'model',
@@ -103,6 +113,79 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('keeps clarification separate from extraction and confirms term rate without changing numeric evidence', async () => {
+    const { router } = setup();
+    await router.push(`/projects/${projectId}/steps/2`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const fact: Fact = {
+      id: 'direct_rate',
+      category: 'finance',
+      entity_id: 'direct',
+      entity_name: '直接融资',
+      key: 'interest_rate',
+      value: '0.05',
+      value_type: 'number',
+      unit: '比例',
+      state: 'known',
+      evidence_ids: ['rate_cell'],
+      conversion: 'percent_to_ratio',
+      explanation: '直接融资利率5%转为0.05',
+    };
+    const issue: Issue = {
+      code: 'rate_period',
+      target: fact.id,
+      severity: 'warning',
+      message: '利率周期（年/季/期）未明确，影响利息计算。',
+      evidence_ids: ['rate_cell'],
+    };
+    const other = { ...issue, code: 'payment_timing', message: '利息何时支付？' };
+    const reading = workspace.editable.value!;
+    reading.facts = [fact];
+    reading.issues = [issue, other];
+    setIssueAnswer(reading, other, '到期结算');
+    const wrapper = mount(IssueCard, {
+      props: { issue },
+      global: { provide: { [workspaceKey as symbol]: workspace } },
+    });
+    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('');
+    expect(wrapper.find('.issue-extraction').text()).toContain('5%转为0.05');
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '整个期限总利率')!
+      .trigger('click');
+    expect(issueAnswer(reading, issue)).toBe(TERM_TOTAL_ANSWER);
+    expect(issueAnswer(reading, other)).toBe('到期结算');
+    expect(reading.facts[0].explanation).toBe('直接融资利率5%转为0.05');
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '确认处理')!
+      .trigger('click');
+    expect(reading.facts[0]).toMatchObject({
+      value: '0.05',
+      state: 'known',
+      evidence_ids: ['rate_cell'],
+      conversion: 'percent_to_ratio',
+    });
+    expect(reading.facts[0].explanation).toContain(TERM_TOTAL_ANSWER);
+    expect(reading.facts.find((item) => item.key === 'interest_rate_basis')).toMatchObject({
+      value: 'term_total',
+      state: 'assumed',
+      entity_id: 'direct',
+    });
+    expect(reading.issues.some((item) => item.code === 'review.resolved.rate_period')).toBe(true);
+    const uncertain = { ...issue, code: 'rate_uncertain', message: '计息口径是否已经确定？' };
+    reading.issues.push(uncertain);
+    resolveIssue(reading, uncertain, UNKNOWN_RATE_ANSWER);
+    expect(reading.facts.find((item) => item.key === 'interest_rate_basis')).toMatchObject({
+      value: null,
+      state: 'missing',
+    });
+    reading.facts.push({ ...fact, id: 'other_rate', entity_id: 'other' });
+    expect(issueFact(reading, { ...issue, target: 'interest_rate' })).toBeUndefined();
+    wrapper.unmount();
+    workspace.dispose();
+  });
   it('restores project and step, handles polling once, saves inputs and protects old solves', async () => {
     const { router, jobs } = setup();
     await router.push(`/projects/${projectId}/steps/4?review=rules`);

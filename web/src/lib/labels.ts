@@ -39,6 +39,8 @@ export const fieldNames: Record<string, string> = {
   delivery_period: '送货期',
   payment_period: '账期',
   interest_rate: '利率',
+  interest_rate_basis: '计息口径',
+  discount_rate_basis: '贴息口径',
   startup_cost: '单件开产费',
   repayment_method: '还款方式',
   discount_interest: '贴息比例',

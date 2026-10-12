@@ -1,7 +1,17 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
-import { annotateIssue, issueAdvice, issueFact, resolveIssue } from '../lib/review';
+import {
+  annotateIssue,
+  issueAdvice,
+  issueAnswer,
+  issueFact,
+  ratePeriodIssue,
+  resolveIssue,
+  setIssueAnswer,
+  TERM_TOTAL_ANSWER,
+  UNKNOWN_RATE_ANSWER,
+} from '../lib/review';
 import { fieldNames } from '../lib/labels';
 import type { Fact, Issue } from '../lib/types';
 const props = defineProps<{ issue: Issue }>();
@@ -18,47 +28,34 @@ const title = computed(() =>
     ? `${fact.value.entity_name} · ${fieldNames[fact.value.key] || fact.value.key}`
     : rule.value?.name || (props.issue.target === 'horizon' ? '经营周期' : '题目提示'),
 );
-const explanation = computed({
-  get: () =>
-    fact.value?.explanation ||
-    editable.value?.issues.find(
-      (issue) =>
-        issue.code === 'review.note.' + props.issue.code && issue.target === props.issue.target,
-    )?.message ||
-    '',
+const answerInput = ref<HTMLTextAreaElement>();
+const rateIssue = computed(() => ratePeriodIssue(props.issue, fact.value));
+const answer = computed({
+  get: () => (editable.value ? issueAnswer(editable.value, props.issue) : ''),
   set: (value) => {
     if (!editable.value) return;
-    if (fact.value) fact.value.explanation = value;
-    else {
-      editable.value.issues = editable.value.issues.filter(
-        (issue) =>
-          !(
-            issue.code === 'review.note.' + props.issue.code && issue.target === props.issue.target
-          ),
-      );
-      if (value.trim())
-        editable.value.issues.push({
-          code: 'review.note.' + props.issue.code,
-          severity: 'info',
-          target: props.issue.target,
-          message: value,
-          evidence_ids: props.issue.evidence_ids,
-        });
-    }
+    setIssueAnswer(editable.value, props.issue, value);
     markReadingDirty();
   },
 });
-const unitIssue = computed(() => /UNIT|unit|单位/.test(props.issue.code + props.issue.message));
+const unitIssue = computed(
+  () => !rateIssue.value && /UNIT|unit|单位/.test(props.issue.code + props.issue.message),
+);
 const canAnnotate = computed(
   () => props.issue.severity !== 'error' && (unitIssue.value || fact.value?.value === null),
 );
 function resolve() {
-  resolveIssue(editable.value!, props.issue, explanation.value.trim() || '默认');
+  if (rateIssue.value && !answer.value.trim()) {
+    notify('请选择计息口径或填写对这个问题的回答。');
+    answerInput.value?.focus();
+    return;
+  }
+  resolveIssue(editable.value!, props.issue, answer.value.trim() || '默认');
   markReadingDirty();
   notify('处理说明已记录，保存后生效。');
 }
 function annotate(choice: string) {
-  annotateIssue(editable.value!, props.issue, choice, unitIssue.value, explanation.value);
+  annotateIssue(editable.value!, props.issue, choice, unitIssue.value, answer.value);
   markReadingDirty();
   notify(`已标注“${choice}”，保存后生效。`);
 }
@@ -84,13 +81,45 @@ function annotate(choice: string) {
     </p>
     <p>{{ issue.message }}</p>
     <p class="muted">{{ issueAdvice(issue, fact) }}</p>
+    <details
+      v-if="fact?.explanation"
+      class="issue-extraction"
+    >
+      <summary>已有提取说明</summary>
+      <p>{{ fact.explanation }}</p>
+    </details>
     <label class="issue-explanation"
-      >处理说明（选填）<textarea
-        v-model="explanation"
-        rows="2"
-        placeholder="填写理解或暂定口径；留空为默认"
+      >{{ rateIssue ? '回答这个问题 · 计息口径' : '回答这个问题（选填）'
+      }}<textarea
+        ref="answerInput"
+        v-model="answer"
+        rows="3"
+        :placeholder="
+          rateIssue
+            ? '例如：这是对应完整贷款期限 / 收款期的总利率，不按每季重复计息。'
+            : '填写对上方疑问的回答、依据或暂定口径；留空按默认处理。'
+        "
       />
     </label>
+    <div
+      v-if="rateIssue && !issue.code.startsWith('validation.')"
+      class="review-actions issue-answer-options"
+    >
+      <button
+        type="button"
+        class="review-action"
+        @click="answer = TERM_TOTAL_ANSWER"
+      >
+        整个期限总利率
+      </button>
+      <button
+        type="button"
+        class="review-action"
+        @click="answer = UNKNOWN_RATE_ANSWER"
+      >
+        暂不清楚
+      </button>
+    </div>
     <div class="actions review-actions">
       <button
         v-if="fact"

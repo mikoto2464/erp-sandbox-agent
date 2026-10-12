@@ -503,6 +503,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(invalid.exception.code, 409)
         self.assertEqual(len(self.llm.calls), calls)
 
+    def test_confirmed_rate_basis_and_answer_reach_solver_without_changing_rate(self):
+        project, result = self.setup_problem()
+        base = f'/api/projects/{project}'
+        reading = result['snapshot']['reading']
+        fact = {'id': 'rate', 'category': 'finance', 'entity_id': 'direct',
+                'entity_name': '直接融资', 'key': 'interest_rate', 'value': '0.05',
+                'value_type': 'number', 'unit': '比例', 'state': 'assumed',
+                'evidence_ids': [], 'conversion': 'percent_to_ratio',
+                'explanation': '利率5%转为0.05；用户答复：对应贷款期限的总利率。'}
+        basis = {**fact, 'id': 'basis', 'key': 'interest_rate_basis', 'value': 'term_total',
+                 'value_type': 'text', 'unit': '', 'conversion': 'identity',
+                 'explanation': '用户确认：对应完整期限的总利率。'}
+        issue = {'code': 'review.resolved.rate_period', 'target': 'rate', 'severity': 'info',
+                 'message': '利率覆盖哪个期限？；用户答复：对应完整贷款期限。', 'evidence_ids': []}
+        revised = self.request(base + '/revisions', {'expected_version': 1,
+            'reading': {'title': '计息口径', 'facts': reading['problem']['facts'] + [fact, basis],
+                        'rules': [], 'issues': [issue]}})
+        self.assertEqual(self.request(base + '/problem')['snapshot']['reading']['problem']['facts'][-2:],
+                         [fact, basis])
+        self.llm.response = proposal_json()
+        job = self.request(base + '/solve', {'version': revised['version']})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        material = loads(self.llm.calls[-1].user)['snapshot']
+        self.assertEqual(material['problem']['facts'][-2:], [fact, basis])
+        self.assertIn(issue, material['issues'])
+
     def test_missing_horizon_uses_defaults_and_generates_without_confirmation(self):
         project, result = self.setup_problem()
         base = f'/api/projects/{project}'
