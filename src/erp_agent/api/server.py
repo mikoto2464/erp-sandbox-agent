@@ -230,6 +230,10 @@ class Handler(BaseHTTPRequestHandler):
         if resource == "mappings" and len(parts) == 5 and ID.fullmatch(parts[4]) and method == "POST":
             self._json(workflow.answerer.confirm(project_id, parts[4], self._body_json()))
             return
+        if resource in {"documents", "templates"} and len(parts) == 5 and ID.fullmatch(parts[4]) and method == "DELETE":
+            kind = "document" if resource == "documents" else "template"
+            self._json(workflow.delete_upload(project_id, kind, parts[4]))
+            return
         if resource == "artifacts" and len(parts) == 6 and ID.fullmatch(parts[4]) and parts[5] == "download" and method == "GET":
             manifest, content = workflow.answerer.download(project_id, parts[4])
             self._download_name = string(manifest['filename'])

@@ -79,6 +79,7 @@ export function useWorkspace(router: Router) {
     operations = ref(new Set<string>()),
     notifications = useToasts();
   let generation = 0,
+    uploadRevision = 0,
     inputSequence = 0,
     readingSequence = 0,
     polling: ReturnType<typeof setInterval> | undefined,
@@ -317,12 +318,38 @@ export function useWorkspace(router: Router) {
     notify('预算表已提交解析。');
     await refresh();
   }
+  async function deleteUpload(kind: 'document' | 'template', id: string) {
+    const captured = generation,
+      sequence = inputSequence;
+    const result = await request<{ inputs: ReadingInputs | null }>(
+      `${base()}/${kind === 'document' ? 'documents' : 'templates'}/${id}`,
+      { method: 'DELETE' },
+    );
+    if (captured !== generation) return;
+    uploadRevision++;
+    if (kind === 'document') {
+      documents.value = documents.value.filter((doc) => doc.source.id !== id);
+      selected.value = selected.value.filter((value) => value !== id);
+      knownDocuments.delete(id);
+      inputs.value.annotations = inputs.value.annotations.filter((item) => item.document_id !== id);
+      if (result.inputs) inputs.value.revision = result.inputs.revision;
+      if (sequence !== inputSequence) inputsDirty.value = true;
+      inputSequence++;
+    } else {
+      templates.value = templates.value.filter((template) => template.source.id !== id);
+      templateIds.value = templateIds.value.filter((value) => value !== id);
+    }
+    await refresh();
+    notify('文件已删除。', 'success');
+  }
   function selectSolution(id: string) {
     selectedSolutionId.value = id;
     const config = solutions.value.find((solution) => solution.id === id)?.generation;
     planTone.value = config?.tone || 'balanced';
     customPrompt.value = config?.custom_prompt || '';
-    templateIds.value = [...(config?.template_ids || [])];
+    templateIds.value = (config?.template_ids || []).filter((id) =>
+      templates.value.some((template) => template.source.id === id),
+    );
   }
   async function solve(previousSolutionId: string | null = null, revisionPrompt = '') {
     if (!generationReady.value) throw new Error('请检查题目、预算表解析状态和方案基调。');
@@ -415,6 +442,7 @@ export function useWorkspace(router: Router) {
       observed.set(job.id, job.status);
       if (
         initial ||
+        job.metadata.upload_deleted ||
         previous === job.status ||
         !['succeeded', 'needs_input', 'failed', 'cancelled'].includes(job.status)
       )
@@ -468,6 +496,7 @@ export function useWorkspace(router: Router) {
   async function refresh(initial = false) {
     if (!authenticated.value || !project.value) return;
     const captured = generation,
+      capturedUploads = uploadRevision,
       url = base();
     const [docs, latestJobs, plans, budgetTemplates, latestMappings, latestArtifacts] =
       await Promise.all([
@@ -478,7 +507,7 @@ export function useWorkspace(router: Router) {
         request<WorkbookMapping[]>(url + '/mappings'),
         request<Artifact[]>(url + '/artifacts'),
       ]);
-    if (captured !== generation) return;
+    if (captured !== generation || capturedUploads !== uploadRevision) return;
     documents.value = docs;
     jobs.value = latestJobs;
     const newPlan = plans.at(-1);
@@ -718,6 +747,7 @@ export function useWorkspace(router: Router) {
     upload,
     solve,
     uploadTemplates,
+    deleteUpload,
     selectSolution,
     cancelJob,
     retryJob,

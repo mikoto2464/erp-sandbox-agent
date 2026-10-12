@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import type { ParsedDocument } from '../lib/types';
 import DocumentPreview from '../components/DocumentPreview.vue';
+import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 const {
   inputs,
   inputsDirty,
   documents,
+  jobs,
   selected,
   status,
   canRead,
@@ -24,6 +26,18 @@ defineEmits<{ settings: [] }>();
 const preview = ref<ParsedDocument | null>(null),
   dragging = ref(false),
   fileInput = ref<HTMLInputElement>();
+const pendingFiles = computed(() => {
+  const entries = new Map<string, (typeof jobs.value)[number]>();
+  for (const job of jobs.value)
+    if (
+      job.kind === 'parse' &&
+      job.metadata.document_id &&
+      !job.metadata.upload_deleted &&
+      !documents.value.some((doc) => doc.source.id === job.metadata.document_id)
+    )
+      entries.set(job.metadata.document_id, job);
+  return [...entries.values()];
+});
 function files(values: FileList | null) {
   if (values) void run('upload', () => upload([...values]));
   if (fileInput.value) fileInput.value.value = '';
@@ -81,6 +95,11 @@ function files(values: FileList | null) {
             >
               预览
             </button>
+            <UploadDeleteButton
+              :id="doc.source.id"
+              :filename="doc.source.filename"
+              kind="document"
+            />
           </div>
         </div>
         <label class="file-note"
@@ -94,6 +113,29 @@ function files(values: FileList | null) {
             @input="setAnnotation(doc.source.id, ($event.target as HTMLTextAreaElement).value)"
           />
         </label>
+      </article>
+      <article
+        v-for="job in pendingFiles"
+        :key="job.metadata.document_id"
+        class="file-entry"
+      >
+        <div class="file-row">
+          <span class="file-info"
+            >{{ job.metadata.filename
+            }}<small>{{
+              job.status === 'failed'
+                ? '解析失败'
+                : job.status === 'cancelled'
+                  ? '已取消'
+                  : '正在解析…'
+            }}</small></span
+          >
+          <UploadDeleteButton
+            :id="job.metadata.document_id!"
+            :filename="job.metadata.filename || '题目文件'"
+            kind="document"
+          />
+        </div>
       </article>
     </div>
     <div class="input-section">

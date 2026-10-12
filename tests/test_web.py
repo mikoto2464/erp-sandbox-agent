@@ -17,6 +17,7 @@ from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.config import Settings
 from erp_agent.domain.models import SourceDocument
 from erp_agent.application.ports import LLMResponse
+from erp_agent.domain.errors import ERPError
 from unittest.mock import patch
 from tests.helpers import FakeLLM, docx_bytes, proposal_json
 from openpyxl import Workbook
@@ -188,6 +189,74 @@ class WebTests(unittest.TestCase):
             self.request(base + '/solve', {'version': 2, 'generation': generation})
         self.assertEqual(stale.exception.code, 409)
 
+    def test_delete_uploads_keeps_history_and_cleans_current_inputs(self):
+        project, _ = self.setup_problem()
+        base = f'/api/projects/{project}'
+        doc = self.request(base + '/documents')[0]
+        self.llm.response = proposal_json()
+        job = self.request(base + '/solve', {'version': 1})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        solution = self.request(base + '/solutions')[0]
+        inputs = self.request(base + '/inputs')
+        inputs['annotations'] = [{'document_id': doc['source']['id'], 'text': '订单说明'}]
+        self.request(base + '/inputs', inputs)
+        other = self.request('/api/projects', {'name': '另一个项目'})['id']
+        path = base + '/documents/' + doc['source']['id']
+        self.assertEqual(self.raw_request(f'/api/projects/{other}/documents/{doc["source"]["id"]}', method='DELETE')[0], 404)
+        code, body = self.raw_request(path, method='DELETE')
+        self.assertEqual(code, 200)
+        deleted = loads(body.decode())
+        self.assertEqual(deleted['inputs']['annotations'], [])
+        self.assertEqual(self.request(base + '/documents'), [])
+        self.assertEqual(self.request(base + '/problem')['snapshot']['reading']['problem']['title'], '测试题目')
+        self.assertEqual(self.raw_request(path + '/retry', body=b'{}', headers={'Content-Type': 'application/json'})[0], 409)
+        with self.assertRaises(HTTPError) as stale:
+            self.request(base + '/solve', {'version': 1})
+        self.assertEqual(stale.exception.code, 409)
+        job = self.request(base + '/artifacts', {'solution_id': solution['id'], 'kind': 'docx'})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        workbook = Workbook()
+        workbook.active.append(['项目', '第一季'])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        job = self.request(base + '/templates', content=buffer.getvalue(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
+        })
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        template_id = job['metadata']['template_id']
+        self.assertEqual(self.raw_request(base + '/templates/' + template_id, method='DELETE')[0], 200)
+        self.assertEqual(self.request(base + '/templates'), [])
+        with self.assertRaises(ERPError) as missing:
+            self.server.workflow.repository.get('template_original', project, template_id)
+        self.assertEqual(missing.exception.code, 'not_found')
+        self.assertTrue(self.request(base + '/jobs/' + job['id'])['metadata']['upload_deleted'])
+
+    def test_delete_file_during_parse_prevents_late_write_and_retry(self):
+        project = self.request('/api/projects', {'name': '删除解析中附件'})['id']
+        base = f'/api/projects/{project}'
+        entered, release = threading.Event(), threading.Event()
+        parser = self.server.workflow.parser
+        def delayed(source, content):
+            entered.set()
+            release.wait(2)
+            return parser.parse(source, content)
+        with patch.object(self.server.workflow, 'parser') as fake:
+            fake.parse.side_effect = delayed
+            try:
+                job = self.request(base + '/documents', content=docx_bytes(), headers={
+                    'Content-Type': 'application/octet-stream', 'X-Filename': 'topic.docx',
+                })
+                self.assertTrue(entered.wait(1))
+                doc_id = job['metadata']['document_id']
+                self.assertEqual(self.raw_request(base + '/documents/' + doc_id, method='DELETE')[0], 200)
+            finally:
+                release.set()
+                self.server.workflow.jobs.futures[job['id']].result(timeout=3)
+        self.assertEqual(self.request(base + '/documents'), [])
+        self.assertEqual(self.request(base + '/jobs/' + job['id'])['status'], 'cancelled')
+        self.assertEqual(self.raw_request(base + '/documents/' + doc_id + '/retry', body=b'{}',
+                                         headers={'Content-Type': 'application/json'})[0], 409)
+
     def test_mapping_confirmation_export_download_and_project_isolation(self):
         project, _ = self.setup_problem()
         base = f'/api/projects/{project}'
@@ -242,6 +311,8 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as conflict:
             self.request(base + '/mappings/' + mapping['id'], {'expected_revision': 1, 'entries': [entry]})
         self.assertEqual(conflict.exception.code, 409)
+        self.assertEqual(self.raw_request(base + '/templates/' + template['source']['id'], method='DELETE')[0], 200)
+        self.assertEqual(self.request(base + '/templates'), [])
         for kind, mapping_id in [('docx', None), ('xlsx', mapping['id']), ('xlsx', None)]:
             job = self.request(base + '/artifacts', {'solution_id': solution['id'], 'kind': kind, 'mapping_id': mapping_id})
             self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')

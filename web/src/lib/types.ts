@@ -193,6 +193,7 @@ export interface Job {
     solution_id?: string;
     kind?: 'docx' | 'xlsx';
     mapping_id?: string | null;
+    upload_deleted?: boolean;
     model_preset?: { preset_name: string };
   };
   error?: { message: string };

@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import AppSelect from '../components/AppSelect.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
+import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 import type { BudgetTemplate, PlanTone } from '../lib/types';
 const {
   snapshot,
@@ -65,13 +66,18 @@ const previousLabel = computed(() => {
     ? solutions.value.find((item) => item.id === previousId)?.plan.title || '此前方案'
     : '';
 });
-const templateJobs = computed(() =>
-  jobs.value.filter(
-    (job) =>
+const templateJobs = computed(() => {
+  const entries = new Map<string, (typeof jobs.value)[number]>();
+  for (const job of jobs.value)
+    if (
       job.kind === 'template' &&
-      !templates.value.some((item) => item.source.id === job.metadata.template_id),
-  ),
-);
+      job.metadata.template_id &&
+      !job.metadata.upload_deleted &&
+      !templates.value.some((item) => item.source.id === job.metadata.template_id)
+    )
+      entries.set(job.metadata.template_id, job);
+  return [...entries.values()];
+});
 function upload(event: Event) {
   const input = event.target as HTMLInputElement,
     files = [...(input.files || [])];
@@ -220,6 +226,11 @@ async function revise() {
           >
             预览
           </button>
+          <UploadDeleteButton
+            :id="template.source.id"
+            :filename="template.source.filename"
+            kind="template"
+          />
         </div>
         <div
           v-for="job in templateJobs"
@@ -246,6 +257,12 @@ async function revise() {
           >
             不使用
           </button>
+          <UploadDeleteButton
+            v-if="job.metadata.template_id"
+            :id="job.metadata.template_id"
+            :filename="job.metadata.filename || '预算空表'"
+            kind="template"
+          />
         </div>
         <p
           v-if="!templates.length && !templateParsing"

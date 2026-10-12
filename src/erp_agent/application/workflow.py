@@ -12,7 +12,7 @@ from erp_agent.application.budget_context import budget_material
 from erp_agent.application.answerer import AnswererService
 from erp_agent.application.input_sources import input_sources
 from erp_agent.application.contracts import (
-    JSONObject, JSONValue, decode_plan, decode_reading, dumps, integer, obj, string, strings, to_json,
+    JSONObject, JSONValue, array, decode_plan, decode_reading, dumps, integer, obj, string, strings, to_json,
 )
 from erp_agent.application.ports import (
     BudgetTemplateParser, DocumentParser, JobRunner, ModelSettings, Repository, RunControl,
@@ -88,6 +88,7 @@ class WorkflowService:
 
     def retry_template(self, project_id: str, template_id: str) -> JSONObject:
         self.project(project_id)
+        self._require_upload(project_id, "template", template_id)
         original = self.repository.get("template_original", project_id, template_id)
         data = obj(original["source"])
         source = SourceDocument(string(data["id"]), string(data["filename"]), string(data["sha256"]),
@@ -140,6 +141,7 @@ class WorkflowService:
 
     def retry_parse(self, project_id: str, document_id: str) -> JSONObject:
         self.project(project_id)
+        self._require_upload(project_id, "document", document_id)
         original = self.repository.get("original", project_id, document_id)
         data = obj(original["source"])
         source = SourceDocument(string(data["id"]), string(data["filename"]),
@@ -152,6 +154,28 @@ class WorkflowService:
         self.project(project_id)
         return [to_json(parsed_document(obj(document)))
                 for document in self.repository.list("document", project_id)]
+
+    def _require_upload(self, project_id: str, kind: str, upload_id: str) -> None:
+        if self.repository.upload_deleted(project_id, kind, upload_id):
+            raise ERPError("upload_deleted", "文件已删除，请重新上传或选择其他文件。", 409)
+
+    def delete_upload(self, project_id: str, kind: str, upload_id: str) -> JSONObject:
+        with self._read_lock, self._solve_lock, self._input_lock:
+            self.project(project_id)
+            original = "original" if kind == "document" else "template_original"
+            self.repository.get(original, project_id, upload_id)
+            for value in self.repository.list("job", project_id):
+                job = obj(value)
+                metadata = obj(job.get("metadata", {}))
+                references = ([metadata.get("document_id")] + array(metadata.get("document_ids", []))
+                              if kind == "document" else
+                              [metadata.get("template_id")] + array(obj(metadata.get("generation", {})).get("template_ids", [])))
+                if kind == "document" and job.get("kind") == "solve" and job.get("status") in {"queued", "running"}:
+                    snapshot = self.repository.snapshot(project_id, integer(metadata["version"]))
+                    references += array(snapshot.get("document_ids", []))
+                if upload_id in references and job.get("status") in {"queued", "running"}:
+                    self.jobs.cancel(project_id, string(job["id"]))
+            return self.repository.delete_upload(project_id, kind, upload_id)
 
     def inputs(self, project_id: str) -> ReadingInputs:
         self.project(project_id)
@@ -320,6 +344,8 @@ class WorkflowService:
         config = replace(config, requirements=requirements)
         templates = tuple(budget_template(self.repository.get("template", project_id, template_id))
                           for template_id in config.template_ids)
+        for template_id in config.template_ids:
+            self._require_upload(project_id, "template", template_id)
         if len(dumps(budget_material(templates))) > 1500000:
             raise ERPError("template_context_limit", "所选预算表内容过多，请精简或减少模板。")
         request = SolveRequest(snapshot, mode, SearchConfig(

@@ -11,6 +11,7 @@ import SolverStep from './views/SolverStep.vue';
 import ArtifactsStep from './views/ArtifactsStep.vue';
 import BudgetTemplatePreview from './components/BudgetTemplatePreview.vue';
 import MappingEditor from './components/MappingEditor.vue';
+import UploadStep from './views/UploadStep.vue';
 import FactEditor from './components/FactEditor.vue';
 import { workspaceKey } from './composables/context';
 import {
@@ -75,6 +76,7 @@ function setup() {
   ];
   const inputs = { revision: 0, problem_text: '', supplement_text: '', annotations: [] };
   const solutions: Solution[] = [];
+  const documents: ParsedDocument[] = [];
   const templates: BudgetTemplate[] = [];
   const mappings: WorkbookMapping[] = [],
     artifacts: Artifact[] = [];
@@ -108,8 +110,18 @@ function setup() {
       data = [{ id: projectId, name: '项目', created_at: '2026-10-12' }];
     else if (url.endsWith('/inputs'))
       data = options.method ? { ...JSON.parse(String(options.body)), revision: 1 } : inputs;
-    else if (url.endsWith('/documents')) data = [];
-    else if (url.endsWith('/solutions')) data = solutions;
+    else if (url.endsWith('/documents')) data = documents;
+    else if (url.includes('/documents/') && options.method === 'DELETE') {
+      const id = url.split('/').at(-1);
+      documents.splice(0, documents.length, ...documents.filter((doc) => doc.source.id !== id));
+      data = { deleted: true, inputs: { ...inputs, revision: 2 } };
+    } else if (url.includes('/templates/') && options.method === 'DELETE') {
+      const id = url.split('/').at(-1);
+      templates.splice(0, templates.length, ...templates.filter((item) => item.source.id !== id));
+      for (const job of jobs)
+        if (job.metadata.template_id === id) job.metadata.upload_deleted = true;
+      data = { deleted: true, inputs: null };
+    } else if (url.endsWith('/solutions')) data = solutions;
     else if (url.endsWith('/mappings')) data = options.method ? {} : mappings;
     else if (url.endsWith('/artifacts')) data = options.method ? {} : artifacts;
     else if (url.includes('/mappings/') && options.method) {
@@ -152,13 +164,69 @@ function setup() {
     return { ok: true, status: 200, json: async () => structuredClone(data) };
   });
   vi.stubGlobal('fetch', fetcher);
-  return { router, jobs, fetcher, solutions, templates, mappings, artifacts };
+  return { router, jobs, fetcher, solutions, templates, mappings, artifacts, documents };
 }
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('deletes uploaded topic files and budget templates without losing draft inputs', async () => {
+    const { router, documents, templates, jobs } = setup();
+    documents.push({
+      source: { id: 'doc', filename: '题目.docx', size: 1, sha256: '', format: 'docx' },
+      blocks: [],
+      evidence: [],
+      warnings: [],
+    });
+    templates.push({
+      source: { id: 'template', filename: '预算.xlsx', size: 1, sha256: '', format: 'xlsx' },
+      sheets: [],
+      warnings: [],
+    });
+    jobs.push({
+      id: 'failed-template',
+      kind: 'template',
+      status: 'failed',
+      stage: 'done',
+      metadata: { template_id: 'template', filename: '预算.xlsx' },
+    });
+    await router.push(`/projects/${projectId}/steps/1`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const global = { provide: { [workspaceKey as symbol]: workspace } };
+    const uploaded = mount(UploadStep, { global });
+    await uploaded.find('#supplement-text').setValue('保留这段未保存补充');
+    workspace.setAnnotation('doc', '文件说明');
+    await uploaded.find('[aria-label="删除题目.docx"]').trigger('click');
+    await flushPromises();
+    await uploaded
+      .findAll('button')
+      .find((button) => button.text() === '删除文件')!
+      .trigger('click');
+    await flushPromises();
+    expect(workspace.documents.value).toHaveLength(0);
+    expect(workspace.selected.value).toHaveLength(0);
+    expect(workspace.inputs.value.annotations).toHaveLength(0);
+    expect(workspace.inputs.value.supplement_text).toBe('保留这段未保存补充');
+    expect(workspace.inputs.value.revision).toBe(2);
+    expect(workspace.inputsDirty.value).toBe(true);
+    uploaded.unmount();
+    const solver = mount(SolverStep, { global });
+    expect(workspace.templateIds.value).toContain('template');
+    await solver.find('[aria-label="删除预算.xlsx"]').trigger('click');
+    await flushPromises();
+    await solver
+      .findAll('button')
+      .find((button) => button.text() === '删除文件')!
+      .trigger('click');
+    await flushPromises();
+    expect(workspace.templates.value).toHaveLength(0);
+    expect(workspace.templateIds.value).toHaveLength(0);
+    expect(solver.text()).not.toContain('预算.xlsx');
+    solver.unmount();
+    workspace.dispose();
+  });
   it('reviews template sources before filling and shows downloads for the selected solution', async () => {
     const { router, solutions, templates, mappings, artifacts, fetcher } = setup();
     solutions.push({

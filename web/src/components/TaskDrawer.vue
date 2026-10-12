@@ -71,7 +71,7 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
       >
         取消</button
       ><button
-        v-if="['failed', 'cancelled'].includes(job.status)"
+        v-if="['failed', 'cancelled'].includes(job.status) && !job.metadata.upload_deleted"
         class="review-action"
         :disabled="operations.has(job.id)"
         @click="run(job.id, () => retryJob(job))"
