@@ -13,6 +13,7 @@ export const labels: Record<string, string> = {
   finance: '融资',
   discount: '贴现',
   demand_forecast: '市场调研',
+  order_pool: '待竞订单池',
   order_contract: '订单',
   carbon: '碳排放',
   digital: '数智化',

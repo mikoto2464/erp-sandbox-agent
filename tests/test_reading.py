@@ -104,6 +104,21 @@ class ReadingTests(unittest.TestCase):
         with self.assertRaises(ERPError):
             decode_reading(dumps(data), "fake")
 
+    def test_order_categories_round_trip_without_changing_quantity_or_source(self):
+        for category in ("order_pool", "order_contract", "demand_forecast"):
+            with self.subTest(category=category):
+                reading = self.result("50", kind="integer")
+                fact = replace(reading.problem.facts[0], category=category,
+                               entity_id="order_1", entity_name="订单1", key="quantity",
+                               unit="件", explanation="用户默认：待竞订单池"
+                               if category == "order_pool" else "原文用途")
+                reading = replace(reading, problem=replace(reading.problem, facts=(fact,)))
+                decoded = decode_reading(dumps(editable_reading(reading)), "fake")
+                checked = validate_reading(decoded, (Evidence("p1", "doc", "格", "50"),))
+                self.assertEqual(checked.problem.facts[0], fact)
+                self.assertFalse(any(issue.target == fact.id and issue.severity != "info"
+                                     for issue in checked.issues))
+
     def test_periods_have_evidence(self):
         reading = self.result()
         facts = reading.problem.facts + tuple(
@@ -184,7 +199,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-7")
+        self.assertEqual(result.prompt_version, "reader-8")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)

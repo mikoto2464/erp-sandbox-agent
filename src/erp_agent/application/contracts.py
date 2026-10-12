@@ -15,7 +15,7 @@ JSONObject: TypeAlias = dict[str, JSONValue]
 CATEGORIES = (
     "initial", "certification", "market", "product", "bom", "material", "production_line",
     "worker", "training", "incentive", "shift", "finance", "discount", "demand_forecast",
-    "order_contract", "carbon", "digital", "budget", "other",
+    "order_pool", "order_contract", "carbon", "digital", "budget", "other",
 )
 
 
