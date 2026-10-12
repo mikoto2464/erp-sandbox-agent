@@ -8,7 +8,7 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div id="toast" role="status" hidden></div>
+  <div id="toast" role="status" aria-live="polite" aria-relevant="additions" aria-label="操作通知"></div>
   <section id="login-view" class="login-view">
     <form id="login-form" class="login-card">
       <div class="logo">E<span>ERP 沙盘</span></div>
@@ -21,7 +21,24 @@
     </form>
   </section>
   <div id="app-view" hidden>
-    <header class="topbar"><button id="home" class="logo brand-button" aria-label="返回项目列表">E<span>ERP 沙盘</span></button><div class="topbar-actions"><select id="active-model-preset" class="preset-quick-select" aria-label="当前模型预设"></select><button id="open-settings" class="quiet">模型预设 <span id="model-dot" class="dot"></span></button><button id="logout" class="quiet">退出</button></div></header>
+    <header class="topbar">
+      <div class="topbar-main">
+        <button id="home" class="logo brand-button" aria-label="返回项目列表">E<span>ERP 沙盘</span></button>
+        <div class="topbar-actions">
+          <select id="active-model-preset" class="preset-quick-select" aria-label="当前模型预设"></select>
+          <button id="open-settings" class="quiet">模型预设 <span id="model-dot" class="dot"></span></button>
+          <button id="open-tasks" class="quiet task-toggle" aria-controls="task-drawer" aria-expanded="false" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM14 5v14M7 9h4M7 13h4"/></svg><span>任务</span><span id="task-badge" class="task-badge" hidden></span></button>
+          <button id="logout" class="quiet">退出</button>
+        </div>
+      </div>
+      <nav id="workflow-nav" class="steps" hidden aria-label="操作步骤">
+        <button data-step="1" class="step active"><span class="step-number">1</span><span>上传题目<small id="step1-caption">添加赛题与补充文件</small></span></button>
+        <button data-step="2" class="step"><span class="step-number">2</span><span>确认题目<small id="step2-caption">处理疑问，核对数据</small></span></button>
+        <button data-step="3" class="step"><span class="step-number">3</span><span>经营方案<small id="step3-caption">生成计划，查看安排</small></span></button>
+        <button data-step="4" class="step"><span class="step-number">4</span><span>方案与表格<small>报告与预算表导出</small></span></button>
+        <button data-step="5" class="step"><span class="step-number">5</span><span>方案答疑<small>解释决策，讨论调整</small></span></button>
+      </nav>
+    </header>
     <main>
       <section id="project-view">
         <div class="page-heading"><div><p class="eyebrow">项目</p><h1>我的项目</h1></div><button id="new-project" class="primary">＋ 新建项目</button></div>
@@ -30,13 +47,6 @@
       </section>
       <section id="flow-view" hidden>
         <div class="flow-heading"><button id="back-projects" class="quiet">← 项目列表</button><div><h1 id="project-title"></h1><span id="project-subtitle" class="muted"></span></div><button id="delete-current" class="danger-text">删除项目</button></div>
-        <nav class="steps" aria-label="操作步骤">
-          <button data-step="1" class="step active"><span class="step-number">1</span><span>上传题目<small id="step1-caption">添加赛题与补充文件</small></span></button>
-          <button data-step="2" class="step"><span class="step-number">2</span><span>确认题目<small id="step2-caption">处理疑问，核对数据</small></span></button>
-          <button data-step="3" class="step"><span class="step-number">3</span><span>经营方案<small id="step3-caption">生成计划，查看安排</small></span></button>
-          <button data-step="4" class="step"><span class="step-number">4</span><span>方案与表格<small>报告与预算表导出</small></span></button>
-          <button data-step="5" class="step"><span class="step-number">5</span><span>方案答疑<small>解释决策，讨论调整</small></span></button>
-        </nav>
         <section id="step-1" class="step-panel card">
           <div class="section-heading"><h2>题目文件</h2><span id="upload-limit" class="muted"></span></div>
           <label id="drop-zone" class="drop-zone" for="files"><span class="upload-icon">↑</span><strong>点击选择，或拖入文件</strong><span class="muted">DOCX / DOC / PDF / XLS · 可一次添加多个文件</span><input id="files" type="file" accept=".docx,.doc,.pdf,.xls" multiple></label>
@@ -88,10 +98,13 @@
           <div class="card conversation-card"><div class="conversation-empty"><span class="module-symbol">◇</span><h3>关于方案的疑问，集中在这里讨论</h3><p class="muted">答疑功能接入后，回答会引用当前题目和经营计划。</p><div class="question-examples"><span>为什么选择这条产线？</span><span>这个季度需要多少现金？</span><span>少借款会有什么影响？</span></div></div><div class="conversation-compose"><label for="future-question" class="sr-only">关于方案的问题</label><textarea id="future-question" rows="2" placeholder="输入关于方案的问题 · 答疑功能待开发" disabled></textarea><button type="button" class="primary" disabled>发送</button></div></div>
           <div class="panel-footer"><button type="button" data-go-step="3" class="quiet">← 查看经营方案</button></div>
         </section>
-        <section class="task-section"><details id="task-details"><summary>任务记录 <span id="task-count" class="muted"></span></summary><div id="jobs"></div></details><div id="active-job" class="active-job" hidden></div></section>
       </section>
     </main>
   </div>
+  <aside id="task-drawer" class="task-drawer" aria-labelledby="task-title" hidden>
+    <div class="task-drawer-heading"><div><h2 id="task-title">任务记录 <span id="task-count" class="muted"></span></h2><p id="task-project" class="muted"></p></div><button id="close-tasks" class="icon-button" aria-label="收起任务侧栏">×</button></div>
+    <div class="task-drawer-body"><div id="active-job" class="active-job" hidden></div><div id="jobs"></div></div>
+  </aside>
   <dialog id="project-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建项目</h2><button type="button" data-close="project-dialog" class="icon-button" aria-label="关闭">×</button></div><label for="project-name">项目名称</label><input id="project-name" maxlength="100" required autofocus><div class="dialog-footer"><button type="button" data-close="project-dialog" class="secondary">取消</button><button class="primary">创建</button></div></form></dialog>
   <dialog id="delete-dialog"><form id="delete-form"><div class="dialog-heading"><h2>删除项目</h2><button type="button" data-close="delete-dialog" class="icon-button" aria-label="关闭">×</button></div><p>删除“<strong id="delete-name"></strong>”及其所有文件、题目数据和方案？此操作无法撤销。</p><div class="dialog-footer"><button type="button" data-close="delete-dialog" class="secondary">取消</button><button class="danger">删除项目</button></div></form></dialog>
   <dialog id="fact-dialog" class="review-editor"><form id="fact-form"><div class="dialog-heading"><h2 id="fact-editor-title">修正字段</h2><button type="button" data-close="fact-dialog" class="icon-button" aria-label="关闭">×</button></div><p id="fact-editor-issue" class="notice" hidden></p><div class="form-grid"><label>值<input id="edit-fact-value" placeholder="留空表示题目未提供"></label><label>单位<input id="edit-fact-unit" placeholder="留空表示无单位"></label><label>数据类型<select id="edit-fact-type"><option value="number">数值</option><option value="integer">整数</option><option value="text">文字</option></select></label><label>状态<select id="edit-fact-state"><option value="known">已知：有原文依据</option><option value="assumed">假设：暂定口径</option><option value="conflicted">冲突：尚未确定</option><option value="missing">缺失：未提供</option></select></label></div><label>单位转换<select id="edit-fact-conversion"><option value="identity">不转换</option><option value="percent_to_ratio">百分数转比例（50% → 0.5）</option><option value="wan_to_yuan">万元转元（10 万 → 100000）</option></select></label><p class="muted">值填写转换后的结果。选择转换方式用于核对来源，不会再次转换输入值。</p><div class="unit-shortcuts"><span class="muted">单位标注</span><button id="unit-none" type="button" class="quiet">无</button><button id="unit-unknown" type="button" class="quiet">不清楚</button></div><label for="edit-fact-explanation">说明（选填）</label><textarea id="edit-fact-explanation" rows="2" placeholder="留空按默认处理"></textarea><label for="fact-evidence-search">原文依据</label><input id="fact-evidence-search" type="search" placeholder="搜索原文以选择正确的段落或单元格"><div id="fact-evidence-list" class="evidence-picker"></div><p id="fact-editor-error" class="error" role="alert" hidden></p><div class="dialog-footer"><button type="button" data-close="fact-dialog" class="secondary">取消</button><button class="primary">确认</button></div></form></dialog>

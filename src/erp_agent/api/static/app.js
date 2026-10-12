@@ -20,7 +20,9 @@ let inputDraft={revision:0,problem_text:"",supplement_text:"",annotations:[]},in
 let documents = [], jobs = [], selectedFiles = new Set(), knownFiles = new Set();
 let authenticated = false, dirty = false, polling = false, generation = 0, currentStep = 1;
 let pendingDelete = null, latestReadSeen = 0, documentsSignature = "", jobsSignature = "", solutionsSignature = "";
-let toastTimer;
+let currentReviewTab = "facts", projectLoading = false;
+let observedJobs = new Map();
+const visibleToasts = new Map();
 let pendingNavigation = null;
 let editingFact = null, editingEvidence = new Set();
 let modelProviders = [];
@@ -38,11 +40,61 @@ function node(tag, text, className) {
   if (className) element.className = className;
   return element;
 }
-function toast(text) {
-  clearTimeout(toastTimer);
-  $("toast").textContent = text;
-  $("toast").hidden = !text;
-  if (text) toastTimer = setTimeout(() => { $("toast").hidden = true; }, 6000);
+function toast(text, {kind = "info", action, actionLabel = "查看任务"} = {}) {
+  if (!text) return;
+  const key = `${kind}:${text}`;
+  if (visibleToasts.has(key)) return;
+  if (visibleToasts.size >= 4) visibleToasts.values().next().value();
+  const item = node("div", undefined, `snackbar ${kind}`);
+  const dismiss = () => {
+    clearTimeout(timer);
+    item.remove();
+    visibleToasts.delete(key);
+  };
+  const icon = node("span", kind === "error" ? "!" : kind === "success" ? "✓" : "i", "snackbar-icon");
+  icon.setAttribute("aria-hidden", "true");
+  item.append(icon, node("span", text, "snackbar-message"));
+  if (action) {
+    const button = node("button", actionLabel, "snackbar-action");
+    button.onclick = () => { dismiss(); safe(action); };
+    item.append(button);
+  }
+  const close = node("button", "×", "snackbar-close");
+  close.setAttribute("aria-label", "关闭通知");
+  close.onclick = dismiss;
+  item.append(close);
+  const duration = kind === "error" ? 12000 : 6000;
+  let timer = setTimeout(dismiss, duration);
+  const pause = () => clearTimeout(timer);
+  const resume = () => { clearTimeout(timer); timer=setTimeout(dismiss, duration); };
+  item.addEventListener("mouseenter", pause);
+  item.addEventListener("mouseleave", resume);
+  item.addEventListener("focusin", pause);
+  item.addEventListener("focusout", resume);
+  visibleToasts.set(key, dismiss);
+  $("toast").append(item);
+}
+function toggleTasks(open = $("task-drawer").hidden, restoreFocus = true) {
+  open = open && authenticated && !!projectId;
+  $("task-drawer").hidden = !open;
+  $("open-tasks").setAttribute("aria-expanded", String(open));
+  if (open) $("close-tasks").focus();
+  else if (restoreFocus && document.activeElement && $("task-drawer").contains(document.activeElement)) $("open-tasks").focus();
+}
+function locationRoute() {
+  const match = window.location.hash.match(/^#\/projects\/([a-f0-9]{32})\/steps\/([1-5])(?:\?review=(facts|rules|issues))?$/);
+  return match ? {projectId:match[1], step:Number(match[2]), tab:match[3]} : null;
+}
+function rememberLocation() {
+  const hash = projectId ? `#/projects/${projectId}/steps/${currentStep}?review=${currentReviewTab}` : "#/projects";
+  if (window.location.hash !== hash) window.history.replaceState(null, "", hash);
+}
+async function restoreLocation(route) {
+  if (!route) { await showProjects(); return; }
+  const project = projects.find(item => item.id === route.projectId);
+  if (!project) { await showProjects(); toast("项目不存在或已删除。", {kind:"error"}); return; }
+  if (projectId !== route.projectId) await openProject(project, route);
+  else { setStep(route.step); if (route.tab) reviewTab(route.tab); }
 }
 function showLogin() {
   authenticated = false;
@@ -51,6 +103,7 @@ function showLogin() {
   $("login-view").hidden = false;
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   $("evidence-drawer").hidden = true;
+  toggleTasks(false, false);
 }
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, credentials:"same-origin"});
@@ -65,10 +118,10 @@ async function api(path, options = {}) {
 }
 const post = (path, data) => api(path, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
 const base = (id = projectId) => `/api/projects/${id}`;
-async function safe(operation) { try { await operation(); } catch (error) { toast(error.message); } }
+async function safe(operation) { try { await operation(); } catch (error) { toast(error.message, {kind:"error"}); } }
 async function busy(button, operation) {
   button.disabled = true;
-  try { await operation(); } catch (error) { toast(error.message); }
+  try { await operation(); } catch (error) { toast(error.message, {kind:"error"}); }
   finally { button.disabled = false; updateControls(); if(modelCatalog)updatePresetControls(); }
 }
 function markDirty() {
@@ -92,13 +145,21 @@ function setStep(number) {
     button.classList.toggle("complete", (step === 1 && documents.length > 0) || (step === 2 && !!snapshot && !dirty && !ready.errors && ready.horizon));
     if (step === number) button.setAttribute("aria-current", "step");
     else button.removeAttribute("aria-current");
+    if (step === number && projectId) {
+      const nav=$("workflow-nav"), bounds=nav.getBoundingClientRect(), active=button.getBoundingClientRect();
+      if(active.left<bounds.left)nav.scrollLeft+=active.left-bounds.left;
+      else if(active.right>bounds.right)nav.scrollLeft+=active.right-bounds.right;
+    }
   }
   for (const panel of document.querySelectorAll(".step-panel")) panel.hidden = panel.id !== "step-" + number;
+  rememberLocation();
   updateControls();
 }
 function reviewTab(name) {
+  currentReviewTab = name;
   for (const button of document.querySelectorAll("[data-review]")) button.classList.toggle("active", button.dataset.review === name);
   for (const tab of ["facts", "rules", "issues"]) $(tab + "-panel").hidden = tab !== name;
+  if (projectId) rememberLocation();
 }
 function activeRead() { return jobs.some(job => job.kind === "read" && ["queued","running"].includes(job.status)); }
 function mode() { return document.querySelector('input[name="solver-mode"]:checked').value; }
@@ -152,6 +213,7 @@ function renderQuickPresets() {
   $("active-model-preset").value=modelCatalog.active_id;
 }
 async function enterApp() {
+  const route = locationRoute();
   authenticated = true;
   $("access-key").value = "";
   $("login-error").hidden = true;
@@ -159,12 +221,17 @@ async function enterApp() {
   $("app-view").hidden = false;
   await loadStatus();
   document.querySelector(`input[name="solver-mode"][value="${status.default_solver}"]`).checked = true;
-  await showProjects();
+  await showProjects(false);
+  if (route) await restoreLocation(route);
+  else rememberLocation();
 }
-async function showProjects() {
+async function showProjects(updateLocation = true) {
   const captured = ++generation;
   projectId = "";
-  dirty = false;
+  dirty = false; inputsDirty = false; projectLoading = false;
+  toggleTasks(false, false);
+  $("workflow-nav").hidden = true; $("open-tasks").hidden = true;
+  if (updateLocation) rememberLocation();
   $("project-view").hidden = false;
   $("flow-view").hidden = true;
   $("evidence-drawer").hidden = true;
@@ -185,11 +252,18 @@ async function showProjects() {
     actions.append(open, remove); card.append(actions); $("project-list").append(card);
   }
 }
-async function openProject(project) {
+async function openProject(project, route = {}) {
   generation++;
   projectId = project.id; snapshot = null; editable = null; dirty = false;
   documents = []; jobs = []; selectedFiles = new Set(); knownFiles = new Set(); latestReadSeen = 0;
   documentsSignature = ""; jobsSignature = ""; solutionsSignature = "";
+  observedJobs = new Map(); currentReviewTab = route.tab || "facts";
+  toggleTasks(false, false);
+  $("workflow-nav").hidden = false; $("open-tasks").hidden = false;
+  $("task-project").textContent = project.name;
+  $("task-badge").hidden = true;
+  $("open-tasks").setAttribute("aria-label", "展开任务记录");
+  $("task-count").textContent = "";
   inputDraft={revision:0,problem_text:"",supplement_text:"",annotations:[]};inputsDirty=false;inputEditSequence=0;
   $("problem-text").value="";$("supplement-text").value="";$("manual-entry").open=false;
   $("project-title").textContent = project.name;
@@ -202,13 +276,19 @@ async function openProject(project) {
   updateFutureModules([]);
   $("fact-search").value = ""; $("state-filter").value = ""; $("issue-filter").value="";
   $("evidence-drawer").hidden = true;
-  setStep(1);
+  const initialStep = route.step || 1;
+  setStep(initialStep);
   const captured=generation;
-  const inputs=await api(base()+"/inputs");if(captured!==generation)return;
-  inputDraft=inputs;$("problem-text").value=inputs.problem_text;$("supplement-text").value=inputs.supplement_text;
-  $("manual-entry").open=!!inputs.problem_text;
-  await refresh(true);
-  if (snapshot) setStep(2);
+  projectLoading = true;
+  try {
+    const inputs=await api(base()+"/inputs");if(captured!==generation)return;
+    inputDraft=inputs;$("problem-text").value=inputs.problem_text;$("supplement-text").value=inputs.supplement_text;
+    $("manual-entry").open=!!inputs.problem_text;
+    await refresh(true);
+    if(captured!==generation)return;
+    if (currentStep === initialStep && !route.step && snapshot) setStep(2);
+    if (route.tab) reviewTab(route.tab);
+  } finally { if(captured===generation)projectLoading=false; }
 }
 function askDelete(project) {
   pendingDelete = project;
@@ -647,13 +727,22 @@ function renderSolutions(solutions) {
 function renderJobs() {
   $("jobs").replaceChildren(); $("active-job").replaceChildren(); $("active-job").hidden=true;
   $("task-count").textContent=jobs.length ? `· ${jobs.length}` : "";
+  const running = jobs.filter(job => ["queued", "running"].includes(job.status)).length;
+  $("task-badge").hidden = !running;
+  $("task-badge").textContent = running;
+  $("open-tasks").classList.toggle("has-running", !!running);
+  $("open-tasks").setAttribute("aria-label", running ? `任务记录，${running} 项正在执行` : "展开任务记录");
+  if (!jobs.length) $("jobs").append(node("p", "暂无任务。上传文件或读取题目后，进度会显示在这里。", "task-empty muted"));
   for(const job of [...jobs].reverse()){
-    const row=node("div",undefined,"task-row"), text=node("div",`${job.kind==="parse"?"文件解析":job.kind==="read"?"读题":"方案生成"} · ${statusNames[job.status]} · ${stageNames[job.stage]||job.stage}`);
+    const row=node("div",undefined,"task-row"), text=node("div",undefined,"task-info");
+    const heading=node("div",undefined,"task-row-heading");
+    heading.append(node("strong",jobName(job)),node("span",statusNames[job.status],`task-state ${job.status}`));
+    text.append(heading,node("p",stageNames[job.stage]||job.stage,"muted"));
     if(job.metadata?.model_preset)text.append(node("p",job.metadata.model_preset.preset_name,"muted"));
     if(job.error)text.append(node("p",job.error.message,"error"));row.append(text);
     if(["queued","running"].includes(job.status)){
       const button=node("button","取消","quiet");button.onclick=()=>safe(async()=>{await post(`${base()}/jobs/${job.id}/cancel`,{});await refresh();});row.append(button);
-      if($("active-job").hidden){$("active-job").hidden=false;$("active-job").append(node("span",undefined,"spinner"),node("span",text.textContent));}
+      if($("active-job").hidden){$("active-job").hidden=false;$("active-job").append(node("span",undefined,"spinner"),node("span",`${running} 项任务执行中，收起侧栏后会继续运行。`));}
     }
     if(["failed","cancelled"].includes(job.status)){
       const retry=node("button","重试","secondary");retry.onclick=()=>busy(retry,async()=>{
@@ -667,12 +756,37 @@ function renderJobs() {
   }
   updateControls();
 }
+function jobName(job) { return job.kind === "parse" ? "文件解析" : job.kind === "read" ? "读题" : "方案生成"; }
+function notifyJobChanges(initial) {
+  for (const job of jobs) {
+    const previous = observedJobs.get(job.id);
+    observedJobs.set(job.id, job.status);
+    if (initial || previous === job.status || !["succeeded", "needs_input", "failed", "cancelled"].includes(job.status)) continue;
+    const targetProject = projectId;
+    const resultStep = job.kind === "parse" ? 1 : job.kind === "read" ? 2 : 3;
+    const failed = job.status === "failed";
+    const showResult = ["succeeded", "needs_input"].includes(job.status);
+    const error = job.error?.message || "请查看任务详情。";
+    const message = failed ? `${jobName(job)}失败：${error.length > 160 ? error.slice(0,160)+"…" : error}`
+      : job.status === "needs_input" ? "读题已完成，有内容需要确认。"
+      : `${jobName(job)}${job.status === "cancelled" ? "已取消" : "已完成"}。`;
+    toast(message, {
+      kind:failed ? "error" : job.status === "succeeded" ? "success" : "info",
+      actionLabel:showResult ? "查看结果" : "查看任务",
+      action:() => navigate(async () => {
+        await restoreLocation({projectId:targetProject, step:showResult ? resultStep : currentStep});
+        if (projectId === targetProject && !showResult) toggleTasks(true);
+      })
+    });
+  }
+}
 async function refresh(initial = false) {
   if(!projectId || !authenticated)return;
   const captured=generation, url=base();
   const [docs, latestJobs, solutions]=await Promise.all([api(url+"/documents"),api(url+"/jobs"),api(url+"/solutions")]);
   if(captured!==generation)return;
   documents=docs; jobs=latestJobs;
+  notifyJobChanges(initial);
   const docKey=JSON.stringify(docs.map(d=>[d.source.id,d.source.sha256]));
   if(docKey!==documentsSignature){documentsSignature=docKey;renderDocuments();}
   const jobKey=JSON.stringify(latestJobs);
@@ -683,7 +797,13 @@ async function refresh(initial = false) {
   if(initial || completed>latestReadSeen){
     latestReadSeen=completed;
     if(dirty){toast("新读题结果已保存；请先处理未保存的修改。");return;}
-    try{const data=await api(url+"/problem");if(captured!==generation)return;renderReading(data);if(!initial)setStep(2);}
+    try {
+      const tab=currentReviewTab, hadReading=!!snapshot;
+      const data=await api(url+"/problem");
+      if(captured!==generation)return;
+      renderReading(data);
+      if(hadReading)reviewTab(tab);
+    }
     catch(error){if(error.code!=="snapshot_not_found")throw error;}
   }
 }
@@ -839,6 +959,19 @@ $("login-form").onsubmit=async event=>{
 };
 $("logout").onclick=()=>navigate(async()=>{await post("/api/auth/logout",{});dirty=false;showLogin();});
 $("home").onclick=$("back-projects").onclick=()=>navigate(showProjects);
+$("open-tasks").onclick=()=>toggleTasks();
+$("close-tasks").onclick=()=>toggleTasks(false);
+window.addEventListener("keydown", event=>{
+  if(event.key === "Escape" && !$("task-drawer").hidden && !document.querySelector("dialog[open]")) {
+    event.preventDefault(); toggleTasks(false);
+  }
+});
+window.addEventListener("hashchange", ()=>{
+  if(!authenticated)return;
+  const route=locationRoute();
+  rememberLocation();
+  navigate(()=>restoreLocation(route));
+});
 $("discard-confirm").onclick=()=>{const operation=pendingNavigation;pendingNavigation=null;dirty=false;inputsDirty=false;$("discard-dialog").close();if(operation)safe(operation);};
 window.addEventListener("beforeunload", event=>{if(dirty || inputsDirty){event.preventDefault();event.returnValue="";}});
 $("new-project").onclick=$("empty-create").onclick=()=>{$("project-dialog").showModal();$("project-name").focus();};
@@ -904,4 +1037,4 @@ $("add-rule").onclick=()=>{
 };
 $("close-evidence").onclick=()=>{$("evidence-drawer").hidden=true;};
 safe(async()=>{const session=await api("/api/auth/session");if(session.authenticated)await enterApp();else if(!session.configured){$("login-error").textContent="请先在服务器 .env 中设置 ERP_ACCESS_KEY。";$("login-error").hidden=false;}});
-setInterval(()=>{if(polling||!authenticated||!projectId)return;polling=true;refresh().catch(error=>toast(error.message)).finally(()=>{polling=false;});},2000);
+setInterval(()=>{if(polling||projectLoading||!authenticated||!projectId)return;polling=true;refresh().catch(error=>toast(error.message,{kind:"error"})).finally(()=>{polling=false;});},2000);
