@@ -1,0 +1,25 @@
+[Unit]
+Description=ERP Sandbox Agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=erp-agent
+Group=erp-agent
+WorkingDirectory=/opt/erp-sandbox-agent/current
+EnvironmentFile=/etc/erp-sandbox-agent/erp.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/erp-sandbox-agent/current/.venv/bin/erp-agent
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/erp-sandbox-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -72,6 +72,29 @@ HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 ALL_PROXY=htt
 
 未配置模型时可以上传和查看原文，读题与方案生成会显示配置缺口。DOCX 直接解析；旧 DOC 需要安装 LibreOffice，或替换 `DocumentConverter`。图片 OCR 暂未实现，系统会提示复核图片内的信息。
 
+## 服务器运行
+
+仅在明确要求部署时更新生产环境。服务使用 [deploy/erp-sandbox-agent.service](deploy/erp-sandbox-agent.service)，监听 `0.0.0.0:8000`；域名、HTTPS 和转发由部署者配置。
+
+代码按版本放在 `/opt/erp-sandbox-agent/releases/`，`/opt/erp-sandbox-agent/current` 指向当前版本，每版使用自己的虚拟环境。运行用户为 `erp-agent`，数据与模型预设保存在 `/var/lib/erp-sandbox-agent/`，服务配置在 `/etc/erp-sandbox-agent/erp.env`，不随代码更新覆盖。配置文件权限为 `0600`，可配置：
+
+```dotenv
+ERP_HOST=0.0.0.0
+ERP_PORT=8000
+ERP_DATA_DIR=/var/lib/erp-sandbox-agent
+ERP_ACCESS_KEY=自行设置
+```
+
+通过 systemd 管理服务，开机自启并在进程异常退出后重启：
+
+```bash
+systemctl status erp-sandbox-agent
+systemctl restart erp-sandbox-agent
+journalctl -u erp-sandbox-agent -n 50 --no-pager
+```
+
+先安装新版依赖并校验配置，再切换 `current` 和重启服务；保留旧版本便于回退。服务器需 Python >= 3.11、venv 和 LibreOffice Writer（用于 DOC 转换）。上传代码不包含 `sample/`、本地项目数据库或 SSH 凭据。
+
 ## 使用
 
 输入访问密钥进入系统，“记住此浏览器”默认勾选，保存 30 天登录会话；取消勾选则使用浏览器会话 Cookie，服务端最长有效期为 12 小时。浏览器只保存 HttpOnly 会话 Cookie，不保存原始访问密钥。会话持久化在 `access.sqlite3`，退出或更换访问密钥后相应旧会话失效。
