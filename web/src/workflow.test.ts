@@ -8,6 +8,7 @@ import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
 import IssueCard from './components/IssueCard.vue';
 import SolverStep from './views/SolverStep.vue';
+import ArtifactsStep from './views/ArtifactsStep.vue';
 import FactEditor from './components/FactEditor.vue';
 import { workspaceKey } from './composables/context';
 import {
@@ -31,6 +32,8 @@ import type {
   ParsedDocument,
   Snapshot,
   Solution,
+  WorkbookMapping,
+  Artifact,
 } from './lib/types';
 const projectId = 'a'.repeat(32);
 const preset: ModelPreset = {
@@ -71,6 +74,8 @@ function setup() {
   const inputs = { revision: 0, problem_text: '', supplement_text: '', annotations: [] };
   const solutions: Solution[] = [];
   const templates: BudgetTemplate[] = [];
+  const mappings: WorkbookMapping[] = [],
+    artifacts: Artifact[] = [];
   let snapshot: Snapshot = {
     version: 1,
     inputs,
@@ -103,7 +108,18 @@ function setup() {
       data = options.method ? { ...JSON.parse(String(options.body)), revision: 1 } : inputs;
     else if (url.endsWith('/documents')) data = [];
     else if (url.endsWith('/solutions')) data = solutions;
-    else if (url.endsWith('/templates')) {
+    else if (url.endsWith('/mappings')) data = options.method ? {} : mappings;
+    else if (url.endsWith('/artifacts')) data = options.method ? {} : artifacts;
+    else if (url.includes('/mappings/') && options.method) {
+      const payload = JSON.parse(String(options.body));
+      const mapping = mappings.find((item) => url.endsWith(item.id))!;
+      Object.assign(mapping, {
+        entries: payload.entries,
+        confirmed: true,
+        revision: mapping.revision + 1,
+      });
+      data = mapping;
+    } else if (url.endsWith('/templates')) {
       if (options.method) {
         data = {
           id: 'template-job',
@@ -134,13 +150,97 @@ function setup() {
     return { ok: true, status: 200, json: async () => structuredClone(data) };
   });
   vi.stubGlobal('fetch', fetcher);
-  return { router, jobs, fetcher, solutions, templates };
+  return { router, jobs, fetcher, solutions, templates, mappings, artifacts };
 }
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('reviews template sources before filling and shows downloads for the selected solution', async () => {
+    const { router, solutions, templates, mappings, artifacts, fetcher } = setup();
+    solutions.push({
+      id: 'plan',
+      mode: 'llm_only',
+      problem_version: 1,
+      plan: { title: '经营计划', summary: '', actions: [], assumptions: [], risks: [] },
+      evaluation: { verified: false, score: null, issues: [] },
+    });
+    templates.push({
+      source: { id: 'template', filename: '预算.xlsx', size: 1, sha256: '', format: 'xlsx' },
+      sheets: [],
+      warnings: [],
+    });
+    mappings.push({
+      id: 'mapping',
+      solution_id: 'plan',
+      template_id: 'template',
+      revision: 1,
+      confirmed: false,
+      entries: [
+        {
+          sheet: '预算',
+          cell: 'B2',
+          label: '借款',
+          source_ids: ['action:0:amount'],
+          conversion: 'identity',
+          explanation: '第一期金额',
+        },
+      ],
+      issues: [],
+      values: ['10'],
+      sources: [
+        { id: 'action:0:amount', label: '借款', value: '10', numeric: true, period: 1, unit: '元' },
+      ],
+    });
+    artifacts.push({
+      id: 'file',
+      solution_id: 'plan',
+      problem_version: 1,
+      kind: 'docx',
+      filename: '经营方案_草稿.docx',
+      created_at: '',
+      draft: true,
+      formula_status: 'not_applicable',
+      warnings: [],
+      template_id: null,
+      mapping_id: null,
+      mapping_revision: null,
+    });
+    await router.push(`/projects/${projectId}/steps/4`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const wrapper = mount(ArtifactsStep, {
+      global: { provide: { [workspaceKey as symbol]: workspace } },
+    });
+    const fill = () =>
+      wrapper.findAll('button').find((button) => button.text() === '填写并生成 Excel')!;
+    expect(fill().attributes('disabled')).toBeDefined();
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '核对 / 修改')!
+      .trigger('click');
+    await flushPromises();
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '保存并确认映射')!
+      .trigger('click');
+    await flushPromises();
+    expect(fill().attributes('disabled')).toBeUndefined();
+    await fill().trigger('click');
+    await flushPromises();
+    const call = fetcher.mock.calls.find(
+      ([url, options]) => url.endsWith('/artifacts') && options?.method === 'POST',
+    )!;
+    expect(JSON.parse(String(call[1]!.body))).toEqual({
+      solution_id: 'plan',
+      kind: 'xlsx',
+      mapping_id: 'mapping',
+    });
+    expect(wrapper.find('a[download]').attributes('href')).toContain('/artifacts/file/download');
+    wrapper.unmount();
+    workspace.dispose();
+  });
   it('generates with tone and a parsed budget, then revises a selected plan without replacing it', async () => {
     const { router, fetcher, jobs, solutions, templates } = setup();
     await router.push(`/projects/${projectId}/steps/3`);

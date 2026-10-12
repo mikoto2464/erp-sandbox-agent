@@ -5,6 +5,7 @@ import UploadStep from './UploadStep.vue';
 import ReviewStep from './ReviewStep.vue';
 import SolverStep from './SolverStep.vue';
 import FutureStep from './FutureStep.vue';
+import ArtifactsStep from './ArtifactsStep.vue';
 const { project, loading, currentStep } = useWorkspaceContext();
 defineEmits<{ delete: [project: Project]; settings: [] }>();
 </script>
@@ -36,7 +37,7 @@ defineEmits<{ delete: [project: Project]; settings: [] }>();
         @settings="$emit('settings')"
       /><ReviewStep v-show="currentStep === 2" /><SolverStep
         v-show="currentStep === 3"
-      /><FutureStep v-show="currentStep >= 4" />
+      /><ArtifactsStep v-show="currentStep === 4" /><FutureStep v-show="currentStep === 5" />
     </div>
   </section>
 </template>

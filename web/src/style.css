@@ -2248,3 +2248,50 @@ button:active:enabled {
     max-width: 35%;
   }
 }
+
+.artifact-templates,
+.artifact-downloads {
+  margin-top: 20px;
+}
+.artifact-template {
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+.artifact-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mapping-table {
+  max-height: 360px;
+}
+.mapping-table table {
+  width: 100%;
+}
+.mapping-table small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.mapping-source-list {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 12px 0;
+}
+.mapping-target {
+  margin-top: 16px;
+}
+.artifact-file {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.artifact-file a {
+  white-space: nowrap;
+  text-decoration: none;
+}

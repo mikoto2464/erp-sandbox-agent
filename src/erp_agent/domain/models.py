@@ -310,3 +310,73 @@ class SolutionBundle:
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     prompt_version: str = "solver-2"
+
+
+@dataclass(frozen=True)
+class OutputSource:
+    id: str
+    label: str
+    value: str | None
+    numeric: bool
+    period: int | None
+    unit: str
+
+
+@dataclass(frozen=True)
+class WorkbookEntry:
+    sheet: str
+    cell: str
+    label: str
+    source_ids: tuple[str, ...]
+    conversion: str = "identity"
+    explanation: str = ""
+
+
+@dataclass(frozen=True)
+class WorkbookMapping:
+    id: str
+    project_id: str
+    solution_id: str
+    problem_version: int
+    template_id: str
+    template_sha256: str
+    entries: tuple[WorkbookEntry, ...]
+    issues: tuple[Issue, ...]
+    revision: int = 1
+    confirmed: bool = False
+    model: str = ""
+    prompt_version: str = "mapper-1"
+
+
+@dataclass(frozen=True)
+class ArtifactManifest:
+    id: str
+    project_id: str
+    solution_id: str
+    problem_version: int
+    kind: str
+    filename: str
+    media_type: str
+    sha256: str
+    size: int
+    created_at: str
+    draft: bool
+    formula_status: str
+    warnings: tuple[str, ...]
+    template_id: str | None = None
+    mapping_id: str | None = None
+    mapping_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class ReportData:
+    snapshot: ProblemSnapshot
+    solution: SolutionBundle
+    sources: tuple[Evidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class RenderedArtifact:
+    content: bytes
+    formula_status: str = "not_applicable"
+    warnings: tuple[str, ...] = ()

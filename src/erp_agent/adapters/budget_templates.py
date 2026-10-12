@@ -30,7 +30,7 @@ class SpreadsheetBudgetParser:
             raise ERPError("invalid_template", "预算表无法解析，请检查文件是否损坏或加密。") from exc
         sheets = []
         size = text_size = cell_count = 0
-        warnings = ["模板仅用于规划条目；公式保留但尚未重算，当前不生成已填 Excel。"]
+        warnings = ["模板预览保留原公式；实际填写与重算状态以导出文件为准。"]
         try:
             if len(workbook.worksheets) > 100:
                 raise ERPError("template_limit", "预算表工作表过多。")

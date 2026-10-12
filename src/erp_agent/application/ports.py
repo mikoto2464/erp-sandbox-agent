@@ -14,6 +14,10 @@ from erp_agent.domain.models import (
     ProblemSnapshot,
     SourceDocument,
     StrategyProposal,
+    RenderedArtifact,
+    ReportData,
+    WorkbookMapping,
+    SolutionBundle,
 )
 
 
@@ -78,6 +82,28 @@ class StrategyGenerator(Protocol):
 
 class BudgetTemplateParser(Protocol):
     def parse(self, source: SourceDocument, content: bytes) -> BudgetTemplate: ...
+
+
+class ReportRenderer(Protocol):
+    def render(self, report: ReportData) -> RenderedArtifact: ...
+
+
+class WorkbookMappingAnalyzer(Protocol):
+    def analyze(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
+                control: RunControl) -> WorkbookMapping: ...
+
+
+class WorkbookRenderer(Protocol):
+    def render(self, report: ReportData, template: BudgetTemplate | None,
+               content: bytes | None, mapping: WorkbookMapping | None) -> RenderedArtifact: ...
+
+
+class SpreadsheetConverter(Protocol):
+    def convert(self, content: bytes) -> bytes: ...
+
+
+class FormulaRecalculator(Protocol):
+    def recalculate(self, content: bytes) -> RenderedArtifact: ...
 
 
 class PlanEvaluator(Protocol):

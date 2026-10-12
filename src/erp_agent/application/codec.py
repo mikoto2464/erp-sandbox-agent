@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 from erp_agent.application.contracts import (
-    JSONObject, array, decode_reading, dumps, integer, obj, string, strings,
+    JSONObject, JSONValue, array, decode_plan, decode_reading, decimal, dumps, integer, obj, string, strings,
 )
 from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.errors import ERPError
@@ -9,7 +9,52 @@ from erp_agent.domain.models import (
     BudgetCell, BudgetSheet, BudgetTemplate, GenerationConfig, PlanTone,
     Cell, DocumentAnnotation, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot,
     ReadingInputs, SourceDocument,
+    Evaluation, Issue, SolutionBundle, SolverMode, WorkbookEntry, WorkbookMapping,
 )
+
+
+def solution_bundle(data: JSONObject) -> SolutionBundle:
+    evaluation = obj(data["evaluation"])
+    issues = tuple(Issue(string(i["code"]), string(i["severity"]), string(i["target"]),
+                         string(i["message"]), strings(i.get("evidence_ids", [])))
+                   for value in array(evaluation["issues"]) for i in (obj(value),))
+    return SolutionBundle(
+        string(data["id"]), string(data["project_id"]), integer(data["problem_version"]),
+        SolverMode(string(data["mode"])), decode_plan(data["plan"]),
+        Evaluation(bool(evaluation["feasible"]), bool(evaluation["verified"]),
+                   None if evaluation["score"] is None else decimal(evaluation["score"]),
+                   issues, string(evaluation["scope"])),
+        None if data["baseline_score"] is None else decimal(data["baseline_score"]),
+        integer(data["evaluated_candidates"], 0), integer(data["feasible_candidates"], 0),
+        None if data["seed"] is None else integer(data["seed"], 0, 2**32 - 1),
+        string(data["model"]), "", generation=generation_config(obj(data.get("generation", {}))),
+        prompt_version=string(data.get("prompt_version", "solver-1")),
+    )
+
+
+def workbook_entries(value: JSONValue) -> tuple[WorkbookEntry, ...]:
+    entries = []
+    for value in array(value):
+        item = obj(value, {"sheet", "cell", "label", "source_ids", "conversion", "explanation"})
+        conversion = string(item["conversion"])
+        if conversion not in {"identity", "sum", "yuan_to_wan", "wan_to_yuan", "ratio_to_percent"}:
+            raise ERPError("invalid_mapping", "不支持的填表转换方式。")
+        entries.append(WorkbookEntry(string(item["sheet"], 100), string(item["cell"], 20),
+                                     string(item["label"]), strings(item["source_ids"]), conversion,
+                                     string(item["explanation"])))
+    if len(entries) > 10000:
+        raise ERPError("mapping_limit", "映射条目过多。")
+    return tuple(entries)
+
+
+def workbook_mapping(data: JSONObject) -> WorkbookMapping:
+    issues = tuple(Issue(string(i["code"]), string(i["severity"]), string(i["target"]),
+                         string(i["message"])) for value in array(data["issues"]) for i in (obj(value),))
+    return WorkbookMapping(string(data["id"]), string(data["project_id"]), string(data["solution_id"]),
+                           integer(data["problem_version"]), string(data["template_id"]),
+                           string(data["template_sha256"]), workbook_entries(data["entries"]), issues,
+                           integer(data["revision"]), bool(data["confirmed"]), string(data["model"]),
+                           string(data["prompt_version"]))
 
 
 def generation_config(data: JSONObject) -> GenerationConfig:

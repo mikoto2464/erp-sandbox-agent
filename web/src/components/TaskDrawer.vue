@@ -29,9 +29,13 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
               ? '文件解析'
               : job.kind === 'template'
                 ? '预算表解析'
-                : job.kind === 'read'
-                  ? '读题'
-                  : '方案生成'
+                : job.kind === 'mapping'
+                  ? '预算表映射'
+                  : job.kind === 'artifact'
+                    ? '文件生成'
+                    : job.kind === 'read'
+                      ? '读题'
+                      : '方案生成'
           }}</strong
           ><span
             class="task-state"

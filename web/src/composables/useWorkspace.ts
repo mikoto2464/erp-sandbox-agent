@@ -5,6 +5,9 @@ import { cloneJson } from '../lib/json';
 import type {
   EditableReading,
   BudgetTemplate,
+  Artifact,
+  WorkbookMapping,
+  WorkbookEntry,
   GenerationConfig,
   Job,
   ModelCatalog,
@@ -35,6 +38,8 @@ export function useWorkspace(router: Router) {
   const documents = ref<ParsedDocument[]>([]),
     jobs = ref<Job[]>([]),
     solutions = ref<Solution[]>([]);
+  const mappings = ref<WorkbookMapping[]>([]),
+    artifacts = ref<Artifact[]>([]);
   const snapshot = ref<Snapshot | null>(null),
     editable = ref<EditableReading | null>(null),
     inputs = ref(emptyInputs());
@@ -346,11 +351,49 @@ export function useWorkspace(router: Router) {
     await post(`${base()}/jobs/${job.id}/cancel`, {});
     await refresh();
   }
+  async function analyzeTemplate(templateId: string) {
+    if (!currentSolution.value) throw new Error('请先生成方案。');
+    await post(base() + '/mappings', {
+      solution_id: currentSolution.value.id,
+      template_id: templateId,
+    });
+    await refresh();
+  }
+  async function confirmMapping(mapping: WorkbookMapping, entries: WorkbookEntry[]) {
+    const captured = generation;
+    const saved = await post<WorkbookMapping>(`${base()}/mappings/${mapping.id}`, {
+      expected_revision: mapping.revision,
+      entries: cloneJson(entries),
+    });
+    if (captured !== generation) return;
+    mappings.value = mappings.value.map((item) => (item.id === saved.id ? saved : item));
+    notify('映射已确认，可填写预算表。', 'success');
+  }
+  async function exportArtifact(kind: 'docx' | 'xlsx', mappingId: string | null = null) {
+    if (!currentSolution.value) throw new Error('请先生成方案。');
+    await post(base() + '/artifacts', {
+      solution_id: currentSolution.value.id,
+      kind,
+      mapping_id: mappingId,
+    });
+    await refresh();
+  }
   async function retryJob(job: Job) {
     if (job.kind === 'parse')
       await post(`${base()}/documents/${job.metadata.document_id}/retry`, {});
     else if (job.kind === 'template')
       await post(`${base()}/templates/${job.metadata.template_id}/retry`, {});
+    else if (job.kind === 'mapping')
+      await post(base() + '/mappings', {
+        solution_id: job.metadata.solution_id,
+        template_id: job.metadata.template_id,
+      });
+    else if (job.kind === 'artifact')
+      await post(base() + '/artifacts', {
+        solution_id: job.metadata.solution_id,
+        kind: job.metadata.kind,
+        mapping_id: job.metadata.mapping_id,
+      });
     else if (job.kind === 'read') {
       await saveInputs();
       await post(base() + '/read', {
@@ -377,15 +420,26 @@ export function useWorkspace(router: Router) {
       )
         continue;
       const targetId = project.value!.id,
-        targetStep = job.kind === 'parse' ? 1 : job.kind === 'read' ? 2 : 3;
+        targetStep =
+          job.kind === 'parse'
+            ? 1
+            : job.kind === 'read'
+              ? 2
+              : ['mapping', 'artifact'].includes(job.kind)
+                ? 4
+                : 3;
       const name =
           job.kind === 'parse'
             ? '文件解析'
             : job.kind === 'template'
               ? '预算表解析'
-              : job.kind === 'read'
-                ? '读题'
-                : '方案生成',
+              : job.kind === 'mapping'
+                ? '预算表映射'
+                : job.kind === 'artifact'
+                  ? '文件生成'
+                  : job.kind === 'read'
+                    ? '读题'
+                    : '方案生成',
         showResult = ['succeeded', 'needs_input'].includes(job.status);
       const text =
         job.status === 'failed'
@@ -415,12 +469,15 @@ export function useWorkspace(router: Router) {
     if (!authenticated.value || !project.value) return;
     const captured = generation,
       url = base();
-    const [docs, latestJobs, plans, budgetTemplates] = await Promise.all([
-      request<ParsedDocument[]>(url + '/documents'),
-      request<Job[]>(url + '/jobs'),
-      request<Solution[]>(url + '/solutions'),
-      request<BudgetTemplate[]>(url + '/templates'),
-    ]);
+    const [docs, latestJobs, plans, budgetTemplates, latestMappings, latestArtifacts] =
+      await Promise.all([
+        request<ParsedDocument[]>(url + '/documents'),
+        request<Job[]>(url + '/jobs'),
+        request<Solution[]>(url + '/solutions'),
+        request<BudgetTemplate[]>(url + '/templates'),
+        request<WorkbookMapping[]>(url + '/mappings'),
+        request<Artifact[]>(url + '/artifacts'),
+      ]);
     if (captured !== generation) return;
     documents.value = docs;
     jobs.value = latestJobs;
@@ -428,6 +485,8 @@ export function useWorkspace(router: Router) {
     const planChanged = newPlan && !solutions.value.some((solution) => solution.id === newPlan.id);
     solutions.value = plans;
     templates.value = budgetTemplates;
+    mappings.value = latestMappings;
+    artifacts.value = latestArtifacts;
     if (initial && newPlan) selectSolution(newPlan.id);
     else if (planChanged) selectSolution(newPlan.id);
     if (initial && !newPlan)
@@ -469,6 +528,8 @@ export function useWorkspace(router: Router) {
     jobs.value = [];
     solutions.value = [];
     templates.value = [];
+    mappings.value = [];
+    artifacts.value = [];
     templateIds.value = [];
     selectedSolutionId.value = null;
     planTone.value = 'balanced';
@@ -612,6 +673,11 @@ export function useWorkspace(router: Router) {
     planTone,
     customPrompt,
     templates,
+    mappings,
+    artifacts,
+    analyzeTemplate,
+    confirmMapping,
+    exportArtifact,
     templateIds,
     templateParsing,
     generationReady,

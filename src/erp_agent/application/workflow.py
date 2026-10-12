@@ -9,6 +9,7 @@ from erp_agent.application.codec import (
     budget_template, generation_config, parsed_document, problem_snapshot, reading_inputs,
 )
 from erp_agent.application.budget_context import budget_material
+from erp_agent.application.answerer import AnswererService
 from erp_agent.application.input_sources import input_sources
 from erp_agent.application.contracts import (
     JSONObject, JSONValue, decode_plan, decode_reading, dumps, integer, obj, string, strings, to_json,
@@ -36,15 +37,23 @@ class WorkflowService:
                  reader: StructuredReader, solver: SolverService,
                  default_solver: SolverMode = SolverMode.LLM_ONLY,
                  model_settings: ModelSettings | None = None,
-                 template_parser: BudgetTemplateParser | None = None) -> None:
+                 template_parser: BudgetTemplateParser | None = None,
+                 answerer: AnswererService | None = None) -> None:
         self.repository, self.jobs, self.parser = repository, jobs, parser
         self.reader, self.solver = reader, solver
         self.default_solver = default_solver
         self.model_settings = model_settings
         self.template_parser = template_parser
+        self._answerer = answerer
         self._read_lock = threading.Lock()
         self._input_lock = threading.Lock()
         self._solve_lock = threading.Lock()
+
+    @property
+    def answerer(self) -> AnswererService:
+        if self._answerer is None:
+            raise ERPError('answerer_unavailable', '导出模块未配置。', 503)
+        return self._answerer
 
     def upload_template(self, project_id: str, filename: str, content: bytes) -> JSONObject:
         self.project(project_id)

@@ -39,6 +39,46 @@ export interface BudgetItem {
   action_indices: number[];
   explanation: string;
 }
+export interface WorkbookEntry {
+  sheet: string;
+  cell: string;
+  label: string;
+  source_ids: string[];
+  conversion: string;
+  explanation: string;
+}
+export interface WorkbookMapping {
+  id: string;
+  solution_id: string;
+  template_id: string;
+  revision: number;
+  confirmed: boolean;
+  entries: WorkbookEntry[];
+  issues: Issue[];
+  values: (string | null)[];
+  sources: {
+    id: string;
+    label: string;
+    value: string | null;
+    numeric: boolean;
+    period: number | null;
+    unit: string;
+  }[];
+}
+export interface Artifact {
+  id: string;
+  solution_id: string;
+  problem_version: number;
+  kind: 'docx' | 'xlsx';
+  filename: string;
+  created_at: string;
+  draft: boolean;
+  formula_status: string;
+  warnings: string[];
+  template_id: string | null;
+  mapping_id: string | null;
+  mapping_revision: number | null;
+}
 export interface Project {
   id: string;
   name: string;
@@ -150,6 +190,9 @@ export interface Job {
     version?: number;
     search?: Record<string, number>;
     generation?: GenerationConfig;
+    solution_id?: string;
+    kind?: 'docx' | 'xlsx';
+    mapping_id?: string | null;
     model_preset?: { preset_name: string };
   };
   error?: { message: string };

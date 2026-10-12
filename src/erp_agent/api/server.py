@@ -4,10 +4,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import CookieError, SimpleCookie
 from importlib.resources import files
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from erp_agent.adapters.documents import LibreOfficeConverter
 from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
+from erp_agent.adapters.artifacts import (
+    DocxReportRenderer, XlsxWorkbookRenderer, LibreOfficeSpreadsheetConverter,
+    LibreOfficeFormulaRecalculator,
+)
+from erp_agent.application.answerer import AnswererService
 from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
 from erp_agent.adapters.jobs import ThreadJobRunner
 from erp_agent.adapters.persistence import SQLiteRepository
@@ -185,6 +190,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.settings.max_upload_mb * 1024 * 1024)), 202)
             elif resource == "templates" and method == "GET":
                 self._json(workflow.repository.list("template", project_id))
+            elif resource == "mappings" and method == "GET":
+                self._json(workflow.answerer.mappings(project_id))
+            elif resource == "mappings" and method == "POST":
+                self._json(workflow.answerer.analyze(project_id, self._body_json()), 202)
+            elif resource == "artifacts" and method == "GET":
+                self._json(workflow.repository.list("artifact", project_id))
+            elif resource == "artifacts" and method == "POST":
+                self._json(workflow.answerer.export(project_id, self._body_json()), 202)
             elif resource == "read" and method == "POST":
                 self._json(workflow.read(project_id, self._body_json()), 202)
             elif resource == "inputs" and method == "GET":
@@ -214,6 +227,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._body_json()
                 self._json(workflow.jobs.cancel(project_id, parts[4]))
                 return
+        if resource == "mappings" and len(parts) == 5 and ID.fullmatch(parts[4]) and method == "POST":
+            self._json(workflow.answerer.confirm(project_id, parts[4], self._body_json()))
+            return
+        if resource == "artifacts" and len(parts) == 6 and ID.fullmatch(parts[4]) and parts[5] == "download" and method == "GET":
+            manifest, content = workflow.answerer.download(project_id, parts[4])
+            self._download_name = string(manifest['filename'])
+            self._respond(content, string(manifest['media_type']))
+            return
         if (resource == "documents" and len(parts) == 6 and ID.fullmatch(parts[4])
                 and parts[5] == "retry" and method == "POST"):
             self._body_json()
@@ -252,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if hasattr(self, '_download_name'):
+            self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(self._download_name))
         if hasattr(self, "_cookie_header"):
             self.send_header("Set-Cookie", self._cookie_header)
         self.send_header("Content-Security-Policy",
@@ -298,8 +321,11 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
     parser = MultiFormatDocumentParser(LibreOfficeConverter(settings.libreoffice))
     solver = SolverService(LLMStrategyGenerator(client),
                            evaluator if evaluator is not None else DraftPlanEvaluator())
+    answerer = AnswererService(repository, jobs, models, DocxReportRenderer(),
+                               XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice),
+                                                    LibreOfficeFormulaRecalculator(settings.libreoffice)))
     return WorkflowService(repository, jobs, parser, StructuredReader(client, client.current), solver,
-                           settings.default_solver, models, SpreadsheetBudgetParser())
+                           settings.default_solver, models, SpreadsheetBudgetParser(), answerer)
 
 
 def create_server(settings: Settings, llm: LLMClient | None = None,

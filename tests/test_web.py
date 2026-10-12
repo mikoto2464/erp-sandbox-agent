@@ -20,6 +20,8 @@ from erp_agent.application.ports import LLMResponse
 from unittest.mock import patch
 from tests.helpers import FakeLLM, docx_bytes, proposal_json
 from openpyxl import Workbook
+from openpyxl import load_workbook
+from docx import Document
 
 
 class WebTests(unittest.TestCase):
@@ -185,6 +187,65 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as stale:
             self.request(base + '/solve', {'version': 2, 'generation': generation})
         self.assertEqual(stale.exception.code, 409)
+
+    def test_mapping_confirmation_export_download_and_project_isolation(self):
+        project, _ = self.setup_problem()
+        base = f'/api/projects/{project}'
+        self.llm.response = proposal_json()
+        job = self.request(base + '/solve', {'version': 1})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        solution = self.request(base + '/solutions')[0]
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = '资金计划'
+        sheet.append(['项目', '第一季'])
+        sheet.append(['借款', None])
+        sheet['B2'].number_format = '0.00'
+        sheet['B3'] = '=SUM(B2)'
+        content = io.BytesIO()
+        workbook.save(content)
+        job = self.request(base + '/templates', content=content.getvalue(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
+        })
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        template = self.request(base + '/templates')[0]
+        entry = {'sheet': '资金计划', 'cell': 'B2', 'label': '借款',
+                 'source_ids': ['action:0:amount'], 'conversion': 'identity', 'explanation': '第一期操作金额'}
+        self.llm.response = dumps({'entries': [entry]})
+        job = self.request(base + '/mappings', {'solution_id': solution['id'], 'template_id': template['source']['id']})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'needs_input')
+        mapping = self.request(base + '/mappings')[0]
+        self.assertEqual(mapping['values'], ['10'])
+        with self.assertRaises(HTTPError) as unconfirmed:
+            self.request(base + '/artifacts', {'solution_id': solution['id'], 'kind': 'xlsx', 'mapping_id': mapping['id']})
+        self.assertEqual(unconfirmed.exception.code, 409)
+        mapping = self.request(base + '/mappings/' + mapping['id'], {'expected_revision': 1, 'entries': [entry]})
+        self.assertTrue(mapping['confirmed'])
+        with self.assertRaises(HTTPError) as conflict:
+            self.request(base + '/mappings/' + mapping['id'], {'expected_revision': 1, 'entries': [entry]})
+        self.assertEqual(conflict.exception.code, 409)
+        for kind, mapping_id in [('docx', None), ('xlsx', mapping['id']), ('xlsx', None)]:
+            job = self.request(base + '/artifacts', {'solution_id': solution['id'], 'kind': kind, 'mapping_id': mapping_id})
+            self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        artifacts = self.request(base + '/artifacts')
+        self.assertEqual(len(artifacts), 3)
+        for artifact in artifacts:
+            code, body = self.raw_request(base + f"/artifacts/{artifact['id']}/download")
+            self.assertEqual(code, 200)
+            self.assertIn('Content-Disposition: attachment;', self.response_headers)
+            self.assertTrue(artifact['draft'])
+            if artifact['kind'] == 'docx':
+                document = Document(io.BytesIO(body))
+                self.assertIn('第 1 年 · 第 2 季', [p.text for p in document.paragraphs])
+            elif artifact['mapping_id']:
+                filled = load_workbook(io.BytesIO(body))
+                self.assertEqual(filled['资金计划']['B2'].value, 10)
+                self.assertEqual(filled['资金计划']['B3'].value, '=SUM(B2)')
+                filled.close()
+        other = self.request('/api/projects', {'name': '其他项目'})['id']
+        self.assertEqual(self.raw_request(f"/api/projects/{other}/artifacts/{artifacts[0]['id']}/download")[0], 404)
+        self.cookie = ''
+        self.assertEqual(self.raw_request(base + f"/artifacts/{artifacts[0]['id']}/download")[0], 401)
 
     def test_upload_read_revise_solve_and_isolation(self):
         project, result = self.setup_problem()
