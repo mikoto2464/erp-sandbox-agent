@@ -15,6 +15,13 @@ class SolverMode(str, Enum):
     LLM_MONTE_CARLO = "llm_monte_carlo"
 
 
+class PlanTone(str, Enum):
+    CONSERVATIVE = "conservative"
+    BALANCED = "balanced"
+    AGGRESSIVE = "aggressive"
+    CUSTOM = "custom"
+
+
 class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -179,12 +186,71 @@ class Action:
 
 
 @dataclass(frozen=True)
+class BudgetCell:
+    coordinate: str
+    text: str
+    number_format: str = ""
+    formula: bool = False
+    writable: bool = True
+
+
+@dataclass(frozen=True)
+class BudgetSheet:
+    name: str
+    rows: int
+    columns: int
+    cells: tuple[BudgetCell, ...]
+    merged_ranges: tuple[str, ...] = ()
+    hidden: bool = False
+    protected: bool = False
+
+
+@dataclass(frozen=True)
+class BudgetTemplate:
+    source: SourceDocument
+    sheets: tuple[BudgetSheet, ...]
+    warnings: tuple[str, ...] = ()
+    parser_version: str = "budget-1"
+
+
+@dataclass(frozen=True)
+class BudgetItem:
+    template_id: str
+    sheet: str
+    cell: str
+    label: str
+    period: int | None
+    unit: str
+    value: str | None
+    action_indices: tuple[int, ...]
+    explanation: str
+
+
+@dataclass(frozen=True)
 class Plan:
     title: str
     summary: str
     actions: tuple[Action, ...]
     assumptions: tuple[str, ...]
     risks: tuple[str, ...]
+    budget_items: tuple[BudgetItem, ...] = ()
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    tone: PlanTone = PlanTone.BALANCED
+    custom_prompt: str = ""
+    template_ids: tuple[str, ...] = ()
+    previous_solution_id: str | None = None
+    revision_prompt: str = ""
+    requirements: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanningContext:
+    config: GenerationConfig = field(default_factory=GenerationConfig)
+    templates: tuple[BudgetTemplate, ...] = ()
+    previous_plan: Plan | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +290,7 @@ class SolveRequest:
     snapshot: ProblemSnapshot
     mode: SolverMode
     search: SearchConfig = field(default_factory=SearchConfig)
+    context: PlanningContext = field(default_factory=PlanningContext)
 
 
 @dataclass(frozen=True)
@@ -241,3 +308,5 @@ class SolutionBundle:
     model: str
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    prompt_version: str = "solver-2"

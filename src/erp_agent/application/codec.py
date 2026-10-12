@@ -6,9 +6,48 @@ from erp_agent.application.contracts import (
 from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
+    BudgetCell, BudgetSheet, BudgetTemplate, GenerationConfig, PlanTone,
     Cell, DocumentAnnotation, DocumentBlock, Evidence, ParsedDocument, ProblemSnapshot,
     ReadingInputs, SourceDocument,
 )
+
+
+def generation_config(data: JSONObject) -> GenerationConfig:
+    try:
+        tone = PlanTone(string(data.get("tone", "balanced")))
+    except ValueError as exc:
+        raise ERPError("invalid_plan_tone", "请选择保守、平稳、激进或自定义基调。") from exc
+    custom = string(data.get("custom_prompt", ""), 10000).strip()
+    if tone == PlanTone.CUSTOM and not custom:
+        raise ERPError("custom_prompt_required", "自定义基调需要填写方案要求。")
+    template_ids = strings(data.get("template_ids", []))
+    if len(template_ids) > 3 or len(set(template_ids)) != len(template_ids):
+        raise ERPError("invalid_templates", "最多选择 3 份预算表且不能重复。")
+    previous = data.get("previous_solution_id")
+    revision = string(data.get("revision_prompt", ""), 10000).strip()
+    if bool(previous) != bool(revision):
+        raise ERPError("revision_prompt_required", "调整方案需选择已有方案并填写修改要求。")
+    return GenerationConfig(tone, custom if tone == PlanTone.CUSTOM else "", template_ids,
+                            None if previous is None else string(previous, 100), revision,
+                            strings(data.get("requirements", [])))
+
+
+def budget_template(data: JSONObject) -> BudgetTemplate:
+    source = obj(data["source"])
+    sheets = []
+    for value in array(data["sheets"]):
+        sheet = obj(value)
+        cells = tuple(BudgetCell(string(c["coordinate"]), string(c["text"]),
+                                 string(c["number_format"]), bool(c["formula"]), bool(c["writable"]))
+                      for value in array(sheet["cells"]) for c in (obj(value),))
+        sheets.append(BudgetSheet(string(sheet["name"]), integer(sheet["rows"], maximum=1048576),
+                                  integer(sheet["columns"], maximum=16384), cells,
+                                  strings(sheet["merged_ranges"]), bool(sheet["hidden"]),
+                                  bool(sheet["protected"])))
+    return BudgetTemplate(SourceDocument(
+        string(source["id"]), string(source["filename"]), string(source["sha256"]),
+        integer(source["size"], 0, 100 * 1024 * 1024), string(source["format"])),
+        tuple(sheets), strings(data["warnings"]), string(data["parser_version"]))
 
 
 def parsed_document(data: JSONObject) -> ParsedDocument:

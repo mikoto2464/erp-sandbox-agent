@@ -1,5 +1,44 @@
 export type KnowledgeState = 'known' | 'assumed' | 'conflicted' | 'missing';
 export type SolverMode = 'llm_only' | 'llm_monte_carlo';
+export type PlanTone = 'conservative' | 'balanced' | 'aggressive' | 'custom';
+export interface GenerationConfig {
+  tone: PlanTone;
+  custom_prompt: string;
+  template_ids: string[];
+  previous_solution_id: string | null;
+  revision_prompt: string;
+  requirements?: string[];
+}
+export interface BudgetTemplate {
+  source: ParsedDocument['source'];
+  sheets: {
+    name: string;
+    rows: number;
+    columns: number;
+    cells: {
+      coordinate: string;
+      text: string;
+      number_format: string;
+      formula: boolean;
+      writable: boolean;
+    }[];
+    merged_ranges: string[];
+    hidden: boolean;
+    protected: boolean;
+  }[];
+  warnings: string[];
+}
+export interface BudgetItem {
+  template_id: string;
+  sheet: string;
+  cell: string;
+  label: string;
+  period: number | null;
+  unit: string;
+  value: string | null;
+  action_indices: number[];
+  explanation: string;
+}
 export interface Project {
   id: string;
   name: string;
@@ -105,9 +144,12 @@ export interface Job {
   stage: string;
   metadata: {
     document_id?: string;
+    template_id?: string;
+    filename?: string;
     mode?: SolverMode;
     version?: number;
     search?: Record<string, number>;
+    generation?: GenerationConfig;
     model_preset?: { preset_name: string };
   };
   error?: { message: string };
@@ -123,12 +165,14 @@ export interface Solution {
   id: string;
   mode: SolverMode;
   problem_version: number;
+  generation?: GenerationConfig;
   plan: {
     title: string;
     summary: string;
     actions: Action[];
     assumptions: string[];
     risks: string[];
+    budget_items?: BudgetItem[];
   };
   evaluation: { verified: boolean; score: string | null; issues: Issue[] };
 }

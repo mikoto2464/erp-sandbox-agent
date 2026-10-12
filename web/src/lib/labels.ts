@@ -62,6 +62,8 @@ export const stageNames: Record<string, string> = {
   starting: '开始',
   parsing: '解析文件',
   saving_document: '保存文件',
+  parsing_template: '解析预算表',
+  saving_template: '保存预算表',
   reading: '整理题目',
   repairing_reading: '修复读题格式',
   repairing_strategy: '修复方案格式',

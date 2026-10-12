@@ -7,6 +7,7 @@ import WorkflowPage from './views/WorkflowPage.vue';
 import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
 import IssueCard from './components/IssueCard.vue';
+import SolverStep from './views/SolverStep.vue';
 import FactEditor from './components/FactEditor.vue';
 import { workspaceKey } from './composables/context';
 import {
@@ -22,12 +23,14 @@ import { useModelPresets } from './composables/useModelPresets';
 import { evidenceTables } from './lib/evidence';
 import type {
   EditableReading,
+  BudgetTemplate,
   Fact,
   Issue,
   Job,
   ModelPreset,
   ParsedDocument,
   Snapshot,
+  Solution,
 } from './lib/types';
 const projectId = 'a'.repeat(32);
 const preset: ModelPreset = {
@@ -66,6 +69,8 @@ function setup() {
     },
   ];
   const inputs = { revision: 0, problem_text: '', supplement_text: '', annotations: [] };
+  const solutions: Solution[] = [];
+  const templates: BudgetTemplate[] = [];
   let snapshot: Snapshot = {
     version: 1,
     inputs,
@@ -96,8 +101,20 @@ function setup() {
       data = [{ id: projectId, name: '项目', created_at: '2026-10-12' }];
     else if (url.endsWith('/inputs'))
       data = options.method ? { ...JSON.parse(String(options.body)), revision: 1 } : inputs;
-    else if (url.endsWith('/documents') || url.endsWith('/solutions')) data = [];
-    else if (url.endsWith('/jobs')) data = structuredClone(jobs);
+    else if (url.endsWith('/documents')) data = [];
+    else if (url.endsWith('/solutions')) data = solutions;
+    else if (url.endsWith('/templates')) {
+      if (options.method) {
+        data = {
+          id: 'template-job',
+          kind: 'template',
+          status: 'queued',
+          stage: 'queued',
+          metadata: { template_id: 'template', filename: 'budget.xlsx' },
+        };
+        jobs.push(data as Job);
+      } else data = templates;
+    } else if (url.endsWith('/jobs')) data = structuredClone(jobs);
     else if (url.endsWith('/problem')) data = { snapshot };
     else if (url.endsWith('/revisions')) {
       const reading = JSON.parse(String(options.body)).reading as EditableReading;
@@ -117,13 +134,125 @@ function setup() {
     return { ok: true, status: 200, json: async () => structuredClone(data) };
   });
   vi.stubGlobal('fetch', fetcher);
-  return { router, jobs, fetcher };
+  return { router, jobs, fetcher, solutions, templates };
 }
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('generates with tone and a parsed budget, then revises a selected plan without replacing it', async () => {
+    const { router, fetcher, jobs, solutions, templates } = setup();
+    await router.push(`/projects/${projectId}/steps/3`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const wrapper = mount(SolverStep, {
+      global: { provide: { [workspaceKey as symbol]: workspace } },
+    });
+    expect(workspace.planTone.value).toBe('balanced');
+    await wrapper.find('input[value="custom"]').setValue();
+    expect(workspace.generationReady.value).toBe(false);
+    await wrapper.find('.custom-tone textarea').setValue('减少借款');
+    await workspace.uploadTemplates([new File(['fixture'], 'budget.xlsx')]);
+    expect(workspace.generationReady.value).toBe(false);
+    templates.push({
+      source: { id: 'template', filename: 'budget.xlsx', size: 7, sha256: 'hash', format: 'xlsx' },
+      sheets: [
+        {
+          name: '现金预算',
+          rows: 2,
+          columns: 2,
+          cells: [],
+          merged_ranges: [],
+          hidden: false,
+          protected: false,
+        },
+      ],
+      warnings: [],
+    });
+    jobs.at(-1)!.status = 'succeeded';
+    await workspace.refresh();
+    await flushPromises();
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '生成方案')!
+      .trigger('click');
+    await flushPromises();
+    const requests = () =>
+      fetcher.mock.calls
+        .filter(([url]) => url.endsWith('/solve'))
+        .map(([, options]) => JSON.parse(String(options!.body)));
+    expect(requests()[0].generation).toEqual({
+      tone: 'custom',
+      custom_prompt: '减少借款',
+      template_ids: ['template'],
+      previous_solution_id: null,
+      revision_prompt: '',
+    });
+    const first: Solution = {
+      id: 'first',
+      mode: 'llm_only',
+      problem_version: 1,
+      generation: requests()[0].generation,
+      plan: {
+        title: '第一版方案',
+        summary: '保持现金',
+        actions: [{ period: 1, description: '第一季', quantity: null, amount: '100' }],
+        assumptions: [],
+        risks: [],
+        budget_items: [
+          {
+            template_id: 'template',
+            sheet: '现金预算',
+            cell: 'B2',
+            label: '借款预算',
+            period: 1,
+            unit: '元',
+            value: '100',
+            action_indices: [0],
+            explanation: '暂定借款',
+          },
+        ],
+      },
+      evaluation: { verified: false, score: null, issues: [] },
+    };
+    solutions.push(first);
+    await workspace.refresh();
+    await flushPromises();
+    expect(wrapper.find('.budget-plan').text()).toContain('借款预算');
+    await wrapper.find('.revision-section textarea').setValue('第一年不新增产线');
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '按要求调整方案')!
+      .trigger('click');
+    await flushPromises();
+    expect(requests()[1].generation).toMatchObject({
+      previous_solution_id: 'first',
+      revision_prompt: '第一年不新增产线',
+      template_ids: ['template'],
+    });
+    solutions.push({
+      ...first,
+      id: 'second',
+      plan: { ...first.plan, title: '第二版方案' },
+      generation: requests()[1].generation,
+    });
+    await workspace.refresh();
+    await flushPromises();
+    expect(workspace.currentSolution.value?.id).toBe('second');
+    expect((wrapper.find('.revision-section textarea').element as HTMLTextAreaElement).value).toBe(
+      '',
+    );
+    expect(workspace.solutions.value[0].plan.title).toBe('第一版方案');
+    await wrapper.find('.budget-template-row button').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('dialog').text()).toContain('现金预算');
+    wrapper.findComponent(AppModal).vm.$emit('close');
+    workspace.selectSolution('first');
+    expect(workspace.currentSolution.value?.id).toBe('first');
+    wrapper.unmount();
+    workspace.dispose();
+  });
   it('keeps clarification separate from extraction and confirms term rate without changing numeric evidence', async () => {
     const { router, fetcher } = setup();
     await router.push(`/projects/${projectId}/steps/2`);

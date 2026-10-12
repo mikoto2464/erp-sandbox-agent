@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from erp_agent.adapters.documents import LibreOfficeConverter
+from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
 from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
 from erp_agent.adapters.jobs import ThreadJobRunner
 from erp_agent.adapters.persistence import SQLiteRepository
@@ -178,6 +179,12 @@ class Handler(BaseHTTPRequestHandler):
                         self.server.settings.max_upload_mb * 1024 * 1024)), 202)
                 else:
                     raise ERPError("method_not_allowed", "不支持该操作。", 405)
+            elif resource == "templates" and method == "POST":
+                name = unquote(self.headers.get("X-Filename", ""))
+                self._json(workflow.upload_template(project_id, name, self._body(
+                    self.server.settings.max_upload_mb * 1024 * 1024)), 202)
+            elif resource == "templates" and method == "GET":
+                self._json(workflow.repository.list("template", project_id))
             elif resource == "read" and method == "POST":
                 self._json(workflow.read(project_id, self._body_json()), 202)
             elif resource == "inputs" and method == "GET":
@@ -211,6 +218,11 @@ class Handler(BaseHTTPRequestHandler):
                 and parts[5] == "retry" and method == "POST"):
             self._body_json()
             self._json(workflow.retry_parse(project_id, parts[4]), 202)
+            return
+        if (resource == "templates" and len(parts) == 6 and ID.fullmatch(parts[4])
+                and parts[5] == "retry" and method == "POST"):
+            self._body_json()
+            self._json(workflow.retry_template(project_id, parts[4]), 202)
             return
         raise ERPError("not_found", "接口不存在。", 404)
 
@@ -287,7 +299,7 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
     solver = SolverService(LLMStrategyGenerator(client),
                            evaluator if evaluator is not None else DraftPlanEvaluator())
     return WorkflowService(repository, jobs, parser, StructuredReader(client, client.current), solver,
-                           settings.default_solver, models)
+                           settings.default_solver, models, SpreadsheetBudgetParser())
 
 
 def create_server(settings: Settings, llm: LLMClient | None = None,

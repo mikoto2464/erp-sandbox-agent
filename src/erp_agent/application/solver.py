@@ -6,14 +6,16 @@ from typing import Callable
 from uuid import uuid4
 
 from erp_agent.application.contracts import PROPOSAL_SCHEMA, decode_proposal, dumps
+from erp_agent.application.budget_context import budget_material
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import (
     LLMClient, LLMRequest, PlanEvaluator, RunControl, StrategyGenerator,
 )
+from erp_agent.domain.budget_validation import validate_budget_items
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     Evaluation, Issue, Plan, ProblemSnapshot, SolutionBundle, SolveRequest,
-    SolverMode, StrategyProposal,
+    PlanTone, PlanningContext, SolverMode, StrategyProposal,
 )
 
 
@@ -24,7 +26,8 @@ class LLMStrategyGenerator:
         self.on_repair = on_repair
         self.search_parameters = search_parameters
 
-    def propose(self, snapshot: ProblemSnapshot) -> StrategyProposal:
+    def propose(self, snapshot: ProblemSnapshot,
+                context: PlanningContext = PlanningContext()) -> StrategyProposal:
         prompt = files("erp_agent").joinpath("prompts/solver.txt").read_text(encoding="utf-8")
         schema = dumps(PROPOSAL_SCHEMA)
         material = {"project_id": snapshot.project_id, "problem_version": snapshot.version,
@@ -32,7 +35,17 @@ class LLMStrategyGenerator:
                     "issues": snapshot.reading.issues}
         instruction = ("生成包含基线值的搜索参数。" if self.search_parameters
                        else "当前为单 LLM 模式，无需搜索参数，parameters 必须为空数组。")
-        payload = {"snapshot": material, "mode_instruction": instruction}
+        tones = {
+            PlanTone.CONSERVATIVE: "保守：优先现金安全与履约，控制借款、扩产和前期投入，说明收益取舍。",
+            PlanTone.BALANCED: "平稳：兼顾现金周转与增长，分阶段投入，给出适度的风险缓冲。",
+            PlanTone.AGGRESSIVE: "激进：在题目硬约束内争取增长与得分，可提高投入或融资，说明压力与退路。",
+            PlanTone.CUSTOM: "自定义：采用 custom_prompt 中的经营偏好，仍遵守题目与已确认规则。",
+        }
+        payload = {"snapshot": material, "mode_instruction": instruction,
+                   "generation": context.config, "tone_instruction": tones[context.config.tone],
+                   "budget_templates": budget_material(context.templates),
+                   "previous_plan": context.previous_plan}
+        original_payload = payload
         for attempt in range(2):
             response = None
             try:
@@ -41,6 +54,8 @@ class LLMStrategyGenerator:
                     dumps(payload), "erp_strategy", schema,
                 ))
                 proposal = decode_proposal(normalize_model_json(response.content), response.model)
+                if context.templates and not proposal.baseline.budget_items:
+                    raise ERPError("invalid_contract", "上传预算表后方案必须包含预算条目及未确定项。")
                 return replace(proposal, raw_response=response.content)
             except ERPError as error:
                 if response is None and error.code != "llm_structured_response":
@@ -51,7 +66,7 @@ class LLMStrategyGenerator:
                                    f"校验原因：{error.message} 请检查输出格式后重试。", 502) from error
                 if self.on_repair:
                     self.on_repair()
-                payload = {"snapshot": material, "mode_instruction": instruction,
+                payload = {**original_payload,
                            "previous_output": response.content if response else None,
                            "error": error.message,
                            "instruction": "修正方案 JSON 的语法和字段类型，保持题目及方案依据。"
@@ -99,12 +114,19 @@ class SolverService:
               generator: StrategyGenerator | None = None) -> SolutionBundle:
         if request.mode == SolverMode.LLM_MONTE_CARLO and not self.evaluator.supports_scoring:
             raise ERPError("simulation_not_ready", "蒙特卡罗需要可评分的仿真器；当前内核尚未就绪。", 409)
+        if request.mode == SolverMode.LLM_MONTE_CARLO and request.context.templates:
+            raise ERPError("budget_search_unavailable", "预算条目规划当前仅支持单 LLM 模式。", 409)
         if not 1 <= request.search.candidates <= 2000:
             raise ERPError("search_limit", "候选数必须在 1 到 2000 之间。")
         control.checkpoint("proposing")
-        proposal = (generator or self.generator).propose(request.snapshot)
+        proposal = (generator or self.generator).propose(request.snapshot, request.context)
         control.checkpoint("validating_plan")
         baseline = self.evaluator.evaluate(request.snapshot, proposal.baseline)
+        budget_issues = validate_budget_items(request, proposal.baseline)
+        if budget_issues:
+            baseline = replace(baseline, issues=baseline.issues + budget_issues,
+                               feasible=baseline.feasible and not any(
+                                   i.severity == "error" for i in budget_issues))
         best_plan, best_eval = proposal.baseline, baseline
         candidates = [proposal.baseline]
         feasible = int(baseline.feasible)
@@ -141,5 +163,5 @@ class SolverService:
             uuid4().hex, request.snapshot.project_id, request.snapshot.version, request.mode,
             best_plan, best_eval, baseline.score, len(candidates), feasible,
             request.search.seed if request.mode == SolverMode.LLM_MONTE_CARLO else None,
-            proposal.model, proposal.raw_response, tuple(candidates),
+            proposal.model, proposal.raw_response, tuple(candidates), request.context.config,
         )

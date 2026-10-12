@@ -5,18 +5,24 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from erp_agent.application.codec import parsed_document, problem_snapshot, reading_inputs
+from erp_agent.application.codec import (
+    budget_template, generation_config, parsed_document, problem_snapshot, reading_inputs,
+)
+from erp_agent.application.budget_context import budget_material
 from erp_agent.application.input_sources import input_sources
 from erp_agent.application.contracts import (
-    JSONObject, JSONValue, decode_reading, dumps, integer, obj, string, strings, to_json,
+    JSONObject, JSONValue, decode_plan, decode_reading, dumps, integer, obj, string, strings, to_json,
 )
-from erp_agent.application.ports import DocumentParser, JobRunner, ModelSettings, Repository, RunControl
+from erp_agent.application.ports import (
+    BudgetTemplateParser, DocumentParser, JobRunner, ModelSettings, Repository, RunControl,
+)
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    KnowledgeState, ProblemSnapshot, ReadingInputs, SearchConfig, SolveRequest, SolverMode, SourceDocument,
+    KnowledgeState, PlanningContext, ProblemSnapshot, ReadingInputs, SearchConfig, SolveRequest,
+    SolverMode, SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 
@@ -29,13 +35,56 @@ class WorkflowService:
     def __init__(self, repository: Repository, jobs: JobRunner, parser: DocumentParser,
                  reader: StructuredReader, solver: SolverService,
                  default_solver: SolverMode = SolverMode.LLM_ONLY,
-                 model_settings: ModelSettings | None = None) -> None:
+                 model_settings: ModelSettings | None = None,
+                 template_parser: BudgetTemplateParser | None = None) -> None:
         self.repository, self.jobs, self.parser = repository, jobs, parser
         self.reader, self.solver = reader, solver
         self.default_solver = default_solver
         self.model_settings = model_settings
+        self.template_parser = template_parser
         self._read_lock = threading.Lock()
         self._input_lock = threading.Lock()
+        self._solve_lock = threading.Lock()
+
+    def upload_template(self, project_id: str, filename: str, content: bytes) -> JSONObject:
+        self.project(project_id)
+        if not filename or len(filename) > 200 or any(c in filename for c in "/\\\x00"):
+            raise ERPError("invalid_filename", "文件名无效。")
+        fmt = filename.rsplit(".", 1)[-1].lower()
+        if fmt not in {"xlsx", "xls"}:
+            raise ERPError("unsupported_template", "预算空表支持 XLSX 或 XLS。")
+        if self.template_parser is None:
+            raise ERPError("template_parser_unavailable", "预算表解析器未配置。", 503)
+        source = SourceDocument(uuid4().hex, filename, hashlib.sha256(content).hexdigest(),
+                                len(content), fmt)
+        self.repository.put("template_original", project_id, source.id, {
+            "source": to_json(source), "content": base64.b64encode(content).decode(),
+        })
+        return self._template_job(project_id, source, content)
+
+    def _template_job(self, project_id: str, source: SourceDocument, content: bytes) -> JSONObject:
+        parser = self.template_parser
+        if parser is None:
+            raise ERPError("template_parser_unavailable", "预算表解析器未配置。", 503)
+
+        def operation(control: RunControl) -> JSONValue:
+            control.checkpoint("parsing_template")
+            template = parser.parse(source, content)
+            control.checkpoint("saving_template")
+            self.repository.put("template", project_id, source.id, template)
+            return {"template_id": source.id}
+
+        return self.jobs.submit(project_id, "template", operation,
+                                {"filename": source.filename, "template_id": source.id})
+
+    def retry_template(self, project_id: str, template_id: str) -> JSONObject:
+        self.project(project_id)
+        original = self.repository.get("template_original", project_id, template_id)
+        data = obj(original["source"])
+        source = SourceDocument(string(data["id"]), string(data["filename"]), string(data["sha256"]),
+                                integer(data["size"], 0, 100 * 1024 * 1024), string(data["format"]))
+        return self._template_job(project_id, source,
+                                  base64.b64decode(string(original["content"], 150 * 1024 * 1024)))
 
     def create_project(self, name: str) -> JSONObject:
         name = name.strip()
@@ -221,7 +270,16 @@ class WorkflowService:
         return self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
 
     def solve(self, project_id: str, data: JSONObject) -> JSONObject:
+        with self._solve_lock:
+            return self._submit_solve(project_id, data)
+
+    def _submit_solve(self, project_id: str, data: JSONObject) -> JSONObject:
         snapshot = self.problem(project_id, integer(data.get("version")))
+        if snapshot.version != self.repository.versions(project_id)[0]:
+            raise ERPError("problem_version_changed", "题目已有更新，请刷新后按当前题目生成。", 409)
+        if any(obj(job).get("kind") == "solve" and obj(job).get("status") in {"running", "queued"}
+               for job in self.repository.list("job", project_id)):
+            raise ERPError("solve_in_progress", "当前项目正在生成方案，请等待完成。", 409)
         if snapshot.inputs.revision != self.inputs(project_id).revision:
             raise ERPError("reading_inputs_changed", "题目输入或文件说明已修改，请重新读取后生成方案。", 409)
         if any(issue.severity == "error" for issue in snapshot.reading.issues):
@@ -236,10 +294,29 @@ class WorkflowService:
             raise ERPError("simulation_not_ready", "蒙特卡罗模式等待经营仿真内核实现。", 409)
         if not self.reader.llm.configured:
             raise ERPError("llm_not_configured", "请在服务端配置模型。", 503)
+        config = generation_config(obj(data.get("generation", {})))
+        if mode == SolverMode.LLM_MONTE_CARLO and config.template_ids:
+            raise ERPError("budget_search_unavailable", "预算条目规划当前仅支持单 LLM 模式。", 409)
+        previous_plan = None
+        requirements = ()
+        if config.previous_solution_id:
+            previous = self.repository.get("solution", project_id, config.previous_solution_id)
+            if integer(previous["problem_version"]) != snapshot.version:
+                raise ERPError("previous_solution_stale", "此方案使用旧题目，请按当前题目重新生成。", 409)
+            previous_plan = decode_plan(previous["plan"])
+            previous_config = generation_config(obj(previous.get("generation", {})))
+            requirements = previous_config.requirements + (config.revision_prompt,)
+            if len(requirements) > 20 or sum(len(r) for r in requirements) > 50000:
+                raise ERPError("revision_limit", "此方案调整记录较长，请整理要求后重新生成。", 409)
+        config = replace(config, requirements=requirements)
+        templates = tuple(budget_template(self.repository.get("template", project_id, template_id))
+                          for template_id in config.template_ids)
+        if len(dumps(budget_material(templates))) > 1500000:
+            raise ERPError("template_context_limit", "所选预算表内容过多，请精简或减少模板。")
         request = SolveRequest(snapshot, mode, SearchConfig(
             integer(data.get("seed", 42), 0, 2**32 - 1),
             integer(data.get("candidates", 100), 1, 2000),
-        ))
+        ), PlanningContext(config, templates, previous_plan))
         binding = self.model_settings.capture() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
@@ -260,4 +337,5 @@ class WorkflowService:
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
                                  "search": to_json(request.search),
+                                 "generation": to_json(config), "prompt_version": "solver-2",
                                  "model_preset": binding.metadata() if binding else None})

@@ -30,7 +30,7 @@ const { currentStep, solutions, setStep } = useWorkspaceContext();
         <article class="card module-card">
           <span class="module-symbol">▦</span>
           <h3>预算表填写</h3>
-          <p class="muted">上传 Excel 空表，核对项目后填入经营数据。</p>
+          <p class="muted">规划用空表可在经营方案页上传，填写与导出将在此开放。</p>
           <div class="template-placeholder">
             <strong>XLSX 空白预算表</strong
             ><button

@@ -6,7 +6,7 @@ from typing import TypeAlias, cast
 
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    Action, Fact, Issue, KnowledgeState, ParameterRange, Plan, ProblemSpec,
+    Action, BudgetItem, Fact, Issue, KnowledgeState, ParameterRange, Plan, ProblemSpec,
     ReadingResult, Rule, RuleSet, StrategyProposal,
 )
 
@@ -158,9 +158,11 @@ def editable_reading(reading: ReadingResult) -> JSONObject:
             "rules": to_json(reading.rules.rules), "issues": to_json(reading.issues)}
 
 
-def decode_proposal(content: str, model: str) -> StrategyProposal:
-    root = obj(loads(content), {"plan", "parameters"})
-    data = obj(root["plan"], {"title", "summary", "actions", "assumptions", "risks"})
+def decode_plan(value: JSONValue) -> Plan:
+    data = obj(value)
+    required = {"title", "summary", "actions", "assumptions", "risks"}
+    if set(data) not in (required, required | {"budget_items"}):
+        raise ERPError("invalid_contract", "方案字段不符合要求。")
     actions: list[Action] = []
     for value in array(data["actions"]):
         action = obj(value, {"period", "kind", "entity_id", "amount", "quantity", "description"})
@@ -172,8 +174,27 @@ def decode_proposal(content: str, model: str) -> StrategyProposal:
         ))
     if len(actions) > 5000:
         raise ERPError("invalid_contract", "方案行动过多。")
-    plan = Plan(string(data["title"]), string(data["summary"]), tuple(actions),
-                strings(data["assumptions"]), strings(data["risks"]))
+    budget_items = []
+    for value in array(data.get("budget_items", [])):
+        item = obj(value, {"template_id", "sheet", "cell", "label", "period", "unit", "value",
+                           "action_indices", "explanation"})
+        budget_items.append(BudgetItem(
+            string(item["template_id"], 100), string(item["sheet"], 100), string(item["cell"], 20),
+            string(item["label"]), None if item["period"] is None else integer(item["period"]),
+            string(item["unit"]), None if item["value"] is None else string(item["value"]),
+            tuple(integer(i, 0, max(0, len(actions) - 1)) for i in array(item["action_indices"])),
+            string(item["explanation"]),
+        ))
+    if len(budget_items) > 10000:
+        raise ERPError("invalid_contract", "预算条目过多。")
+    return Plan(string(data["title"]), string(data["summary"]), tuple(actions),
+                strings(data["assumptions"]), strings(data["risks"]), tuple(budget_items))
+
+
+def decode_proposal(content: str, model: str) -> StrategyProposal:
+    root = obj(loads(content), {"plan", "parameters"})
+    plan = decode_plan(root["plan"])
+    actions = plan.actions
     parameters: list[ParameterRange] = []
     for value in array(root["parameters"]):
         parameter = obj(value, {"action_index", "field", "minimum", "maximum", "step"})
@@ -224,7 +245,14 @@ ACTION_SCHEMA = object_schema({"period": {"type": "integer"}, "kind": TEXT,
 PROPOSAL_SCHEMA = object_schema({
     "plan": object_schema({"title": TEXT, "summary": TEXT,
                             "actions": {"type": "array", "items": ACTION_SCHEMA},
-                            "assumptions": TEXTS, "risks": TEXTS}),
+                            "assumptions": TEXTS, "risks": TEXTS,
+                            "budget_items": {"type": "array", "items": object_schema({
+                                "template_id": TEXT, "sheet": TEXT, "cell": TEXT,
+                                "label": TEXT, "period": {"type": ["integer", "null"]},
+                                "unit": TEXT, "value": NULLABLE_TEXT,
+                                "action_indices": {"type": "array", "items": {"type": "integer"}},
+                                "explanation": TEXT,
+                            })}}),
     "parameters": {"type": "array", "items": object_schema({
         "action_index": {"type": "integer"},
         "field": {"type": "string", "enum": ["amount", "quantity"]},

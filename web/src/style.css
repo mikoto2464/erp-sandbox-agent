@@ -2113,3 +2113,138 @@ button:active:enabled {
     transition: none !important;
   }
 }
+
+.generation-section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.generation-section h3 {
+  font-size: 14px;
+  margin: 0 0 12px;
+}
+.generation-section .section-heading {
+  margin-bottom: 12px;
+}
+.generation-section .section-heading p {
+  margin: 0;
+}
+.tone-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.tone-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 12px;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+  margin: 0;
+}
+.tone-option:has(input:checked) {
+  border-color: var(--primary);
+  background: #f4f7ff;
+}
+.tone-option input {
+  margin: 3px 0 0;
+  width: auto;
+}
+.tone-option strong {
+  display: block;
+  font-size: 14px;
+  color: var(--text);
+}
+.tone-option small,
+.budget-template-row small,
+.budget-plan small {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.custom-tone {
+  margin-top: 16px;
+}
+.template-upload {
+  margin: 0;
+  white-space: nowrap;
+}
+.template-upload:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+.template-upload.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.budget-template-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.budget-template-row .check {
+  margin: 0;
+  min-width: 0;
+}
+.budget-template-row strong {
+  overflow-wrap: anywhere;
+}
+.budget-plan table,
+.budget-preview table {
+  width: 100%;
+}
+.budget-preview {
+  max-height: 55vh;
+}
+.budget-preview th {
+  position: sticky;
+  background: #f5f7fd;
+  top: 0;
+}
+.budget-formula {
+  color: var(--primary);
+  background: #f4f7ff;
+}
+.budget-plan td {
+  vertical-align: top;
+  min-width: 100px;
+}
+.budget-plan td:last-child {
+  min-width: 220px;
+}
+.solution-card > .section-heading .app-select {
+  width: min(300px, 100%);
+}
+.revision-section textarea {
+  min-height: 100px;
+}
+.revision-section .panel-footer > span {
+  max-width: 65%;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .tone-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .solution-card > .section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .solution-card > .section-heading .app-select {
+    width: 100%;
+  }
+  .action-values {
+    white-space: normal;
+    max-width: 35%;
+  }
+}

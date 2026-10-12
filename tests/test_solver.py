@@ -1,16 +1,64 @@
 import unittest
 from dataclasses import replace
 
-from erp_agent.application.contracts import decode_proposal, loads
+from erp_agent.application.contracts import decode_proposal, dumps, loads
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMResponse
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import SearchConfig, SolveRequest, SolverMode
+from erp_agent.domain.models import (
+    BudgetCell, BudgetSheet, BudgetTemplate, GenerationConfig, PlanningContext, PlanTone,
+    SearchConfig, SolveRequest, SolverMode, SourceDocument,
+)
 from tests.helpers import Control, FakeLLM, QuadraticEvaluator, proposal_json, snapshot
 
 
 class SolverTests(unittest.TestCase):
+    def test_template_coordinates_periods_and_readonly_cells_are_checked(self):
+        template = BudgetTemplate(SourceDocument('template', 'budget.xlsx', 'hash', 1, 'xlsx'), (
+            BudgetSheet('预算', 4, 3, (BudgetCell('B4', '=SUM(B2:B3)', formula=True),
+                                       BudgetCell('C3', '', writable=False)), ('A1:C1',)),
+        ))
+        payload = loads(proposal_json())
+        payload['plan']['budget_items'] = [{
+            'template_id': 'template', 'sheet': '预算', 'cell': 'B2', 'label': '现金预算',
+            'period': 1, 'unit': '元', 'value': '10', 'action_indices': [0], 'explanation': '操作0',
+        }]
+        context = PlanningContext(GenerationConfig(template_ids=('template',)), (template,))
+        llm = FakeLLM(dumps(payload))
+        solver = SolverService(LLMStrategyGenerator(llm), DraftPlanEvaluator())
+        result = solver.solve(SolveRequest(snapshot(), SolverMode.LLM_ONLY, context=context), Control())
+        self.assertTrue(result.evaluation.feasible)
+        for cell, period, value, code in [('B4', 1, '10', 'budget.readonly'),
+                                          ('C3', 1, '10', 'budget.readonly'),
+                                          ('B1', 1, None, 'budget.merged_cell'),
+                                          ('D2', 1, None, 'budget.target'),
+                                          ('B2', 3, '10', 'budget.period')]:
+            with self.subTest(cell=cell, period=period):
+                payload['plan']['budget_items'][0].update(cell=cell, period=period, value=value)
+                llm.response = dumps(payload)
+                result = solver.solve(SolveRequest(snapshot(), SolverMode.LLM_ONLY, context=context), Control())
+                self.assertFalse(result.evaluation.feasible)
+                self.assertIn(code, {i.code for i in result.evaluation.issues})
+
+    def test_revision_context_survives_format_repair(self):
+        context = PlanningContext(GenerationConfig(
+            tone=PlanTone.CUSTOM, custom_prompt='优先现金', previous_solution_id='old',
+            revision_prompt='减少借款', requirements=('减少借款',)),
+            previous_plan=decode_proposal(proposal_json(), 'old-model').baseline)
+        calls = []
+        class Client:
+            def generate(self, request):
+                calls.append(request)
+                return LLMResponse('invalid' if len(calls) == 1 else proposal_json(), 'model')
+        result = SolverService(LLMStrategyGenerator(Client()), DraftPlanEvaluator()).solve(
+            SolveRequest(snapshot(), SolverMode.LLM_ONLY, context=context), Control())
+        self.assertEqual(result.generation, context.config)
+        for call in calls:
+            payload = loads(call.user)
+            self.assertEqual(payload['generation']['revision_prompt'], '减少借款')
+            self.assertEqual(payload['previous_plan']['actions'][0]['amount'], '10')
+            self.assertIn('自定义', payload['tone_instruction'])
     def test_llm_only_one_generation_and_one_candidate(self):
         llm = FakeLLM(proposal_json())
         result = SolverService(LLMStrategyGenerator(llm), DraftPlanEvaluator()).solve(

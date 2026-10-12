@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
+from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import SourceDocument
 
@@ -29,6 +30,11 @@ class InputDocumentTests(unittest.TestCase):
         value = next(e for e in document.evidence if e.text == '10800')
         self.assertIn('B4', value.location)
         self.assertIn('doc:t1:r2:c1', value.table_context.column_header_ids)
+        content = Path(__file__).with_name('fixtures').joinpath('orders.xls').read_bytes()
+        template = SpreadsheetBudgetParser().parse(document.source, content)
+        self.assertTrue(template.sheets[0].merged_ranges)
+        self.assertTrue(any(c.text == '50%' for c in template.sheets[0].cells))
+        self.assertTrue(any('公式及保护' in warning for warning in template.warnings))
 
     def test_invalid_new_format_signatures_are_rejected(self):
         for fmt in ('pdf', 'xls'):

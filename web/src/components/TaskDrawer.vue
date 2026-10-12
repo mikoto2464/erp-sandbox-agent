@@ -25,7 +25,13 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
       <div class="task-info">
         <div class="task-row-heading">
           <strong>{{
-            job.kind === 'parse' ? '文件解析' : job.kind === 'read' ? '读题' : '方案生成'
+            job.kind === 'parse'
+              ? '文件解析'
+              : job.kind === 'template'
+                ? '预算表解析'
+                : job.kind === 'read'
+                  ? '读题'
+                  : '方案生成'
           }}</strong
           ><span
             class="task-state"
@@ -34,6 +40,12 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
           >
         </div>
         <p class="muted">{{ stageNames[job.stage] || job.stage }}</p>
+        <p
+          v-if="job.metadata.filename"
+          class="muted"
+        >
+          {{ job.metadata.filename }}
+        </p>
         <p
           v-if="job.metadata.model_preset"
           class="muted"

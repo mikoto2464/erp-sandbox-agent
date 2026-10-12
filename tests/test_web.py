@@ -19,6 +19,7 @@ from erp_agent.domain.models import SourceDocument
 from erp_agent.application.ports import LLMResponse
 from unittest.mock import patch
 from tests.helpers import FakeLLM, docx_bytes, proposal_json
+from openpyxl import Workbook
 
 
 class WebTests(unittest.TestCase):
@@ -108,6 +109,82 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.wait_job(project, job["id"])["status"], "succeeded")
         result = self.request(base + "/problem")
         return project, result
+
+    def test_budget_tone_and_iterative_solution_context(self):
+        project, _ = self.setup_problem()
+        base = f'/api/projects/{project}'
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = '现金预算'
+        sheet.append(['项目', '第1季', '第2季'])
+        sheet.append(['借款', None, None])
+        sheet['B2'].number_format = '0.00'
+        sheet['B3'] = '=SUM(B2)'
+        sheet.merge_cells('A4:C4')
+        sheet['A4'] = '备注'
+        content = io.BytesIO()
+        workbook.save(content)
+        workbook.close()
+        job = self.request(base + '/templates', content=content.getvalue(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
+        })
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        template = self.request(base + '/templates')[0]
+        self.assertEqual(template['sheets'][0]['merged_ranges'], ['A4:C4'])
+        self.assertTrue(next(c for c in template['sheets'][0]['cells'] if c['coordinate'] == 'B3')['formula'])
+        proposal = loads(proposal_json())
+        proposal['plan']['budget_items'] = [{
+            'template_id': template['source']['id'], 'sheet': '现金预算', 'cell': 'B2',
+            'label': '借款', 'period': 1, 'unit': '元', 'value': '10', 'action_indices': [0],
+            'explanation': '依据第一期操作安排，尚未完成仿真验证',
+        }]
+        self.llm.response = dumps(proposal)
+        generation = {'tone': 'conservative', 'custom_prompt': '',
+                      'template_ids': [template['source']['id']]}
+        job = self.request(base + '/solve', {'version': 1, 'generation': generation})
+        done = self.wait_job(project, job['id'])
+        self.assertEqual(done['status'], 'succeeded')
+        first = self.request(base + '/solutions')[0]
+        payload = loads(self.llm.calls[-1].user)
+        self.assertEqual(payload['budget_templates'][0]['source']['id'], template['source']['id'])
+        self.assertIn('保守', payload['tone_instruction'])
+        self.assertIsNone(payload['previous_plan'])
+        self.assertEqual(first['generation']['tone'], 'conservative')
+        self.assertEqual(job['metadata']['generation']['template_ids'], generation['template_ids'])
+        old_raw = first['raw_response']
+        for parent, requirement in [(first['id'], '第一年不增产线'), (None, '继续减少借款')]:
+            parent = parent or self.request(base + '/solutions')[-1]['id']
+            generation.update(previous_solution_id=parent, revision_prompt=requirement)
+            proposal['plan']['title'] = requirement
+            self.llm.response = dumps(proposal)
+            job = self.request(base + '/solve', {'version': 1, 'generation': generation})
+            self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        plans = self.request(base + '/solutions')
+        self.assertEqual(len(plans), 3)
+        self.assertEqual(plans[0]['raw_response'], old_raw)
+        self.assertEqual(plans[-1]['generation']['requirements'], ['第一年不增产线', '继续减少借款'])
+        payload = loads(self.llm.calls[-1].user)
+        self.assertEqual(payload['previous_plan']['title'], '第一年不增产线')
+        self.assertNotIn('raw_response', payload)
+        self.assertEqual(len(self.request(base + '/documents')), 1)
+        other = self.request('/api/projects', {'name': '其他'})['id']
+        other_base = f'/api/projects/{other}'
+        with self.assertRaises(HTTPError) as forbidden:
+            self.request(other_base + f"/templates/{template['source']['id']}/retry", {})
+        self.assertEqual(forbidden.exception.code, 404)
+        for config, code in [({'tone': 'invalid'}, 400), ({'tone': 'custom'}, 400),
+                             ({'previous_solution_id': first['id']}, 400),
+                             ({'template_ids': ['not-in-project']}, 404)]:
+            with self.subTest(config=config), self.assertRaises(HTTPError) as rejected:
+                self.request(base + '/solve', {'version': 1, 'generation': config})
+            self.assertEqual(rejected.exception.code, code)
+        reading = self.request(base + '/problem')['snapshot']['reading']
+        self.request(base + '/revisions', {'expected_version': 1, 'reading': {
+            'title': '新版', 'facts': reading['problem']['facts'], 'rules': [], 'issues': [],
+        }})
+        with self.assertRaises(HTTPError) as stale:
+            self.request(base + '/solve', {'version': 2, 'generation': generation})
+        self.assertEqual(stale.exception.code, 409)
 
     def test_upload_read_revise_solve_and_isolation(self):
         project, result = self.setup_problem()

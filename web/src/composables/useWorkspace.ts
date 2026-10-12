@@ -4,9 +4,12 @@ import { ApiError, post, request } from '../lib/api';
 import { cloneJson } from '../lib/json';
 import type {
   EditableReading,
+  BudgetTemplate,
+  GenerationConfig,
   Job,
   ModelCatalog,
   ParsedDocument,
+  PlanTone,
   Project,
   ReadingInputs,
   Snapshot,
@@ -42,6 +45,31 @@ export function useWorkspace(router: Router) {
   const solverMode = ref<SolverMode>('llm_only'),
     seed = ref(42),
     candidates = ref(100);
+  const planTone = ref<PlanTone>('balanced'),
+    customPrompt = ref(''),
+    templateIds = ref<string[]>([]),
+    templates = ref<BudgetTemplate[]>([]),
+    selectedSolutionId = ref<string | null>(null);
+  const currentSolution = computed(
+    () =>
+      solutions.value.find((solution) => solution.id === selectedSolutionId.value) ||
+      solutions.value.at(-1) ||
+      null,
+  );
+  const templateParsing = computed(() =>
+    jobs.value.some((job) => job.kind === 'template' && ['queued', 'running'].includes(job.status)),
+  );
+  const generationReady = computed(
+    () =>
+      canSolve.value &&
+      !templateParsing.value &&
+      !operations.value.has('upload-template') &&
+      (solverMode.value !== 'llm_only' ||
+        templateIds.value.every((id) =>
+          templates.value.some((template) => template.source.id === id),
+        )) &&
+      (planTone.value !== 'custom' || !!customPrompt.value.trim()),
+  );
   const selected = ref<string[]>([]),
     operations = ref(new Set<string>()),
     notifications = useToasts();
@@ -261,13 +289,57 @@ export function useWorkspace(router: Router) {
       await refresh();
     }
   }
-  async function solve() {
-    await post(base() + '/solve', {
+  async function uploadTemplates(files: File[]) {
+    if (!project.value) return;
+    const captured = generation,
+      url = base();
+    if (files.length + templateIds.value.length > 3) throw new Error('最多选择 3 份预算空表。');
+    for (const file of files) {
+      if (!/\.(xlsx|xls)$/i.test(file.name)) throw new Error('预算空表支持 XLSX 或 XLS。');
+      if (file.size > (status.value?.max_upload_mb || 20) * 1024 * 1024)
+        throw new Error('预算表超过上传大小限制。');
+      const job = await request<Job>(url + '/templates', {
+        method: 'POST',
+        headers: {
+          'X-Filename': encodeURIComponent(file.name),
+          'Content-Type': 'application/octet-stream',
+        },
+        body: file,
+      });
+      if (captured !== generation) return;
+      if (job.metadata.template_id) templateIds.value.push(job.metadata.template_id);
+    }
+    notify('预算表已提交解析。');
+    await refresh();
+  }
+  function selectSolution(id: string) {
+    selectedSolutionId.value = id;
+    const config = solutions.value.find((solution) => solution.id === id)?.generation;
+    planTone.value = config?.tone || 'balanced';
+    customPrompt.value = config?.custom_prompt || '';
+    templateIds.value = [...(config?.template_ids || [])];
+  }
+  async function solve(previousSolutionId: string | null = null, revisionPrompt = '') {
+    if (!generationReady.value) throw new Error('请检查题目、预算表解析状态和方案基调。');
+    if (previousSolutionId && !revisionPrompt.trim())
+      throw new Error('请填写对已有方案的修改要求。');
+    const captured = generation,
+      url = base();
+    const config: GenerationConfig = {
+      tone: planTone.value,
+      custom_prompt: planTone.value === 'custom' ? customPrompt.value.trim() : '',
+      template_ids: solverMode.value === 'llm_only' ? templateIds.value : [],
+      previous_solution_id: previousSolutionId,
+      revision_prompt: revisionPrompt.trim(),
+    };
+    await post(url + '/solve', {
       version: snapshot.value?.version,
       mode: solverMode.value,
       seed: seed.value,
       candidates: candidates.value,
+      generation: config,
     });
+    if (captured !== generation) return;
     await refresh();
   }
   async function cancelJob(job: Job) {
@@ -277,6 +349,8 @@ export function useWorkspace(router: Router) {
   async function retryJob(job: Job) {
     if (job.kind === 'parse')
       await post(`${base()}/documents/${job.metadata.document_id}/retry`, {});
+    else if (job.kind === 'template')
+      await post(`${base()}/templates/${job.metadata.template_id}/retry`, {});
     else if (job.kind === 'read') {
       await saveInputs();
       await post(base() + '/read', {
@@ -288,6 +362,7 @@ export function useWorkspace(router: Router) {
         version: job.metadata.version,
         mode: job.metadata.mode,
         ...job.metadata.search,
+        generation: job.metadata.generation,
       });
     await refresh();
   }
@@ -303,13 +378,20 @@ export function useWorkspace(router: Router) {
         continue;
       const targetId = project.value!.id,
         targetStep = job.kind === 'parse' ? 1 : job.kind === 'read' ? 2 : 3;
-      const name = job.kind === 'parse' ? '文件解析' : job.kind === 'read' ? '读题' : '方案生成',
+      const name =
+          job.kind === 'parse'
+            ? '文件解析'
+            : job.kind === 'template'
+              ? '预算表解析'
+              : job.kind === 'read'
+                ? '读题'
+                : '方案生成',
         showResult = ['succeeded', 'needs_input'].includes(job.status);
       const text =
         job.status === 'failed'
           ? `${name}失败：${(job.error?.message || '请查看任务详情。').slice(0, 160)}`
           : job.status === 'needs_input'
-            ? '读题已完成，有内容需要确认。'
+            ? `${name}已完成，有内容需要处理。`
             : `${name}${job.status === 'cancelled' ? '已取消' : '已完成'}。`;
       notifications.notify(
         text,
@@ -333,15 +415,23 @@ export function useWorkspace(router: Router) {
     if (!authenticated.value || !project.value) return;
     const captured = generation,
       url = base();
-    const [docs, latestJobs, plans] = await Promise.all([
+    const [docs, latestJobs, plans, budgetTemplates] = await Promise.all([
       request<ParsedDocument[]>(url + '/documents'),
       request<Job[]>(url + '/jobs'),
       request<Solution[]>(url + '/solutions'),
+      request<BudgetTemplate[]>(url + '/templates'),
     ]);
     if (captured !== generation) return;
     documents.value = docs;
     jobs.value = latestJobs;
+    const newPlan = plans.at(-1);
+    const planChanged = newPlan && !solutions.value.some((solution) => solution.id === newPlan.id);
     solutions.value = plans;
+    templates.value = budgetTemplates;
+    if (initial && newPlan) selectSolution(newPlan.id);
+    else if (planChanged) selectSolution(newPlan.id);
+    if (initial && !newPlan)
+      templateIds.value = budgetTemplates.slice(-3).map((template) => template.source.id);
     for (const doc of docs)
       if (!knownDocuments.has(doc.source.id)) {
         knownDocuments.add(doc.source.id);
@@ -378,6 +468,11 @@ export function useWorkspace(router: Router) {
     documents.value = [];
     jobs.value = [];
     solutions.value = [];
+    templates.value = [];
+    templateIds.value = [];
+    selectedSolutionId.value = null;
+    planTone.value = 'balanced';
+    customPrompt.value = '';
     selected.value = [];
     observed = new Map();
     knownDocuments = new Set();
@@ -514,6 +609,14 @@ export function useWorkspace(router: Router) {
     taskOpen,
     pendingNavigation,
     solverMode,
+    planTone,
+    customPrompt,
+    templates,
+    templateIds,
+    templateParsing,
+    generationReady,
+    currentSolution,
+    selectedSolutionId,
     seed,
     candidates,
     selected,
@@ -548,6 +651,8 @@ export function useWorkspace(router: Router) {
     startRead,
     upload,
     solve,
+    uploadTemplates,
+    selectSolution,
     cancelJob,
     retryJob,
     refresh,

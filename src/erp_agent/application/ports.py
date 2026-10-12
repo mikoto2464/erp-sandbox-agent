@@ -7,8 +7,10 @@ from erp_agent.application.contracts import JSONObject, JSONValue
 
 from erp_agent.domain.models import (
     Evaluation,
+    BudgetTemplate,
     ParsedDocument,
     Plan,
+    PlanningContext,
     ProblemSnapshot,
     SourceDocument,
     StrategyProposal,
@@ -70,7 +72,12 @@ class DocumentParser(Protocol):
 
 
 class StrategyGenerator(Protocol):
-    def propose(self, snapshot: ProblemSnapshot) -> StrategyProposal: ...
+    def propose(self, snapshot: ProblemSnapshot,
+                context: PlanningContext = PlanningContext()) -> StrategyProposal: ...
+
+
+class BudgetTemplateParser(Protocol):
+    def parse(self, source: SourceDocument, content: bytes) -> BudgetTemplate: ...
 
 
 class PlanEvaluator(Protocol):
