@@ -322,6 +322,7 @@ queued -> running(stage) -> succeeded
 
 ## 12. 编码与验证规范
 
+- 本地提交使用用户已配置的 Git 姓名与邮箱，不用 Codex 等临时署名覆盖。当前用户署名为 `mikoto2464`；保留用户已有提交和暂存内容，只提交本次任务文件。
 - 前端源码统一维护在 `web/src/`，采用 Vue 单文件组件、Composition API 和严格 TypeScript；页面、共享组件、状态逻辑、API 类型分别维护，不恢复全局 DOM 拼装或单文件业务脚本。DOM 操作仅用于焦点、滚动、原生 dialog/popover 等控件行为。
 - npm 依赖及锁文件放在 `web/`。开发使用 `npm --prefix web ci`、`npm --prefix web run dev`，Vite 将 `/api` 代理至本机 8000；构建使用 `npm --prefix web run build`，包含类型检查。构建生成 `src/erp_agent/api/static/`，源码与产物同步提交，不手改构建文件。普通 Python 启动使用已提交产物，无需 Node；开发及重新构建需要 Node >= 22.12。
 - Vue Router 使用 Hash 路由保存项目、步骤及复核标签，兼容既有地址和 Python 静态资源服务；刷新、重新登录及后台任务完成不重置当前步骤。后台响应不得覆盖新项目或保存期间新增的编辑，过期会话重新加载服务端状态。
