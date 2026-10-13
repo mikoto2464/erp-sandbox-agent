@@ -119,5 +119,5 @@ class ReadingMerger:
         model = ", ".join(dict.fromkeys(p.result.model for p in parts))
         result = ReadingResult(ProblemSpec(title, tuple(facts.values())),
                                RuleSet(tuple(rules.values())), unique_issues, model,
-                               prompt_version="reader-13")
+                               prompt_version="reader-14")
         return replace(result, raw_response=dumps(editable_reading(result)))

@@ -10,7 +10,7 @@ from erp_agent.application.input_sources import text_source
 from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.application.ports import LLMRequest, LLMResponse
 from erp_agent.application.reader import StructuredReader
-from erp_agent.application.reading.roles import ReaderLimits
+from erp_agent.application.reading.roles import ReaderLimits, ExtractionRole
 from erp_agent.domain.errors import ERPError
 from tests.helpers import Control, FakeLLM, snapshot
 
@@ -84,7 +84,7 @@ class MemoryTests(unittest.TestCase):
                 )
 
         client = Client()
-        reader = StructuredReader(client, limits=ReaderLimits(12000, 4, 1))
+        reader = StructuredReader(client, limits=ReaderLimits(12000, 4, 1), facts_role=ExtractionRole("facts"), rules_role=ExtractionRole("rules"))
         scope = self.memory.scope("project", 0, "same-input")
         with self.assertRaises(ERPError):
             reader.read((document,), Control(), memory=scope)

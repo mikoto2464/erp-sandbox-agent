@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import dataclass
 from importlib.resources import files
 
@@ -16,7 +17,7 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-1"
+DISPATCH_VERSION = "dispatcher-2"
 DISPATCH_SCHEMA = object_schema(
     {
         "difficulty": {"type": "string", "enum": ["simple", "moderate", "complex"]},
@@ -30,6 +31,7 @@ DISPATCH_SCHEMA = object_schema(
             ),
         },
         "summary": TEXT,
+        "reuse_scope": {"type": "string", "enum": ["none", "same_table"]},
     }
 )
 
@@ -46,6 +48,58 @@ class DispatchDecision:
     assignments: tuple[ModelAssignment, ...]
     summary: str
     fallback: bool = False
+    reuse_scope: str = "none"
+
+
+def table_dispatch_key(request: LLMRequest) -> str | None:
+    if not request.task or request.task.agent != "Reader" or request.schema_name != "erp_reading":
+        return None
+    try:
+        data = obj(loads(request.user))
+        if any(k in data for k in ("error", "errors", "previous_output")):
+            return None
+        documents = array(data.get("documents"))
+        if len(documents) != 1:
+            return None
+        document = obj(documents[0])
+        blocks = [obj(value) for value in array(document.get("blocks"))]
+        if not blocks or any("table" not in block for block in blocks):
+            return None
+        cells = [array(cell) for block in blocks for cell in array(block["table"])]
+        if any(cell[5] or cell[4] != 1 for cell in cells):
+            return None
+        # 表头、结构与输入量一致才复用；规则、合并格或修复重新评估。
+        if any(
+            any(
+                marker in str(cell[2])
+                for marker in ("公式", "必须", "不得", "扣分", "限制", "违约")
+            )
+            for cell in cells
+        ):
+            return None
+        shape = sorted({(str(cell[1]), str(cell[4]), str(cell[6])) for cell in cells})
+        headers = sorted(
+            {
+                str(ref)
+                for group in array(document.get("table_context_groups", []))
+                for ref in array(obj(group).get("column_header_ids", []))
+            }
+        )
+        if not headers:
+            return None
+        descriptor = {
+            "source": document["document_id"],
+            "blocks": [b["block_index"] for b in blocks],
+            "shape": shape,
+            "headers": headers,
+            "notes": document.get("file_notes"),
+            "size_group": len(request.user) // 3000,
+            "system": request.system,
+            "schema": request.schema_json,
+        }
+        return hashlib.sha256(dumps(descriptor).encode()).hexdigest()
+    except (ERPError, IndexError, KeyError):
+        return None
 
 
 def _samples(value: object, limit: int) -> list[str]:
@@ -95,6 +149,7 @@ def task_material(request: LLMRequest) -> JSONObject:
         "input_chars": len(request.system) + len(request.user) + len(request.schema_json),
         "requested_output_tokens": request.max_output_tokens,
         "has_repair": any(key in data for key in ("error", "errors", "previous_output")),
+        "can_reuse_same_table": table_dispatch_key(request) is not None,
         "keys": list(data),
         "instructions": request.system[:1000],
         "content_sample": sample,
@@ -168,7 +223,8 @@ class ModelDispatcher:
             )
         )
         root = obj(
-            loads(normalize_model_json(response.content)), {"difficulty", "assignments", "summary"}
+            loads(normalize_model_json(response.content)),
+            {"difficulty", "assignments", "summary", "reuse_scope"},
         )
         difficulty = string(root["difficulty"])
         if difficulty not in {"simple", "moderate", "complex"}:
@@ -188,4 +244,9 @@ class ModelDispatcher:
         summary = string(root["summary"], 800).strip()
         if not summary:
             raise ERPError("dispatch_contract", "主 Agent 未说明任务分配依据。")
-        return DispatchDecision(difficulty, tuple(assignments), summary)
+        reuse_scope = string(root["reuse_scope"])
+        if reuse_scope not in {"none", "same_table"}:
+            raise ERPError("dispatch_contract", "调度复用范围无效。")
+        if difficulty != "simple":
+            reuse_scope = "none"
+        return DispatchDecision(difficulty, tuple(assignments), summary, reuse_scope=reuse_scope)

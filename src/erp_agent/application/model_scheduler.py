@@ -2,7 +2,12 @@ import hashlib
 import threading
 
 from erp_agent.application.contracts import JSONObject
-from erp_agent.application.model_dispatch import DispatchDecision, ModelAssignment, ModelDispatcher
+from erp_agent.application.model_dispatch import (
+    DispatchDecision,
+    ModelAssignment,
+    ModelDispatcher,
+    table_dispatch_key,
+)
 from erp_agent.application.ports import (
     LLMRequest,
     LLMResponse,
@@ -69,6 +74,8 @@ class ScheduledLLMClient:
         self.dispatcher = dispatcher or ModelDispatcher()
         self._attempts: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._dispatch_cache: dict[str, tuple[DispatchDecision, int]] = {}
+        self._dispatch_pending: dict[str, threading.Event] = {}
 
     @property
     def configured(self) -> bool:
@@ -213,8 +220,46 @@ class ScheduledLLMClient:
         if not eligible:
             raise ERPError("llm_input_limit", "任务输入超过所有协作模型的上限，请缩小任务。", 413)
         child, dispatch = self._task(request)
+        reused = False
         if len(self.models) > 1:
-            decision = self._dispatch(request, eligible, control, child, dispatch)
+            key = table_dispatch_key(request)
+            if key:
+                key += ":" + ",".join(m.preset_id for m in eligible)
+            owner = False
+            if key:
+                while True:
+                    self._check(control)
+                    with self._lock:
+                        cached = self._dispatch_cache.get(key)
+                        if cached and cached[1] < 8:
+                            decision = cached[0]
+                            self._dispatch_cache[key] = (decision, cached[1] + 1)
+                            reused = True
+                            break
+                        pending = self._dispatch_pending.get(key)
+                        if pending is None:
+                            self._dispatch_pending[key] = threading.Event()
+                            owner = True
+                            break
+                    pending.wait(0.2)
+            if not reused:
+                try:
+                    decision = self._dispatch(request, eligible, control, child, dispatch)
+                    if owner and decision.reuse_scope == "same_table" and not decision.fallback:
+                        with self._lock:
+                            self._dispatch_cache[key] = (decision, 1)
+                finally:
+                    if owner:
+                        with self._lock:
+                            self._dispatch_pending.pop(key).set()
+            elif control:
+                report_task(
+                    control,
+                    dispatch,
+                    "cached",
+                    difficulty=decision.difficulty,
+                    dispatch_reason="复用主 Agent 对同表普通数据行的授权分配；额度仍实时检查。",
+                )
         else:
             reason = "仅一个可用模型，直接使用当前模型，不额外请求主 Agent 分配。"
             decision = DispatchDecision(
@@ -231,6 +276,7 @@ class ScheduledLLMClient:
                 difficulty=decision.difficulty,
                 dispatch_reason=decision.summary,
                 dispatch_fallback=decision.fallback,
+                dispatch_reused=reused,
                 coordinator=dispatch.id if len(self.models) > 1 else None,
                 stage="model_execution",
             )

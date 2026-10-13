@@ -179,6 +179,12 @@ function duration(task: AgentTask) {
                 >
               </p>
               <p>{{ task.assignment_reason || task.dispatch_reason }}</p>
+              <p
+                v-if="task.dispatch_reused"
+                class="muted"
+              >
+                复用主 Agent 对同表数据的分配，当前并发额度实时检查。
+              </p>
               <details
                 v-if="task.model_loads?.length"
                 class="dispatch-loads"

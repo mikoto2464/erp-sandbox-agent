@@ -8,10 +8,20 @@ from erp_agent.application.ports import LLMResponse
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.reading.batches import DocumentBatcher
 from erp_agent.application.reading.coverage import missing_table_rows
-from erp_agent.application.reading.roles import ReaderLimits, ExtractionRole
 from erp_agent.application.reading.review import LinkReviewRole
+from erp_agent.application.reading.roles import ExtractionRole, ReaderLimits
 from erp_agent.domain.errors import Cancelled, ERPError
-from erp_agent.domain.models import Evidence, Fact, KnowledgeState, ProblemSpec, ReadingResult, RuleSet, SourceDocument
+from erp_agent.domain.models import (
+    Evidence,
+    Fact,
+    KnowledgeState,
+    ProblemSpec,
+    ReadingResult,
+    Rule,
+    RuleSet,
+    SourceDocument,
+    TableEvidenceContext,
+)
 from tests.helpers import Control, docx_bytes
 
 
@@ -25,7 +35,7 @@ class RowClient:
         self.calls.append(request)
         payload = loads(request.user)
         facts, rules = [], []
-        if payload['role'] == 'facts':
+        if payload['role'] in {'facts', 'reading'}:
             for document in payload['documents']:
                 for block in document['blocks']:
                     if 'table' not in block:
@@ -45,6 +55,30 @@ class RowClient:
 
 
 class ReaderPipelineTests(unittest.TestCase):
+    def test_default_reader_formats_small_table_once_and_keeps_rules(self):
+        document = self.table(8)
+        class Client(RowClient):
+            def generate(self, request):
+                response = super().generate(request)
+                data = loads(response.content)
+                data['rules'] = [{'id': 'limit', 'name': '订单用途', 'expression': '详单为待竞订单池',
+                                  'state': 'known', 'evidence_ids': [document.evidence[0].id],
+                                  'explanation': ''}]
+                # 实际生产使用紧凑行输出，解码后仍是完整规范结构。
+                return LLMResponse(dumps({'title': data['title'],
+                    'fact_rows': [[f[k] if k != 'evidence_ids' else '|'.join(f[k])
+                                  for k in ('id', 'category', 'entity_id', 'entity_name', 'key', 'value',
+                                            'value_type', 'unit', 'state', 'evidence_ids', 'conversion', 'explanation')]
+                                  for f in data['facts']],
+                    'rule_rows': [[r['id'], r['name'], r['expression'], r['state'], '|'.join(r['evidence_ids']), r['explanation']]
+                                  for r in data['rules']], 'issues': []}), 'test')
+        client = Client()
+        result = StructuredReader(client).read((document,), Control())
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 8)
+        self.assertEqual(len(result.rules.rules), 1)
+        self.assertFalse(any(i.code == 'validation.rule_source' for i in result.issues))
+
     def table(self, size=14):
         rows = [['订单', '数量']] + [[str(i), str(i * 10)] for i in range(1, size + 1)]
         xml = '<w:p><w:r><w:t>待竞订单池</w:t></w:r></w:p><w:tbl>'
@@ -67,7 +101,7 @@ class ReaderPipelineTests(unittest.TestCase):
             self.assertLessEqual(len(request.system) + len(request.user), 15000)
             payload = loads(request.user)
             self.assertEqual(len(payload['documents']), 1)
-            if payload['role'] != 'facts':
+            if payload['role'] not in {'facts', 'reading'}:
                 continue
             covered.update(payload['focus_evidence_ids'])
             doc = payload['documents'][0]
@@ -111,7 +145,7 @@ class ReaderPipelineTests(unittest.TestCase):
                 eid, text = document['blocks'][0]['paragraph']
                 fact = Fact('cash', 'initial', 'company', '公司', 'initial_cash',
                             '200' if '200' in text else '100', 'number', '元', KnowledgeState.KNOWN, (eid,))
-                result = ReadingResult(ProblemSpec('题目', (fact,) if payload['role'] == 'facts' else ()),
+                result = ReadingResult(ProblemSpec('题目', (fact,) if payload['role'] in {'facts', 'reading'} else ()),
                                        RuleSet(()), (), 'test')
                 return LLMResponse(dumps(editable_reading(result)), 'test')
 
@@ -139,7 +173,7 @@ class ReaderPipelineTests(unittest.TestCase):
                 return super().generate(request)
 
         client = Client()
-        result = StructuredReader(client, limits=ReaderLimits(30000, 12, 1)).read((document,), Control())
+        result = StructuredReader(client, limits=ReaderLimits(30000, 12, 1), facts_role=ExtractionRole('facts'), rules_role=ExtractionRole('rules')).read((document,), Control())
         self.assertEqual(sum(loads(r.user)['role'] == 'facts' for r in client.calls), 1)
         self.assertGreater(sum(loads(r.user)['role'] == 'rules' for r in client.calls), 1)
         self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 8)
@@ -150,7 +184,7 @@ class ReaderPipelineTests(unittest.TestCase):
         class Client(RowClient):
             def generate(self, request):
                 payload = loads(request.user)
-                if payload['role'] == 'facts' and len(payload['focus_evidence_ids']) > 7:
+                if payload['role'] in {'facts', 'reading'} and len(payload['focus_evidence_ids']) > 7:
                     self.calls.append(request)
                     raise ERPError('llm_gateway_timeout', 'HTTP 504', 504)
                 return super().generate(request)
@@ -164,7 +198,7 @@ class ReaderPipelineTests(unittest.TestCase):
         client = RowClient()
         result = StructuredReader(client, limits=ReaderLimits(15000, 3, 1)).read((document,), Control())
         requests = [loads(r.user) for r in client.calls]
-        self.assertEqual(sum(r['role'] == 'rules' for r in requests), 1)
+        self.assertEqual(sum(r['role'] == 'rules' for r in requests), 0)
         self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 8)
 
     def test_cancellation_after_call_prevents_next_subrole(self):
@@ -186,6 +220,51 @@ class ReaderPipelineTests(unittest.TestCase):
         self.assertEqual(''.join(unit.text for batch in batches for unit in batch.units),
                          document.blocks[0].text)
         self.assertTrue(all(len(dumps(batch.payload())) <= 10000 for batch in batches))
+
+    def test_numbered_rule_sentences_stay_together(self):
+        document = text_source('规则', '1. 招聘后开始计薪。\n2. 每季支付工资。\n3. 离职需要赔偿。', 'manual_')
+        batches = DocumentBatcher().batches((document,), 12000, 16)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0].units), 3)
+
+    def test_review_skips_repeated_headers_but_checks_cross_batch_rules(self):
+        fact = Fact('salary', 'worker', 'worker', '工人', 'salary', '100', 'number', '元',
+                    KnowledgeState.KNOWN, ('header', 'value'))
+        rule = Rule('payment', '工人工资支付', '工人每季付薪', KnowledgeState.KNOWN, ('rule',))
+        evidence = (Evidence('header', 'doc', '表头', '月薪'),
+                    Evidence('value', 'doc', '数据格', '100',
+                             TableEvidenceContext(1, 1, 0, column_header_ids=('header',))),
+                    Evidence('rule', 'doc', '另一章节', '工人每季付薪'))
+        client = RowClient()
+        groups = {'header': '0', 'value': '1', 'rule': '2'}
+        reviewer = LinkReviewRole()
+        ordinary = ReadingResult(ProblemSpec('题目', (fact,)), RuleSet(()), (), 'test')
+        self.assertEqual(reviewer.review(ordinary, evidence, client, Control(), 12000, 0, groups), ())
+        self.assertEqual(client.calls, [])
+
+        class Client:
+            configured = True
+            calls = []
+
+            def generate(self, request):
+                self.calls.append(request)
+                return LLMResponse(dumps({'issues': []}), 'test')
+
+        client = Client()
+        linked = ReadingResult(ordinary.problem, RuleSet((rule,)), (), 'test')
+        reviewer.review(linked, evidence, client, Control(), 12000, 0, groups)
+        self.assertEqual(len(client.calls), 1)
+        material = loads(client.calls[0].user)
+        self.assertEqual([f['id'] for f in material['facts']], ['salary'])
+        self.assertEqual([r['id'] for r in material['rules']], ['payment'])
+
+        worker_count = Fact('count', 'worker', 'worker', '工人', 'count', '2', 'integer', '',
+                            KnowledgeState.KNOWN, ('rule',))
+        client.calls.clear()
+        attributes = ReadingResult(ProblemSpec('题目', (fact, worker_count)), RuleSet(()), (), 'test')
+        reviewer.review(attributes, evidence, client, Control(), 12000, 0, groups)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual({f['id'] for f in loads(client.calls[0].user)['facts']}, {'salary', 'count'})
 
     def test_file_annotation_is_attached_to_all_relevant_table_batches(self):
         document = self.table()

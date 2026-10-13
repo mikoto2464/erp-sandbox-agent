@@ -9,7 +9,7 @@ from erp_agent.adapters.jobs import JobControl
 from erp_agent.adapters.model_settings import ModelSettingsService
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.application.contracts import decimal, dumps, loads
-from erp_agent.application.model_dispatch import task_material
+from erp_agent.application.model_dispatch import table_dispatch_key, task_material
 from erp_agent.application.model_scheduler import ModelCapacity, ScheduledLLMClient
 from erp_agent.application.ports import LLMRequest, LLMResponse, ModelBinding, TaskContext
 from erp_agent.application.task_reporting import TaskLLMClient
@@ -29,6 +29,7 @@ def choice(preset_id, difficulty="complex", alternative=None):
                 "difficulty": difficulty,
                 "assignments": assignments,
                 "summary": "评估任务内容并结合模型负载分配。",
+                "reuse_scope": "none",
             }
         ),
         "main",
@@ -36,6 +37,46 @@ def choice(preset_id, difficulty="complex", alternative=None):
 
 
 class ModelSchedulingTests(unittest.TestCase):
+    def test_main_agent_authorizes_same_table_reuse_and_repair_gets_new_assignment(self):
+        dispatches, workers = [], []
+        class Client:
+            configured = True
+            def generate(self, request):
+                if request.schema_name == 'erp_model_dispatch':
+                    dispatches.append(loads(request.user))
+                    response = loads(choice('helper', 'simple').content)
+                    response['reuse_scope'] = 'same_table'
+                    return LLMResponse(dumps(response), 'main')
+                workers.append(request)
+                return LLMResponse('{}', 'helper')
+        models = tuple(ModelBinding(name, name, 1, {'model': name, 'priority': priority,
+                        'max_parallel': 1, 'max_input_chars': 15000}, Client())
+                        for name, priority in [('main', 200), ('helper', 100)])
+        scheduled = ScheduledLLMClient(models, ModelCapacity())
+        requests = []
+        for row in range(3):
+            document = {'document_id': 'd', 'blocks': [{'block_index': 1,
+                        'table': [[row, 0, str(10 + row), f'e{row}', 1, '', 'General']]}],
+                        'table_context_groups': [{'column_header_ids': ['header']}], 'file_notes': []}
+            request = LLMRequest('读题', dumps({'role': 'reading', 'documents': [document]}), 'erp_reading', '{}',
+                                 task=TaskContext(str(row), 'Reader', '读题', '详单'))
+            self.assertIsNotNone(table_dispatch_key(request))
+            requests.append(request)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            list(executor.map(scheduled.generate, requests))
+        self.assertEqual(len(dispatches), 1)
+        self.assertEqual(len(workers), 3)
+        for _ in range(6):
+            scheduled.generate(request)
+        self.assertEqual(len(dispatches), 2)
+        material = loads(request.user)
+        material['error'] = '单位需修正'
+        repaired = LLMRequest('读题', dumps(material), 'erp_reading', '{}', task=request.task)
+        self.assertIsNone(table_dispatch_key(repaired))
+        scheduled.generate(repaired)
+        self.assertEqual(len(dispatches), 3)
+        self.assertEqual(scheduled.capacity.used, {'main': 0, 'helper': 0})
+
     def test_task_sample_contains_content_and_excludes_previous_response(self):
         document = {
             "document_id": "doc",

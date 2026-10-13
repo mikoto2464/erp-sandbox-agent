@@ -429,7 +429,7 @@ class WebTests(unittest.TestCase):
                 self.llm.response = dumps({'issues': []})
             if request.schema_name == 'erp_reading':
                 available = set(payload['focus_evidence_ids'])
-                self.llm.response = output() if payload['role'] == 'facts' and manual_id in available else dumps(
+                self.llm.response = output() if payload['role'] in {'facts', 'reading'} and manual_id in available else dumps(
                     {'title': '手动题目', 'facts': [], 'rules': [], 'issues': []})
             return original_generate(request)
 

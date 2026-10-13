@@ -49,6 +49,9 @@ class StructuredReader:
         self.client_factory = client_factory
         self.limits = limits or ReaderLimits()
         self.batcher = batcher or DocumentBatcher()
+        self.combined_role = (
+            ExtractionRole("reading") if facts_role is None and rules_role is None else None
+        )
         self.facts_role = facts_role or ExtractionRole("facts")
         self.rules_role = rules_role or ExtractionRole("rules")
         self.merger = merger or ReadingMerger()
@@ -67,11 +70,8 @@ class StructuredReader:
             self.limits.max_request_chars,
             getattr(client, "max_input_chars", self.limits.max_request_chars),
         ) - getattr(client, "request_overhead_chars", 0)
-        overhead = (
-            max(len(self.facts_role.system), len(self.rules_role.system))
-            + max(len(self.facts_role.schema), len(self.rules_role.schema))
-            + 2200
-        )
+        roles = (self.combined_role,) if self.combined_role else (self.facts_role, self.rules_role)
+        overhead = max(len(role.system) + len(role.schema) for role in roles) + 2200
         if max_chars <= overhead:
             raise ERPError(
                 "reading_input_limit",
@@ -134,7 +134,11 @@ class StructuredReader:
             task = TaskContext(
                 key,
                 "Reader",
-                "参数提取" if role.name == "facts" else "规则整理",
+                "整理参数与规则"
+                if role.name == "reading"
+                else "参数提取"
+                if role.name == "facts"
+                else "规则整理",
                 object_name,
                 "reader",
             )
@@ -151,9 +155,7 @@ class StructuredReader:
                     batch_control.report_task(task_id, changes)
 
             role_control = RoleControl()
-            role_client = TaskLLMClient(
-                client, role_control, task
-            )
+            role_client = TaskLLMClient(client, role_control, task)
             report_task(control, task, "queued", evidence_count=len(batch.focus_ids))
             batch_control.checkpoint("reading_" + role.name)
             cached = memory.get(key) if memory else None
@@ -200,7 +202,13 @@ class StructuredReader:
                         except Cancelled:
                             raise
                         except ERPError as failure:
-                            name = "参数提取" if role.name == "facts" else "规则整理"
+                            name = (
+                                "整理参数与规则"
+                                if role.name == "reading"
+                                else "参数提取"
+                                if role.name == "facts"
+                                else "规则整理"
+                            )
                             raise ERPError(
                                 failure.code,
                                 f"{batch.document.source.filename} · {name}：{failure.message}",
@@ -232,7 +240,13 @@ class StructuredReader:
                         )
                     else:
                         report_task(control, task, "failed", error=error.message)
-                        name = "参数提取" if role.name == "facts" else "规则整理"
+                        name = (
+                            "整理参数与规则"
+                            if role.name == "reading"
+                            else "参数提取"
+                            if role.name == "facts"
+                            else "规则整理"
+                        )
                         raise ERPError(
                             error.code,
                             f"{batch.document.source.filename} · {name}：{error.message}",
@@ -265,6 +279,8 @@ class StructuredReader:
 
         def read_batch(batch: ReadingBatch) -> tuple[ReadingPart, ...]:
             try:
+                if self.combined_role:
+                    return run_role(self.combined_role, batch)
                 parameters = run_role(self.facts_role, batch)
                 rules = tuple(
                     part
@@ -320,8 +336,17 @@ class StructuredReader:
         reading = self.merger.merge(tuple(parts))
         evidence = tuple(e for doc in documents for e in doc.evidence)
         if len({(part.batch.document.source.id, part.batch.focus_ids) for part in parts}) > 1:
+            review_groups = {
+                eid: str(index) for index, part in enumerate(parts) for eid in part.batch.focus_ids
+            }
             findings = self.reviewer.review(
-                reading, evidence, client, control, max_chars, len(parts)
+                reading,
+                evidence,
+                client,
+                control,
+                max_chars,
+                len(parts),
+                review_groups=review_groups if self.combined_role else None,
             )
             reading = replace(reading, issues=tuple(dict.fromkeys(reading.issues + findings)))
         source_issues = tuple(

@@ -2,16 +2,20 @@ from dataclasses import dataclass, replace
 from importlib.resources import files
 
 from erp_agent.application.contracts import (
+    CATEGORIES,
     FACT_SCHEMA,
     ISSUE_SCHEMA,
+    NULLABLE_TEXT,
     RULE_SCHEMA,
     TEXT,
     JSONObject,
+    array,
     decode_reading,
     dumps,
     loads,
     obj,
     object_schema,
+    string,
     to_json,
 )
 from erp_agent.application.memory import RoleMemory
@@ -26,7 +30,7 @@ from erp_agent.domain.models import Fact, ReadingResult, RuleSet
 @dataclass(frozen=True)
 class ReaderLimits:
     max_request_chars: int = 12_000
-    max_batch_units: int = 4
+    max_batch_units: int = 16
     concurrency: int = 2
 
     def __post_init__(self) -> None:
@@ -47,7 +51,7 @@ class ReadingPart:
 
 class ExtractionRole:
     def __init__(self, name: str) -> None:
-        if name not in {"facts", "rules"}:
+        if name not in {"facts", "rules", "reading"}:
             raise ValueError("未知读题提取子角色。")
         self.name = name
         resources = files("erp_agent").joinpath("prompts")
@@ -66,6 +70,33 @@ class ExtractionRole:
             )
         )
         self.system = shared + "\n" + role
+        if name == "reading":
+            self.schema = dumps(
+                object_schema(
+                    {
+                        "title": TEXT,
+                        "fact_rows": {
+                            "type": "array",
+                            "items": {"type": "array", "items": NULLABLE_TEXT},
+                        },
+                        "rule_rows": {
+                            "type": "array",
+                            "items": {"type": "array", "items": NULLABLE_TEXT},
+                        },
+                        "issues": {"type": "array", "items": ISSUE_SCHEMA},
+                    }
+                )
+            )
+            self.system += (
+                "\n为减少重复键，facts 使用 fact_rows，每行依次为 "
+                "[id,category,entity_id,entity_name,key,value,value_type,unit,state,evidence_ids,conversion,explanation]；"
+                "rules 使用 rule_rows，每行依次为 [id,name,expression,state,evidence_ids,explanation]。"
+                "evidence_ids 在行内是用 | 分隔的来源 ID 字符串，无来源用空字符串；"
+                "仅 value 可为 null，不省略行或列。category 只能为 "
+                + "/".join(CATEGORIES)
+                + "；value_type 为 number/text/integer，state 为 known/assumed/conflicted/missing；"
+                "conversion 为 identity/percent_to_ratio/wan_to_yuan。unit 为规范单位，未知用空字符串。"
+            )
 
     def extract(
         self,
@@ -113,7 +144,7 @@ class ExtractionRole:
                     dumps(payload),
                     "erp_reading",
                     self.schema,
-                    max_output_tokens=8000 if self.name == "facts" else 4000,
+                    max_output_tokens=8000 if self.name != "rules" else 4000,
                     retries=0,
                 )
             )
@@ -142,7 +173,7 @@ class ExtractionRole:
                     dumps(payload),
                     "erp_reading",
                     self.schema,
-                    max_output_tokens=8000 if self.name == "facts" else 4000,
+                    max_output_tokens=8000 if self.name != "rules" else 4000,
                     retries=0,
                 )
             )
@@ -155,7 +186,7 @@ class ExtractionRole:
                 rules=RuleSet(()),
                 issues=tuple(i for i in result.issues if i.target not in other_ids),
             )
-        else:
+        elif self.name == "rules":
             other_ids = {f.id for f in result.problem.facts}
             result = replace(
                 result,
@@ -166,14 +197,49 @@ class ExtractionRole:
 
     def _decode(self, content: str, model: str, batch: ReadingBatch) -> ReadingResult:
         data = obj(loads(normalize_model_json(content)))
-        expected = {"title", self.name, "issues"}
+        if self.name == "reading" and set(data) == {"title", "fact_rows", "rule_rows", "issues"}:
+            normalized = {"title": data["title"], "issues": data["issues"]}
+            columns = {
+                "facts": (
+                    "id",
+                    "category",
+                    "entity_id",
+                    "entity_name",
+                    "key",
+                    "value",
+                    "value_type",
+                    "unit",
+                    "state",
+                    "evidence_ids",
+                    "conversion",
+                    "explanation",
+                ),
+                "rules": ("id", "name", "expression", "state", "evidence_ids", "explanation"),
+            }
+            for key, names in columns.items():
+                rows = []
+                for row in array(data["fact_rows" if key == "facts" else "rule_rows"]):
+                    cells = array(row)
+                    if len(cells) != len(names):
+                        raise ERPError("invalid_contract", "紧凑读题条目列数不符合契约。")
+                    item = dict(zip(names, cells, strict=True))
+                    refs = string(item["evidence_ids"])
+                    item["evidence_ids"] = refs.split("|") if refs else []
+                    rows.append(item)
+                normalized[key] = rows
+            data = normalized
+        expected = (
+            {"title", "facts", "rules", "issues"}
+            if self.name == "reading"
+            else {"title", self.name, "issues"}
+        )
         if set(data) not in (expected, {"title", "facts", "rules", "issues"}):
             raise ERPError("invalid_contract", "读题子角色输出字段不符合契约。")
         # Accept historic full-contract fixtures; production schema contains only this role.
         data = {
             "title": data.get("title", ""),
-            "facts": data.get("facts", []) if self.name == "facts" else [],
-            "rules": data.get("rules", []) if self.name == "rules" else [],
+            "facts": data.get("facts", []) if self.name != "rules" else [],
+            "rules": data.get("rules", []) if self.name != "facts" else [],
             "issues": data.get("issues", []),
         }
         recover_numbers(data)
@@ -184,7 +250,7 @@ class ExtractionRole:
         assert isinstance(context, list)
         allowed.update(str(row[0]) for row in context if isinstance(row, list))
         allowed.update(e.id for note in batch.notes for e in note.evidence)
-        values = result.problem.facts if self.name == "facts" else result.rules.rules
+        values = result.problem.facts + result.rules.rules
         for value in values:
             if any(eid not in allowed for eid in value.evidence_ids):
                 raise ERPError("reading_batch_source", "提取条目引用了当前批次以外的原文来源。")

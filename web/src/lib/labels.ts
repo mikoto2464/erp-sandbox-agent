@@ -77,6 +77,7 @@ export const stageNames: Record<string, string> = {
   saving_artifact: '保存导出文件',
   reading: '整理题目',
   reading_structure: '划分资料与表格',
+  reading_reading: '整理参数与规则',
   reading_facts: '提取参数与订单',
   reading_rules: '整理规则与限制',
   reading_linking: '合并条目与关联来源',

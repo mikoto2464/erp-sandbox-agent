@@ -47,7 +47,7 @@ class Settings:
     llm_thinking_mode: str = "default"
     llm_thinking_budget: int = 8192
     reader_max_request_chars: int = 12_000
-    reader_max_batch_units: int = 4
+    reader_max_batch_units: int = 16
     reader_concurrency: int = 2
     default_solver: SolverMode = SolverMode.LLM_ONLY
     libreoffice: str = "libreoffice"
@@ -108,7 +108,7 @@ class Settings:
             llm_thinking_mode=os.getenv("ERP_LLM_THINKING_MODE", "default"),
             llm_thinking_budget=int(os.getenv("ERP_LLM_THINKING_BUDGET", "8192")),
             reader_max_request_chars=int(os.getenv("ERP_READER_MAX_REQUEST_CHARS", "12000")),
-            reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "4")),
+            reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "16")),
             reader_concurrency=int(os.getenv("ERP_READER_CONCURRENCY", "2")),
             default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
