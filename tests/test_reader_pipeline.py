@@ -8,7 +8,7 @@ from erp_agent.application.ports import LLMResponse
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.reading.batches import DocumentBatcher
 from erp_agent.application.reading.coverage import missing_table_rows
-from erp_agent.application.reading.roles import ReaderLimits
+from erp_agent.application.reading.roles import ReaderLimits, ExtractionRole
 from erp_agent.application.reading.review import LinkReviewRole
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Evidence, Fact, KnowledgeState, ProblemSpec, ReadingResult, RuleSet, SourceDocument
@@ -80,6 +80,21 @@ class ReaderPipelineTests(unittest.TestCase):
         self.assertEqual((result.problem.years, result.problem.periods_per_year), (4, 4))
         self.assertEqual(decode_reading(result.raw_response, result.model).problem.facts,
                          tuple(f for f in result.problem.facts if not f.id.startswith('default_')))
+
+    def test_invalid_model_number_keeps_other_fields_and_a_located_manual_question(self):
+        document = text_source('题目', '工资50元，订单数量待明确', 'numbers')
+        batch = DocumentBatcher().batches((document,), 15000, 4)[0]
+        refs = (document.evidence[0].id,)
+        facts = tuple(Fact('f' + str(i), 'other', 'item' + str(i), '条目' + str(i), 'quantity',
+                          value, 'number', '', KnowledgeState.KNOWN, refs)
+                      for i, value in enumerate(('50.000000000000000', '1,000', '1e20', '0.050000000000000003', '编号001-A')))
+        payload = editable_reading(ReadingResult(ProblemSpec('题目', facts), RuleSet(()), (), 'test'))
+        result = ExtractionRole('facts')._decode(dumps(payload), 'test', batch)
+        self.assertEqual([f.value for f in result.problem.facts], ['50', '1000', None, None, None])
+        self.assertEqual(len(result.issues), 3)
+        self.assertTrue(all(i.evidence_ids == refs and '请查看标出的原文' in i.message for i in result.issues))
+        self.assertTrue(all(f.state == KnowledgeState.MISSING for f in result.problem.facts[2:]))
+        self.assertIn('1e20', result.problem.facts[2].explanation)
 
     def test_cross_file_equal_values_merge_and_conflicts_keep_both_sources(self):
         documents = tuple(text_source(name, '初始资金' + value + '元', 'doc_' + name)

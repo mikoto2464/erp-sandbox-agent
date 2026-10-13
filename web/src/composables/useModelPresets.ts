@@ -13,7 +13,14 @@ export function useModelPresets(workspace: Workspace) {
   );
   function fill(preset: ModelPreset) {
     selectedId.value = preset.id;
-    draft.value = { ...preset, api_key: '', clear_api_key: false };
+    draft.value = {
+      ...preset,
+      priority: preset.priority ?? 100,
+      max_parallel: preset.max_parallel ?? 2,
+      scheduling_enabled: preset.scheduling_enabled ?? false,
+      api_key: '',
+      clear_api_key: false,
+    };
     dirty.value = false;
     testResult.value = '';
   }
@@ -43,6 +50,9 @@ export function useModelPresets(workspace: Workspace) {
       revision: 0,
       name: '',
       configured: false,
+      priority: 100,
+      max_parallel: 2,
+      scheduling_enabled: false,
       provider: 'openai_chat',
       base_url: workspace.catalog.value!.providers.find(
         (provider) => provider.id === 'openai_chat',
@@ -85,7 +95,7 @@ export function useModelPresets(workspace: Workspace) {
     await post(`/api/model-presets/${id}/activate`, { expected_revision: preset.revision });
     await workspace.loadStatus();
     if (open.value) fill(workspace.catalog.value!.presets.find((preset) => preset.id === id)!);
-    workspace.notify(`已启用 ${preset.name}，新任务使用此预设。`, 'success');
+    workspace.notify(`已启用 ${preset.name}，新任务按协作模型优先级分配。`, 'success');
   }
   async function save() {
     if (!draft.value) return;
@@ -103,6 +113,9 @@ export function useModelPresets(workspace: Workspace) {
       token_parameter,
       thinking_mode,
       thinking_budget,
+      priority,
+      max_parallel,
+      scheduling_enabled,
     } = draft.value;
     const saved = await post<ModelPreset>(
       selectedId.value ? `/api/model-presets/${selectedId.value}` : '/api/model-presets',
@@ -120,6 +133,9 @@ export function useModelPresets(workspace: Workspace) {
         token_parameter,
         thinking_mode,
         thinking_budget,
+        priority,
+        max_parallel,
+        scheduling_enabled,
         ...(selectedId.value ? { expected_revision: current.value!.revision } : {}),
       },
     );

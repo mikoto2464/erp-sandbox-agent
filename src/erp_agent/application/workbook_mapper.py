@@ -4,12 +4,26 @@ from uuid import uuid4
 
 from erp_agent.application.budget_context import budget_material
 from erp_agent.application.codec import workbook_entries
-from erp_agent.application.contracts import JSONObject, TEXT, TEXTS, array, dumps, loads, obj, object_schema
+from erp_agent.application.contracts import (
+    TEXT,
+    TEXTS,
+    JSONObject,
+    array,
+    dumps,
+    loads,
+    obj,
+    object_schema,
+)
 from erp_agent.application.model_output import normalize_model_json
-from erp_agent.application.ports import LLMClient, LLMRequest, RunControl
+from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
+from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    BudgetTemplate, ProblemSnapshot, SolutionBundle, WorkbookEntry, WorkbookMapping,
+    BudgetTemplate,
+    ProblemSnapshot,
+    SolutionBundle,
+    WorkbookEntry,
+    WorkbookMapping,
 )
 from erp_agent.domain.workbook import output_sources, validate_mapping, writable_target
 
@@ -38,8 +52,14 @@ class WorkbookMapper:
                 "sheets": [s for value in array(material["sheets"])
                            for s in (obj(value),) if s["name"] in names],
             }
-            batch_entries, model = self._map_batch(solution, batch, llm, control, snapshot,
+            task = TaskContext(f"mapper:{index}", "Answerer", "表格条目对应",
+                               template.source.filename + " · " + "、".join(s.name for s in batch.sheets),
+                               "mapper")
+            base_client = llm.client if isinstance(llm, TaskLLMClient) else llm
+            batch_client = TaskLLMClient(base_client, control, task)
+            batch_entries, model = self._map_batch(solution, batch, batch_client, control, snapshot,
                                                    tuple(s.name for s in template.sheets), batch_material)
+            report_task(control, task, "succeeded", entry_count=len(batch_entries), model=model)
             entries += batch_entries
         control.checkpoint("validating_mapping")
         issues = validate_mapping(template, entries, solution, snapshot)

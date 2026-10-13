@@ -6,7 +6,13 @@ from decimal import Decimal
 from erp_agent.application.contracts import dumps, editable_reading
 from erp_agent.application.reading.roles import ReadingPart
 from erp_agent.domain.models import (
-    Fact, Issue, KnowledgeState, ProblemSpec, ReadingResult, Rule, RuleSet,
+    Fact,
+    Issue,
+    KnowledgeState,
+    ProblemSpec,
+    ReadingResult,
+    Rule,
+    RuleSet,
 )
 from erp_agent.domain.validation import UNSPECIFIED_UNITS
 
@@ -113,5 +119,5 @@ class ReadingMerger:
         model = ", ".join(dict.fromkeys(p.result.model for p in parts))
         result = ReadingResult(ProblemSpec(title, tuple(facts.values())),
                                RuleSet(tuple(rules.values())), unique_issues, model,
-                               prompt_version="reader-12")
+                               prompt_version="reader-13")
         return replace(result, raw_response=dumps(editable_reading(result)))

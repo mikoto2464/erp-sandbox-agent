@@ -1,8 +1,31 @@
 <script setup lang="ts">
+import { ref } from 'vue';
+import type { AgentTask, Job } from '../lib/types';
 import AppModal from './AppModal.vue';
 import { useWorkspaceContext } from '../composables/context';
 import { statusNames, stageNames } from '../lib/labels';
 const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWorkspaceContext();
+const expanded = ref(new Set<string>());
+const taskStatus: Record<string, string> = {
+  ...statusNames,
+  waiting: '等待模型额度',
+  cached: '复用已完成结果',
+  split: '已拆分',
+};
+function toggle(job: Job) {
+  if (expanded.value.has(job.id)) expanded.value.delete(job.id);
+  else expanded.value.add(job.id);
+}
+function tasksFor(job: Job): AgentTask[] {
+  const tasks = job.tasks || [];
+  const active = tasks.filter((t) => ['running', 'waiting', 'queued'].includes(t.status));
+  const finished = tasks.filter((t) => !['running', 'waiting', 'queued'].includes(t.status));
+  return [...active, ...finished.slice(-80).reverse()];
+}
+function duration(task: AgentTask) {
+  if (!task.started_at || !task.finished_at) return '';
+  return `${Math.max(1, Math.round((Date.parse(task.finished_at) - Date.parse(task.started_at)) / 1000))} 秒`;
+}
 </script>
 <template>
   <AppModal
@@ -20,7 +43,7 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
     <article
       v-for="job in [...jobs].reverse()"
       :key="job.id"
-      class="task-row"
+      class="task-row task-card"
     >
       <div class="task-info">
         <div class="task-row-heading">
@@ -84,6 +107,81 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
       >
         重试
       </button>
+      <div
+        v-if="job.tasks?.length"
+        class="task-detail"
+      >
+        <button
+          class="task-disclosure"
+          :aria-expanded="expanded.has(job.id)"
+          @click="toggle(job)"
+        >
+          <span>{{ expanded.has(job.id) ? '收起处理详情' : '展开处理详情' }}</span>
+          <span class="muted"
+            >{{ job.tasks.filter((t) => t.status === 'running').length }} 执行 ·
+            {{ job.tasks.filter((t) => t.status === 'waiting').length }} 等待</span
+          >
+          <span aria-hidden="true">{{ expanded.has(job.id) ? '▴' : '▾' }}</span>
+        </button>
+        <div
+          v-if="expanded.has(job.id)"
+          class="agent-tasks"
+        >
+          <article
+            v-for="task in tasksFor(job)"
+            :key="task.id"
+            class="agent-task"
+            :class="{ 'child-task': task.parent_id }"
+          >
+            <div class="task-row-heading">
+              <strong>{{ task.agent }} · {{ task.role }}</strong>
+              <span
+                class="task-state"
+                :class="task.status"
+                >{{ taskStatus[task.status] || task.status }}</span
+              >
+            </div>
+            <p class="task-object">{{ task.object }}</p>
+            <p
+              v-if="task.model || task.preset_name"
+              class="muted"
+            >
+              {{ [task.preset_name, task.model].filter(Boolean).join(' · ') }}
+            </p>
+            <p
+              v-if="task.status === 'waiting' && task.candidates"
+              class="muted"
+            >
+              等待可用模型：{{ task.candidates.join('、') }}
+            </p>
+            <p
+              v-if="task.stage && task.status === 'running'"
+              class="muted"
+            >
+              {{ stageNames[task.stage] || task.stage }}
+            </p>
+            <div class="task-metrics">
+              <span v-if="task.evidence_count">{{ task.evidence_count }} 处原文</span>
+              <span v-if="task.fact_count != null">{{ task.fact_count }} 个参数</span>
+              <span v-if="task.rule_count != null">{{ task.rule_count }} 条规则</span>
+              <span v-if="(task.attempt || 0) > 1">第 {{ task.attempt }} 次请求</span>
+              <span v-if="duration(task)">{{ duration(task) }}</span>
+            </div>
+            <p
+              v-if="task.error"
+              class="error"
+            >
+              {{ task.error }}
+            </p>
+          </article>
+          <p
+            v-if="(job.tasks?.length || 0) > tasksFor(job).length || job.archived_tasks"
+            class="muted"
+          >
+            展示当前处理与最近 80 条结束记录，完整读题结果保留在题目中。
+          </p>
+        </div>
+      </div>
     </article></AppModal
   >
 </template>

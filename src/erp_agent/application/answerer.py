@@ -6,18 +6,36 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from erp_agent.application.codec import (
-    budget_template, parsed_document, problem_snapshot, solution_bundle, workbook_entries, workbook_mapping,
+    budget_template,
+    parsed_document,
+    problem_snapshot,
+    solution_bundle,
+    workbook_entries,
+    workbook_mapping,
 )
 from erp_agent.application.contracts import JSONObject, JSONValue, integer, obj, string, to_json
-from erp_agent.application.ports import (
-    JobRunner, ModelSettings, ReportRenderer, Repository, RunControl, WorkbookRenderer,
-    WorkbookMappingAnalyzer,
-)
-from erp_agent.application.workbook_mapper import WorkbookMapper
 from erp_agent.application.memory import MemoryService
 from erp_agent.application.memory_client import MemoryLLMClient
+from erp_agent.application.ports import (
+    JobRunner,
+    ModelSettings,
+    ReportRenderer,
+    Repository,
+    RunControl,
+    TaskContext,
+    WorkbookMappingAnalyzer,
+    WorkbookRenderer,
+)
+from erp_agent.application.task_reporting import TaskLLMClient, report_task
+from erp_agent.application.workbook_mapper import WorkbookMapper
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import ArtifactManifest, OutputSource, ReportData, WorkbookEntry, WorkbookMapping
+from erp_agent.domain.models import (
+    ArtifactManifest,
+    OutputSource,
+    ReportData,
+    WorkbookEntry,
+    WorkbookMapping,
+)
 from erp_agent.domain.workbook import mapped_value, output_sources, validate_mapping
 
 
@@ -71,12 +89,14 @@ class AnswererService:
         template = budget_template(self.repository.get('template', project_id, string(data.get('template_id'), 100)))
         self._require_planned_template(report, template.source.id)
         self._check_active(project_id, 'mapping', report.solution.id, template.source.id)
-        binding = self.models.capture()
+        binding = self.models.capture_pool()
         if not binding.client.configured:
             raise ERPError('llm_not_configured', '预算表分析需要已配置的模型。', 503)
 
         def operation(control: RunControl) -> JSONValue:
-            client = binding.client
+            task = TaskContext("mapper", "Answerer", "预算表映射", template.source.filename)
+            report_task(control, task, "running")
+            client = TaskLLMClient(binding.client, control, task)
             if self.memory:
                 self.memory.remember(report.snapshot)
                 shared = self.memory.scope(project_id, report.snapshot.version,
@@ -85,6 +105,7 @@ class AnswererService:
                                         "generation": to_json(report.solution.generation)})
                 client = MemoryLLMClient(client, shared, "预算表单位与口径 " + template.source.filename)
             mapping = self.mapper.analyze(report.solution, template, client, control, report.snapshot)
+            report_task(control, task, "needs_input", entry_count=len(mapping.entries))
             control.checkpoint('saving_mapping')
             self.repository.put('mapping', project_id, mapping.id, mapping)
             return {'mapping_id': mapping.id, 'needs_input': True}

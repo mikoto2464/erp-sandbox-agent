@@ -28,6 +28,11 @@ class SQLiteRepository:
                 if record.get("status") in {"running", "queued"}:
                     record["status"] = "failed"
                     record["error"] = {"code": "server_restarted", "message": "服务重启，请重试任务。"}
+                    tasks = record.get("tasks", [])
+                    if isinstance(tasks, list):
+                        for task in tasks:
+                            if isinstance(task, dict) and task.get("status") in {"queued", "waiting", "running"}:
+                                task.update(status="failed", error="服务重启，请重试任务。")
                     connection.execute(
                         "UPDATE records SET payload=? WHERE kind='job' AND project_id=? AND id=?",
                         (dumps(record), str(record["project_id"]), str(record["id"])),

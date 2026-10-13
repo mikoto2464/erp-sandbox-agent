@@ -153,6 +153,10 @@ export function annotateIssue(
     });
 }
 export function issueAdvice(issue: Issue, fact?: Fact) {
+  if (issue.code === 'reading.invalid_number')
+    return '查看原文后修改字段的值与数据类型，再确认处理；无法确定可标记不清楚。';
+  if (issue.code === 'reading.extraction_unresolved' || issue.code === 'reading.review_unresolved')
+    return '查看标出的原文，在问题答复中说明参数、规则与适用对象，确认后保存。';
   if (issue.code === 'validation.unsupported_value')
     return fact?.value_type === 'text'
       ? '核对文字与对应原文。暂定解释可改为假设并说明。'

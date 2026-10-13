@@ -1818,7 +1818,7 @@ button:active:enabled {
   position: fixed;
   inset: 0 0 0 auto;
   margin: 0;
-  width: 420px;
+  width: 680px;
   height: 100dvh;
   max-height: 100dvh;
   max-width: 100vw;
@@ -2357,4 +2357,75 @@ button:active:enabled {
     max-width: 65%;
     margin-right: auto;
   }
+}
+
+.model-scheduling {
+  border: 1px solid var(--border, #dce3ee);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 16px 0;
+}
+.model-scheduling legend {
+  font-weight: 600;
+  padding: 0 6px;
+}
+.model-scheduling p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.task-card {
+  flex-wrap: wrap;
+}
+.task-detail {
+  width: 100%;
+}
+.task-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: #f3f6fb;
+  padding: 12px;
+  border-radius: 9px;
+  text-align: left;
+}
+.task-disclosure > .muted {
+  margin-left: auto;
+  font-size: 12px;
+}
+.agent-tasks {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  animation: surface-in 0.15s ease-out;
+}
+.agent-task {
+  border: 1px solid #e0e7f1;
+  border-radius: 10px;
+  padding: 12px;
+}
+.agent-task.child-task {
+  margin-left: 12px;
+  border-left: 3px solid #bed0ee;
+}
+.task-object {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.task-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #607087;
+  font-size: 12px;
+}
+.task-state.waiting {
+  background: #fff2d9;
+  color: #805500;
+}
+.task-state.cached,
+.task-state.split {
+  background: #edf1f7;
+  color: #55657c;
 }

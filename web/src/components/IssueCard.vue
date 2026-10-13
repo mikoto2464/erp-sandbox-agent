@@ -30,6 +30,11 @@ const title = computed(() =>
 );
 const answerInput = ref<HTMLTextAreaElement>();
 const rateIssue = computed(() => ratePeriodIssue(props.issue, fact.value));
+const extractionIssue = computed(() =>
+  ['reading.invalid_number', 'reading.extraction_unresolved', 'reading.review_unresolved'].includes(
+    props.issue.code,
+  ),
+);
 const answer = computed({
   get: () => (editable.value ? issueAnswer(editable.value, props.issue) : ''),
   set: (value) => {
@@ -39,14 +44,23 @@ const answer = computed({
   },
 });
 const unitIssue = computed(
-  () => !rateIssue.value && /UNIT|unit|单位/.test(props.issue.code + props.issue.message),
+  () =>
+    !rateIssue.value &&
+    !extractionIssue.value &&
+    /UNIT|unit|单位/.test(props.issue.code + props.issue.message),
 );
 const canAnnotate = computed(
-  () => props.issue.severity !== 'error' && (unitIssue.value || fact.value?.value === null),
+  () =>
+    (props.issue.severity !== 'error' || props.issue.code === 'reading.invalid_number') &&
+    (unitIssue.value || fact.value?.value === null),
 );
 function resolve() {
-  if (rateIssue.value && !answer.value.trim()) {
-    notify('请选择计息口径或填写对这个问题的回答。');
+  if ((rateIssue.value || extractionIssue.value) && !answer.value.trim()) {
+    notify(
+      rateIssue.value
+        ? '请选择计息口径或填写对这个问题的回答。'
+        : '请说明正确内容或明确标记不清楚。',
+    );
     answerInput.value?.focus();
     return;
   }
@@ -89,7 +103,12 @@ function annotate(choice: string) {
       <p>{{ fact.explanation }}</p>
     </details>
     <label class="issue-explanation"
-      >{{ rateIssue ? '回答这个问题 · 计息口径' : '回答这个问题（选填）'
+      >{{
+        rateIssue
+          ? '回答这个问题 · 计息口径'
+          : extractionIssue
+            ? '回答这个问题'
+            : '回答这个问题（选填）'
       }}<textarea
         ref="answerInput"
         v-model="answer"
@@ -97,7 +116,9 @@ function annotate(choice: string) {
         :placeholder="
           rateIssue
             ? '例如：这是对应完整贷款期限 / 收款期的总利率，不按每季重复计息。'
-            : '填写对上方疑问的回答、依据或暂定口径；留空按默认处理。'
+            : extractionIssue
+              ? '说明正确参数、类型及适用对象；无法确定请明确填写不清楚。'
+              : '填写对上方疑问的回答、依据或暂定口径；留空按默认处理。'
         "
       />
     </label>

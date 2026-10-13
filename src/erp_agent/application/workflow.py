@@ -5,27 +5,55 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from erp_agent.application.codec import (
-    budget_template, generation_config, parsed_document, problem_snapshot, reading_inputs,
-)
-from erp_agent.application.budget_context import budget_material
 from erp_agent.application.answerer import AnswererService
-from erp_agent.application.input_sources import input_sources
+from erp_agent.application.budget_context import budget_material
+from erp_agent.application.codec import (
+    budget_template,
+    generation_config,
+    parsed_document,
+    problem_snapshot,
+    reading_inputs,
+)
 from erp_agent.application.contracts import (
-    JSONObject, JSONValue, array, decode_plan, decode_reading, dumps, integer, obj, string, strings, to_json,
+    JSONObject,
+    JSONValue,
+    array,
+    decode_plan,
+    decode_reading,
+    dumps,
+    integer,
+    obj,
+    string,
+    strings,
+    to_json,
 )
-from erp_agent.application.ports import (
-    BudgetTemplateParser, DocumentParser, JobRunner, ModelSettings, Repository, RunControl,
-)
-from erp_agent.application.model_output import normalize_model_json
-from erp_agent.application.reader import StructuredReader
+from erp_agent.application.input_sources import input_sources
 from erp_agent.application.memory import MemoryService
 from erp_agent.application.memory_client import MemoryLLMClient
+from erp_agent.application.model_output import normalize_model_json
+from erp_agent.application.ports import (
+    BudgetTemplateParser,
+    DocumentParser,
+    JobRunner,
+    ModelSettings,
+    Repository,
+    RunControl,
+    TaskContext,
+)
+from erp_agent.application.reader import StructuredReader
 from erp_agent.application.solver import LLMStrategyGenerator, SolverService
+from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    KnowledgeState, PlanningContext, ProblemSnapshot, ReadingInputs, SearchConfig, SolveRequest,
-    SolverMode, SourceDocument,
+    KnowledgeState,
+    ParsedDocument,
+    PlanningContext,
+    ProblemSnapshot,
+    ReadingInputs,
+    SearchConfig,
+    SolveRequest,
+    SolverMode,
+    SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 
@@ -262,15 +290,23 @@ class WorkflowService:
             raise ERPError("no_documents", "请上传文件或填写手动题目后读取。")
         versions = self.repository.versions(project_id)
         expected_version = versions[0] if versions else 0
-        binding = self.model_settings.capture() if self.model_settings else None
+        binding = self.model_settings.capture_pool() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
 
         def operation(control: RunControl) -> JSONValue:
-            sources = documents + extra_sources
+            refreshed: list[ParsedDocument] = []
+            for document in documents:
+                if document.source.format == "xls" and document.parser_version == "xlrd-1":
+                    control.checkpoint("parsing")
+                    original = self.repository.get("original", project_id, document.source.id)
+                    refreshed.append(self.parser.parse(document.source,
+                        base64.b64decode(string(original["content"], 150 * 1024 * 1024))))
+            replacements = {d.source.id: d for d in refreshed}
+            sources = tuple(replacements.get(d.source.id, d) for d in documents) + extra_sources
             fingerprint = hashlib.sha256(dumps({"inputs": inputs, "sources": [d.source for d in sources],
                 "parsers": [d.parser_version for d in sources], "reader": self.reader.limits,
-                "model": binding.metadata() if binding else None, "version": "reader-12"}).encode()).hexdigest()
+                "model": binding.metadata() if binding else None, "version": "reader-13"}).encode()).hexdigest()
             memory = self.memory.scope(project_id, 0, fingerprint,
                                        tuple(d.source.id for d in documents)) if self.memory else None
             result = self.reader.read(sources, control, binding.client if binding else None, memory)
@@ -278,7 +314,7 @@ class WorkflowService:
             control.checkpoint("saving_reading")
             snapshot = ProblemSnapshot(project_id, expected_version + 1, timestamp(),
                                        tuple(d.source.id for d in documents), result,
-                                       inputs=inputs, additional_sources=extra_sources)
+                                       inputs=inputs, additional_sources=extra_sources + tuple(refreshed))
             saved = self.repository.save_snapshot(
                 project_id, obj(to_json(snapshot)), expected_version,
             )
@@ -367,14 +403,15 @@ class WorkflowService:
             integer(data.get("seed", 42), 0, 2**32 - 1),
             integer(data.get("candidates", 100), 1, 2000),
         ), PlanningContext(config, templates, previous_plan))
-        binding = self.model_settings.capture() if self.model_settings else None
+        binding = self.model_settings.capture_pool() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
 
         def operation(control: RunControl) -> JSONValue:
             generator = self.solver.generator
             if binding or isinstance(generator, LLMStrategyGenerator):
-                client = binding.client if binding else generator.llm
+                task = TaskContext("solver", "Solver", "策略生成", f"经营方案 · {snapshot.reading.problem.title}")
+                client = TaskLLMClient(binding.client if binding else generator.llm, control, task)
                 if self.memory:
                     self.memory.remember(snapshot)
                     role_memory = self.memory.scope(project_id, snapshot.version,
@@ -387,6 +424,8 @@ class WorkflowService:
                     search_parameters=mode == SolverMode.LLM_MONTE_CARLO,
                 )
             result = self.solver.solve(request, control, generator)
+            report_task(control, TaskContext("solver", "Solver", "策略生成", snapshot.reading.problem.title),
+                        "succeeded" if result.evaluation.feasible else "needs_input")
             self.repository.put("solution", project_id, result.id, result)
             return {"solution_id": result.id, "verified": result.evaluation.verified,
                     "needs_input": not result.evaluation.feasible}

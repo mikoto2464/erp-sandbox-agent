@@ -199,20 +199,21 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-12")
+        self.assertEqual(result.prompt_version, "reader-13")
         self.assertEqual(len(calls), 3)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)
         self.assertEqual(loads(calls[0].user)["documents"], loads(calls[1].user)["documents"])
 
-    def test_reader_stops_after_failed_repair(self):
+    def test_reader_requests_manual_review_after_failed_repair(self):
         document = OOXMLDocumentParser().parse(
             SourceDocument("d", "topic.docx", "hash", 0, "docx"), docx_bytes(),
         )
         llm = FakeLLM("invalid json")
-        with self.assertRaises(ERPError):
-            StructuredReader(llm).read((document,), Control())
-        self.assertEqual(len(llm.calls), 2)
+        result = StructuredReader(llm).read((document,), Control())
+        self.assertTrue(any(i.code == "reading.extraction_unresolved" and i.severity == "error"
+                            and i.evidence_ids for i in result.issues))
+        self.assertEqual(len(llm.calls), 4)
 
     def test_langchain_schema_error_repairs_once_without_retrying_transport_errors(self):
         document = OOXMLDocumentParser().parse(

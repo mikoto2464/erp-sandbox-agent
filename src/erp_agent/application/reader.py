@@ -8,14 +8,15 @@ from langchain_core.runnables import RunnableLambda
 
 from erp_agent.application.contracts import decode_reading, dumps, editable_reading
 from erp_agent.application.memory import RoleMemory
-from erp_agent.application.ports import LLMClient, RunControl
+from erp_agent.application.ports import LLMClient, RunControl, TaskContext
 from erp_agent.application.reading.batches import DocumentBatcher, ReadingBatch
 from erp_agent.application.reading.coverage import missing_table_rows
 from erp_agent.application.reading.merge import ReadingMerger
 from erp_agent.application.reading.review import LinkReviewRole
 from erp_agent.application.reading.roles import ExtractionRole, ReaderLimits, ReadingPart
+from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
-from erp_agent.domain.models import Issue, ParsedDocument, ReadingResult
+from erp_agent.domain.models import Issue, ParsedDocument, ProblemSpec, ReadingResult, RuleSet
 from erp_agent.domain.validation import validate_reading
 
 SPLIT_ERRORS = {
@@ -25,6 +26,10 @@ SPLIT_ERRORS = {
     "llm_gateway_timeout",
     "llm_unavailable",
     "llm_timeout",
+    "invalid_contract",
+    "invalid_json",
+    "reading_batch_source",
+    "llm_structured_response",
 }
 
 
@@ -61,7 +66,7 @@ class StructuredReader:
         max_chars = min(
             self.limits.max_request_chars,
             getattr(client, "max_input_chars", self.limits.max_request_chars),
-        )
+        ) - getattr(client, "request_overhead_chars", 0)
         overhead = (
             max(len(self.facts_role.system), len(self.rules_role.system))
             + max(len(self.facts_role.schema), len(self.rules_role.schema))
@@ -81,6 +86,20 @@ class StructuredReader:
         stopped = threading.Event()
 
         class BatchControl:
+            def check_cancelled(self) -> None:
+                if stopped.is_set():
+                    raise Cancelled()
+                check = getattr(control, "check_cancelled", None)
+                if check:
+                    check()
+                else:
+                    self.checkpoint("waiting_model")
+
+            def report_task(self, task_id, changes) -> None:
+                report = getattr(control, "report_task", None)
+                if report:
+                    report(task_id, changes)
+
             def checkpoint(self, stage: str, completed: int = 0) -> None:
                 with lock:
                     if stopped.is_set():
@@ -107,9 +126,39 @@ class StructuredReader:
                     }
                 ).encode()
             ).hexdigest()
+            blocks = ", ".join(str(i + 1) for i in sorted({u.index for u in batch.units}))
+            rows = [c.row + 1 for u in batch.units for c in u.cells]
+            object_name = f"{batch.document.source.filename} · 正文块 {blocks}"
+            if rows:
+                object_name += f" · 行 {min(rows)}–{max(rows)}"
+            task = TaskContext(
+                key,
+                "Reader",
+                "参数提取" if role.name == "facts" else "规则整理",
+                object_name,
+                "reader",
+            )
+
+            class RoleControl:
+                def checkpoint(self, stage, completed=0):
+                    batch_control.checkpoint(stage, completed)
+                    report_task(control, task, "running", stage=stage)
+
+                def check_cancelled(self):
+                    batch_control.check_cancelled()
+
+                def report_task(self, task_id, changes):
+                    batch_control.report_task(task_id, changes)
+
+            role_control = RoleControl()
+            role_client = TaskLLMClient(
+                client, role_control, task, "simple" if role.name == "facts" else "complex"
+            )
+            report_task(control, task, "queued", evidence_count=len(batch.focus_ids))
             batch_control.checkpoint("reading_" + role.name)
             cached = memory.get(key) if memory else None
             if cached and cached.get("split") is True and len(batch.units) > 1:
+                report_task(control, task, "split")
                 return tuple(part for smaller in batch.split() for part in run_role(role, smaller))
             if cached:
                 result = ReadingPart(
@@ -119,8 +168,8 @@ class StructuredReader:
                 try:
                     result = role.extract(
                         batch,
-                        client,
-                        batch_control,
+                        role_client,
+                        role_control,
                         max_chars,
                         completed,
                         parameters.result.problem.facts if parameters else (),
@@ -131,6 +180,7 @@ class StructuredReader:
                 except ERPError as error:
                     if error.code in SPLIT_ERRORS and len(batch.units) > 1:
                         batch_control.checkpoint("reading_smaller_batch")
+                        report_task(control, task, "split", error=error.message)
                         if memory:
                             memory.put(key, {"split": True})
                         return tuple(
@@ -140,7 +190,12 @@ class StructuredReader:
                         batch_control.checkpoint("reading_retry")
                         try:
                             result = role.extract(
-                                batch, client, batch_control, max_chars, completed, memory=memory
+                                batch,
+                                role_client,
+                                role_control,
+                                max_chars,
+                                completed,
+                                memory=memory,
                             )
                         except Cancelled:
                             raise
@@ -151,7 +206,32 @@ class StructuredReader:
                                 f"{batch.document.source.filename} · {name}：{failure.message}",
                                 failure.status,
                             ) from failure
+                    elif error.code in {
+                        "invalid_contract",
+                        "invalid_json",
+                        "reading_batch_source",
+                        "llm_structured_response",
+                    }:
+                        issue = Issue(
+                            "reading.extraction_unresolved",
+                            "error",
+                            "problem",
+                            f"{object_name}：该片段经重试仍无法可靠整理（{error.message}）。"
+                            "请查看原文并说明相关参数、规则及适用对象；其余已读内容已保留。",
+                            batch.focus_ids,
+                        )
+                        result = ReadingPart(
+                            role.name,
+                            batch,
+                            ReadingResult(
+                                ProblemSpec(batch.document.source.filename, ()),
+                                RuleSet(()),
+                                (issue,),
+                                "未完成",
+                            ),
+                        )
                     else:
+                        report_task(control, task, "failed", error=error.message)
                         name = "参数提取" if role.name == "facts" else "规则整理"
                         raise ERPError(
                             error.code,
@@ -159,11 +239,26 @@ class StructuredReader:
                             error.status,
                         ) from error
                 batch_control.checkpoint("reading_" + role.name)
-                if memory:
+                if memory and not any(
+                    i.code in {"reading.invalid_number", "reading.extraction_unresolved"}
+                    for i in result.result.issues
+                ):
                     memory.put(
                         key,
                         {"reading": editable_reading(result.result), "model": result.result.model},
                     )
+            report_task(
+                control,
+                task,
+                "needs_input"
+                if any(i.severity == "error" for i in result.result.issues)
+                else "cached"
+                if cached
+                else "succeeded",
+                model=result.result.model,
+                fact_count=len(result.result.problem.facts),
+                rule_count=len(result.result.rules.rules),
+            )
             with lock:
                 completed += 1
             return (result,)
@@ -203,6 +298,10 @@ class StructuredReader:
                 if cell.text.strip()
             )
 
+        parent = TaskContext(
+            "reader", "Reader", "读题统筹", f"{len(documents)} 份资料 · {len(batches)} 个批次"
+        )
+        report_task(control, parent, "running", batch_count=len(batches))
         runner = RunnableLambda(read_batch)
         results = runner.batch(
             list(batches),
@@ -234,4 +333,12 @@ class StructuredReader:
             reading, issues=reading.issues + source_issues + missing_table_rows(reading, documents)
         )
         control.checkpoint("validating", len(parts))
-        return validate_reading(reading, evidence)
+        result = validate_reading(reading, evidence)
+        report_task(
+            control,
+            parent,
+            "needs_input" if any(i.severity == "error" for i in result.issues) else "succeeded",
+            fact_count=len(result.problem.facts),
+            rule_count=len(result.rules.rules),
+        )
+        return result

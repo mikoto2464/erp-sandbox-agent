@@ -44,6 +44,9 @@ const preset: ModelPreset = {
   revision: 1,
   name: '测试模型',
   configured: true,
+  priority: 100,
+  max_parallel: 2,
+  scheduling_enabled: false,
   provider: 'openai_chat',
   base_url: 'https://example.com/v1',
   model: 'test',
@@ -606,7 +609,35 @@ describe('Vue migration', () => {
     workspace.dispose();
   });
   it('renders app with restored route, opens settings, drawer and background dismissal', async () => {
-    const { router } = setup();
+    const { router, jobs } = setup();
+    jobs.push({
+      id: 'agent-job',
+      kind: 'read',
+      status: 'running',
+      stage: 'reading_facts',
+      metadata: {},
+      tasks: [
+        {
+          id: 'subtask',
+          parent_id: 'reader',
+          agent: 'Reader',
+          role: '参数提取',
+          object: '订单.xls · 行 17–20',
+          status: 'running',
+          model: 'flash',
+          preset_name: '轻量模型',
+          evidence_count: 44,
+        },
+        {
+          id: 'waiting',
+          agent: 'Reader',
+          role: '规则整理',
+          object: '规则.docx',
+          status: 'waiting',
+          candidates: ['主模型'],
+        },
+      ],
+    });
     await router.push(`/projects/${projectId}/steps/3`);
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } });
     await flushPromises();
@@ -638,10 +669,15 @@ describe('Vue migration', () => {
     await flushPromises();
     await wrapper
       .findAll('.topbar-actions button')
-      .find((button) => button.text() === '任务')!
+      .find((button) => button.text().startsWith('任务'))!
       .trigger('click');
     await flushPromises();
     expect((wrapper.find('.drawer-modal').element as HTMLDialogElement).open).toBe(true);
+    await wrapper.find('.task-disclosure').trigger('click');
+    expect(wrapper.find('.task-detail').text()).toContain('Reader · 参数提取');
+    expect(wrapper.find('.task-detail').text()).toContain('订单.xls · 行 17–20');
+    expect(wrapper.find('.task-detail').text()).toContain('轻量模型 · flash');
+    expect(wrapper.find('.task-detail').text()).toContain('等待可用模型：主模型');
     await wrapper.find('.drawer-modal').trigger('pointerdown', { clientX: -1, clientY: -1 });
     await wrapper.find('.drawer-modal').trigger('click', { clientX: -1, clientY: -1 });
     await flushPromises();
@@ -658,12 +694,18 @@ describe('Vue migration', () => {
     const models = useModelPresets(workspace);
     await models.show();
     models.draft.value!.api_key = 'private-key';
+    models.draft.value!.priority = 200;
+    models.draft.value!.max_parallel = 3;
+    models.draft.value!.scheduling_enabled = true;
     await models.save();
     const call = fetcher.mock.calls.find(([url]) => url === '/api/model-presets/model')!;
     expect(JSON.parse(String(call[1]!.body))).toMatchObject({
       expected_revision: 1,
       api_key: 'private-key',
       clear_api_key: false,
+      priority: 200,
+      max_parallel: 3,
+      scheduling_enabled: true,
     });
     expect(models.draft.value!.api_key).toBe('');
     workspace.dispose();

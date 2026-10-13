@@ -6,8 +6,18 @@ from typing import TypeAlias, cast
 
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    Action, BudgetItem, Fact, Issue, KnowledgeState, ParameterRange, Plan, ProblemSpec,
-    ReadingResult, Rule, RuleSet, StrategyProposal,
+    Action,
+    BudgetItem,
+    Fact,
+    Issue,
+    KnowledgeState,
+    ParameterRange,
+    Plan,
+    ProblemSpec,
+    ReadingResult,
+    Rule,
+    RuleSet,
+    StrategyProposal,
 )
 
 JSONValue: TypeAlias = "str | int | float | bool | None | list[JSONValue] | dict[str, JSONValue]"
@@ -96,7 +106,14 @@ def decimal(value: JSONValue) -> Decimal:
         result = Decimal(text)
     except InvalidOperation as exc:
         raise ERPError("invalid_contract", "数值字符串无效。") from exc
-    if (not result.is_finite() or abs(result) > Decimal("1e15")
+    if result.is_finite():
+        sign, digits, exponent = result.as_tuple()
+        while exponent < 0 and len(digits) > 1 and digits[-1] == 0:
+            digits, exponent = digits[:-1], exponent + 1
+        result = Decimal((sign, digits, exponent))
+        if result.is_zero():
+            result = Decimal(0)
+    if (not result.is_finite() or result.copy_abs() > Decimal("1e15")
             or result.as_tuple().exponent < -12):
         raise ERPError("invalid_contract", "数值超出允许范围。")
     return result

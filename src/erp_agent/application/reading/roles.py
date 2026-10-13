@@ -18,6 +18,7 @@ from erp_agent.application.memory import RoleMemory
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl
 from erp_agent.application.reading.batches import ReadingBatch, oversized_batch
+from erp_agent.application.reading.numbers import recover_numbers
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Fact, ReadingResult, RuleSet
 
@@ -175,6 +176,7 @@ class ExtractionRole:
             "rules": data.get("rules", []) if self.name == "rules" else [],
             "issues": data.get("issues", []),
         }
+        recover_numbers(data)
         result = decode_reading(dumps(data), model)
         document = batch.payload()
         allowed = set(batch.focus_ids)

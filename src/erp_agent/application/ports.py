@@ -4,21 +4,29 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from erp_agent.application.contracts import JSONObject, JSONValue
-
 from erp_agent.domain.models import (
-    Evaluation,
     BudgetTemplate,
+    Evaluation,
     ParsedDocument,
     Plan,
     PlanningContext,
     ProblemSnapshot,
-    SourceDocument,
-    StrategyProposal,
     RenderedArtifact,
     ReportData,
-    WorkbookMapping,
     SolutionBundle,
+    SourceDocument,
+    StrategyProposal,
+    WorkbookMapping,
 )
+
+
+@dataclass(frozen=True)
+class TaskContext:
+    id: str
+    agent: str
+    role: str
+    object: str
+    parent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,8 @@ class LLMRequest:
     schema_json: str
     max_output_tokens: int | None = None
     retries: int | None = None
+    task: TaskContext | None = None
+    complexity: str = "complex"
 
 
 @dataclass(frozen=True)
@@ -66,6 +76,7 @@ class ModelSettings(Protocol):
     def activate(self, preset_id: str, data: JSONObject) -> JSONObject: ...
     def delete_preset(self, preset_id: str, revision: int) -> None: ...
     def capture(self) -> ModelBinding: ...
+    def capture_pool(self) -> ModelBinding: ...
     def test_preset(self, preset_id: str, data: JSONObject) -> JSONObject: ...
 
 

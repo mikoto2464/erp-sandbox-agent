@@ -48,7 +48,7 @@ export function evidenceTables(documents: ParsedDocument[], ids: string[]): Evid
         other.table_context.column > ctx.column,
     );
     if (!isHeader && !isObject) primary.add(item.id);
-    const doc = documents.find((doc) => doc.source.id === item.document_id);
+    const doc = [...documents].reverse().find((doc) => doc.source.id === item.document_id);
     if (!doc) continue;
     const blocks = new Set([
       ctx.block_index,

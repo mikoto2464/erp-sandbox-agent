@@ -456,8 +456,15 @@ class WebTests(unittest.TestCase):
         self.assertEqual(changed.exception.code, 409)
         self.assertEqual(self.request(base + '/problem?version=1')['snapshot']['inputs']['revision'], 1)
         self.llm.response = output()
+        stored = self.server.workflow.repository.get('document', project, document_id)
+        stored['parser_version'] = 'xlrd-1'
+        self.server.workflow.repository.put('document', project, document_id, stored)
         job = self.request(base + '/read', {'document_ids': [document_id], 'input_revision': saved['revision']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        updated = self.request(base + '/problem')['snapshot']
+        self.assertTrue(any(source['parser_version'] == 'xlrd-2' and source['source']['id'] == document_id
+                            for source in updated['additional_sources']))
+        self.assertEqual(self.server.workflow.repository.get('document', project, document_id)['parser_version'], 'xlrd-1')
         requests = '\n'.join(call.user for call in self.llm.calls)
         self.assertIn('订单数量不得超过详单', requests)
         self.assertIn('贷款上限20000', requests)
@@ -691,11 +698,12 @@ class WebTests(unittest.TestCase):
 
         class DelayedReader:
             llm = original.llm
+            limits = original.limits
 
-            def read(self, documents, control, client=None):
+            def read(self, documents, control, client=None, memory=None):
                 entered.set()
                 release.wait(3)
-                return original.read(documents, control, client)
+                return original.read(documents, control, client, memory)
 
         self.server.workflow.reader = DelayedReader()
         try:

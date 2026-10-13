@@ -29,6 +29,40 @@ class JobControl:
             record.update(status="running", stage=stage, completed=completed, updated_at=now())
             self.repository.put("job", self.project_id, self.job_id, record)
 
+    def check_cancelled(self) -> None:
+        if self.event.is_set():
+            raise Cancelled()
+
+    def report_task(self, task_id: str, changes: JSONObject) -> None:
+        with self.lock:
+            self.check_cancelled()
+            record = self.repository.get("job", self.project_id, self.job_id)
+            tasks = record.setdefault("tasks", [])
+            assert isinstance(tasks, list)
+            task = next((t for t in tasks if isinstance(t, dict) and t["id"] == task_id), None)
+            if task is None:
+                task = {"id": task_id, "created_at": now(), "attempt": 0}
+                tasks.append(task)
+            previous = task.get("status")
+            if changes.get("status") == "waiting":
+                task["attempt"] = int(task.get("attempt", 0)) + 1
+                task.pop("error", None)
+                task.pop("finished_at", None)
+            task.update(changes, updated_at=now())
+            if changes.get("status") == "running" and previous != "running":
+                task["started_at"] = now()
+            if changes.get("status") in {"succeeded", "failed", "cached", "split", "needs_input"}:
+                task["finished_at"] = now()
+            # 保留在途项，限制历史明细数量，完整处理结果仍在题目快照中。
+            if len(tasks) > 1000:
+                terminal = next((i for i, t in enumerate(tasks) if isinstance(t, dict)
+                                and t.get("status") not in {"queued", "waiting", "running"}), None)
+                if terminal is not None:
+                    tasks.pop(terminal)
+                    record["archived_tasks"] = int(record.get("archived_tasks", 0)) + 1
+            record["updated_at"] = now()
+            self.repository.put("job", self.project_id, self.job_id, record)
+
 
 class ThreadJobRunner:
     def __init__(self, repository: SQLiteRepository, workers: int = 2) -> None:
@@ -88,6 +122,12 @@ class ThreadJobRunner:
                     record.update(status="failed", error={"code": "internal_error",
                                                           "message": "后台任务失败，请检查服务端日志。"},
                                   updated_at=now())
+                tasks = record.get("tasks", [])
+                assert isinstance(tasks, list)
+                for task in tasks:
+                    if isinstance(task, dict) and task.get("status") in {"queued", "waiting", "running"}:
+                        task.update(status="cancelled" if isinstance(exc, Cancelled) else "failed",
+                                    finished_at=now())
                 self.repository.put("job", control.project_id, control.job_id, record)
         finally:
             with self.lock:

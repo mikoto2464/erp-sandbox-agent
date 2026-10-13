@@ -1,11 +1,20 @@
 from importlib.resources import files
 
 from erp_agent.application.contracts import (
-    ISSUE_SCHEMA, JSONObject, array, decode_reading, dumps, loads, obj, object_schema, to_json,
+    ISSUE_SCHEMA,
+    JSONObject,
+    array,
+    decode_reading,
+    dumps,
+    loads,
+    obj,
+    object_schema,
+    to_json,
 )
 from erp_agent.application.model_output import normalize_model_json
-from erp_agent.application.ports import LLMClient, LLMRequest, RunControl
+from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
 from erp_agent.application.reading.merge import ROW_CATEGORIES, normalized_name
+from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Evidence, Fact, Issue, ReadingResult, Rule
 
@@ -56,11 +65,15 @@ class LinkReviewRole:
                     run(values[middle:])
                     return
                 raise ERPError("reading_review_limit", "单条规则及其来源超过关联复核上限，请提高读题输入上限。")
+            task = TaskContext("review:" + ":".join(sorted(allowed_ids)), "Reader", "关联复核",
+                               "、".join(dict.fromkeys(v.entity_name if isinstance(v, Fact) else v.name
+                                                     for v in values))[:250], "reader")
+            task_client = TaskLLMClient(client, control, task)
             control.checkpoint("reading_review", completed)
             response = None
             for attempt in range(2):
                 try:
-                    response = client.generate(LLMRequest(self.system, dumps(material),
+                    response = task_client.generate(LLMRequest(self.system, dumps(material),
                                                           "erp_reading_review", self.schema,
                                                           max_output_tokens=2000, retries=0))
                     control.checkpoint("reading_review", completed)
@@ -71,16 +84,26 @@ class LinkReviewRole:
                            for eid in i.evidence_ids) for i in decoded.issues):
                         raise ERPError("reading_review_source", "复核疑点未指向当前条目或引用了范围外来源。")
                     issues.extend(decoded.issues)
+                    report_task(control, task, "needs_input" if decoded.issues else "succeeded",
+                                issue_count=len(decoded.issues), model=response.model)
                     return
                 except Cancelled:
                     raise
                 except ERPError as error:
                     if error.code in {"llm_incomplete", "llm_timeout", "llm_gateway_timeout", "llm_unavailable"} and len(values) > 1:
+                        report_task(control, task, "split", error=error.message)
                         middle = len(values) // 2
                         run(values[:middle])
                         run(values[middle:])
                         return
                     if attempt or (response is None and error.code != "llm_structured_response"):
+                        if error.code in {"invalid_contract", "invalid_json", "reading_review_source", "llm_structured_response"}:
+                            message = f"关联复核未完成（{error.message}），请核对这些条目的含义、适用对象与原文关联。"
+                            issues.append(Issue("reading.review_unresolved", "error", values[0].id,
+                                                message, tuple(sorted(allowed_refs))))
+                            report_task(control, task, "needs_input", error=message)
+                            return
+                        report_task(control, task, "failed", error=error.message)
                         raise
                     control.checkpoint("repairing_reading", completed)
                     material["error"] = error.message[:1000]

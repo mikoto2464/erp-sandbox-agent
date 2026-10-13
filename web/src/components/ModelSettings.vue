@@ -155,6 +155,40 @@ defineExpose({
             type="checkbox"
           />清除已保存的 API 密钥</label
         >
+        <fieldset class="model-scheduling">
+          <legend>任务分配</legend>
+          <div class="form-grid">
+            <label
+              >优先级<input
+                v-model.number="draft.priority"
+                type="number"
+                min="0"
+                max="1000"
+                required
+              />
+              <small class="muted">数字越大越优先；最高优先级负责策略与规则。</small></label
+            >
+            <label
+              >最大并行请求<input
+                v-model.number="draft.max_parallel"
+                type="number"
+                min="1"
+                max="16"
+                required
+              />
+              <small class="muted">同一预设在全部任务间共享额度。</small></label
+            >
+          </div>
+          <label class="check"
+            ><input
+              v-model="draft.scheduling_enabled"
+              type="checkbox"
+            />参与多模型协作</label
+          >
+          <p class="muted">
+            当前启用的预设始终参与。简单参数提取优先分配给其他协作模型，再按优先级选择空闲模型。
+          </p>
+        </fieldset>
         <details class="advanced">
           <summary>高级参数</summary>
           <div class="form-grid">

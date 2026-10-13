@@ -58,6 +58,7 @@ export const statusNames: Record<string, string> = {
   needs_input: '需要复核',
 };
 export const stageNames: Record<string, string> = {
+  waiting_model: '等待可用模型',
   queued: '排队',
   starting: '开始',
   parsing: '解析文件',

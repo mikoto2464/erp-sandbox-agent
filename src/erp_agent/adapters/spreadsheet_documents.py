@@ -22,6 +22,7 @@ class XLSDocumentParser:
         warnings: list[str] = []
         size = 0
         text_size = 0
+        normalized_numbers: list[str] = []
         try:
             for sheet in workbook.sheets():
                 size += sheet.nrows * sheet.ncols
@@ -48,6 +49,8 @@ class XLSDocumentParser:
                         raw = sheet.cell(row, column)
                         fmt = workbook.format_map[workbook.xf_list[raw.xf_index].format_key].format_str
                         text = self._text(raw, fmt, workbook.datemode)
+                        if raw.ctype == xlrd.XL_CELL_NUMBER and Decimal(str(raw.value)) != Decimal(format(raw.value, ".15g")):
+                            normalized_numbers.append(f"{sheet.name}!{xlrd.colname(column)}{row + 1}：{raw.value} → {text}")
                         text_size += len(text)
                         if text_size > 2000000:
                             raise ERPError("document_limit", "XLS 提取内容过多，请拆分上传。")
@@ -70,13 +73,16 @@ class XLSDocumentParser:
             workbook.release_resources()
         if not any(c.text.strip() for b in blocks for c in b.cells):
             raise ERPError("empty_document", "XLS 没有可读取数据。")
+        if normalized_numbers:
+            warnings.append("XLS 二进制数值按 Excel 的 15 位有效数字规范化，消除存储浮点尾差；"
+                            f"共 {len(normalized_numbers)} 格。" + "；".join(normalized_numbers[:10]))
         return contextualize_document(ParsedDocument(source, tuple(blocks), tuple(evidence),
-                                                     tuple(warnings), "xlrd-1"))
+                                                     tuple(warnings), "xlrd-2"))
 
     @staticmethod
     def _text(cell: xlrd.sheet.Cell, number_format: str, datemode: int) -> str:
         if cell.ctype == xlrd.XL_CELL_NUMBER:
-            value = Decimal(str(cell.value))
+            value = Decimal(format(cell.value, ".15g"))
             if "%" in number_format:
                 return format((value * 100).normalize(), "f") + "%"
             return str(int(value)) if value == value.to_integral_value() else format(value, "f")

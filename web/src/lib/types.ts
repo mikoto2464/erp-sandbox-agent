@@ -177,7 +177,29 @@ export interface Snapshot {
     issues: Issue[];
   };
 }
+export interface AgentTask {
+  id: string;
+  parent_id?: string;
+  agent: string;
+  role: string;
+  object: string;
+  status: string;
+  stage?: string;
+  model?: string;
+  preset_name?: string;
+  candidates?: string[];
+  attempt?: number;
+  evidence_count?: number;
+  fact_count?: number;
+  rule_count?: number;
+  issue_count?: number;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+}
 export interface Job {
+  tasks?: AgentTask[];
+  archived_tasks?: number;
   completed?: number;
   id: string;
   kind: string;
@@ -238,6 +260,9 @@ export interface ModelPreset {
   revision: number;
   name: string;
   configured: boolean;
+  priority: number;
+  max_parallel: number;
+  scheduling_enabled: boolean;
   provider: string;
   base_url: string;
   model: string;

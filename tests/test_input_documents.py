@@ -1,5 +1,7 @@
 import unittest
 from pathlib import Path
+import xlrd
+from erp_agent.adapters.spreadsheet_documents import XLSDocumentParser
 
 from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
 from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
@@ -8,6 +10,12 @@ from erp_agent.domain.models import SourceDocument
 
 
 class InputDocumentTests(unittest.TestCase):
+    def test_xls_binary_tail_is_normalized_using_excel_precision(self):
+        for raw, expected in [(4050.0000000000005, "4050"), (2025.0000000000002, "2025"),
+                              (0.123456789123456, "0.123456789123456")]:
+            with self.subTest(raw=raw):
+                cell = xlrd.sheet.Cell(xlrd.XL_CELL_NUMBER, raw)
+                self.assertEqual(XLSDocumentParser._text(cell, "General", 0), expected)
     def parse(self, name):
         content = Path(__file__).with_name('fixtures').joinpath(name).read_bytes()
         fmt = name.rsplit('.', 1)[-1]
