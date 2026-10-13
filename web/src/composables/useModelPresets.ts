@@ -18,6 +18,7 @@ export function useModelPresets(workspace: Workspace) {
       priority: preset.priority ?? 100,
       max_parallel: preset.max_parallel ?? 2,
       scheduling_enabled: preset.scheduling_enabled ?? false,
+      capabilities: preset.capabilities ?? '',
       api_key: '',
       clear_api_key: false,
     };
@@ -53,6 +54,7 @@ export function useModelPresets(workspace: Workspace) {
       priority: 100,
       max_parallel: 2,
       scheduling_enabled: false,
+      capabilities: '',
       provider: 'openai_chat',
       base_url: workspace.catalog.value!.providers.find(
         (provider) => provider.id === 'openai_chat',
@@ -116,6 +118,7 @@ export function useModelPresets(workspace: Workspace) {
       priority,
       max_parallel,
       scheduling_enabled,
+      capabilities,
     } = draft.value;
     const saved = await post<ModelPreset>(
       selectedId.value ? `/api/model-presets/${selectedId.value}` : '/api/model-presets',
@@ -136,6 +139,7 @@ export function useModelPresets(workspace: Workspace) {
         priority,
         max_parallel,
         scheduling_enabled,
+        capabilities,
         ...(selectedId.value ? { expected_revision: current.value!.revision } : {}),
       },
     );

@@ -11,10 +11,8 @@ def report_task(control: RunControl, task: TaskContext, status: str, **metadata:
 
 
 class TaskLLMClient:
-    def __init__(
-        self, client: LLMClient, control: RunControl, task: TaskContext, complexity: str = "complex"
-    ) -> None:
-        self.client, self.control, self.task, self.complexity = client, control, task, complexity
+    def __init__(self, client: LLMClient, control: RunControl, task: TaskContext) -> None:
+        self.client, self.control, self.task = client, control, task
 
     @property
     def configured(self) -> bool:
@@ -30,7 +28,7 @@ class TaskLLMClient:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         if request.task is None:
-            request = replace(request, task=self.task, complexity=self.complexity)
+            request = replace(request, task=self.task)
         controlled = getattr(self.client, "generate_controlled", None)
         if controlled:
             return controlled(request, self.control)

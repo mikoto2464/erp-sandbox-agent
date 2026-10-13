@@ -38,7 +38,6 @@ class LLMRequest:
     max_output_tokens: int | None = None
     retries: int | None = None
     task: TaskContext | None = None
-    complexity: str = "complex"
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,12 @@ import { useWorkspaceContext } from '../composables/context';
 import { statusNames, stageNames } from '../lib/labels';
 const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWorkspaceContext();
 const expanded = ref(new Set<string>());
+const difficultyNames: Record<string, string> = {
+  simple: '简单',
+  moderate: '中等',
+  complex: '复杂',
+  unassessed: '单模型直达',
+};
 const taskStatus: Record<string, string> = {
   ...statusNames,
   waiting: '等待模型额度',
@@ -160,6 +166,37 @@ function duration(task: AgentTask) {
             >
               {{ stageNames[task.stage] || task.stage }}
             </p>
+            <div
+              v-if="task.dispatch_reason || task.assignment_reason"
+              class="dispatch-decision"
+            >
+              <p v-if="task.difficulty">
+                <strong>任务难度：{{ difficultyNames[task.difficulty] || task.difficulty }}</strong>
+                <span
+                  v-if="task.dispatch_fallback"
+                  class="badge assumed"
+                  >调度失败，保守回退</span
+                >
+              </p>
+              <p>{{ task.assignment_reason || task.dispatch_reason }}</p>
+              <details
+                v-if="task.model_loads?.length"
+                class="dispatch-loads"
+              >
+                <summary>分配时的模型负载</summary>
+                <ul>
+                  <li
+                    v-for="model in task.model_loads"
+                    :key="model.id"
+                  >
+                    {{ model.name }} · 优先级 {{ model.priority }} · 占用 {{ model.in_use }}/{{
+                      model.max_parallel
+                    }}
+                    · 剩余 {{ model.available }}
+                  </li>
+                </ul>
+              </details>
+            </div>
             <div class="task-metrics">
               <span v-if="task.evidence_count">{{ task.evidence_count }} 处原文</span>
               <span v-if="task.fact_count != null">{{ task.fact_count }} 个参数</span>

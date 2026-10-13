@@ -177,7 +177,20 @@ export interface Snapshot {
     issues: Issue[];
   };
 }
+export interface ModelLoad {
+  id: string;
+  name: string;
+  priority: number;
+  max_parallel: number;
+  in_use: number;
+  available: number;
+}
 export interface AgentTask {
+  difficulty?: string;
+  dispatch_reason?: string;
+  assignment_reason?: string;
+  dispatch_fallback?: boolean;
+  model_loads?: ModelLoad[];
   id: string;
   parent_id?: string;
   agent: string;
@@ -263,6 +276,7 @@ export interface ModelPreset {
   priority: number;
   max_parallel: number;
   scheduling_enabled: boolean;
+  capabilities: string;
   provider: string;
   base_url: string;
   model: string;

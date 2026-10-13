@@ -103,7 +103,7 @@ class ModelPresetTests(unittest.TestCase):
         migrated = ModelSettingsService(self.settings)
         self.assertEqual(migrated.public()["name"], "默认配置")
         self.assertFalse(migrated.public()["api_key_set"])
-        self.assertEqual(loads(migrated.path.read_text())["schema_version"], 2)
+        self.assertEqual(loads(migrated.path.read_text())["schema_version"], 3)
         self.assertFalse(ModelSettingsService(self.settings).public()["api_key_set"])
 
     def test_names_and_new_preset_do_not_inherit_env_key(self):

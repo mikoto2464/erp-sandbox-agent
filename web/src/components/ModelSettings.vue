@@ -166,7 +166,7 @@ defineExpose({
                 max="1000"
                 required
               />
-              <small class="muted">数字越大越优先；最高优先级负责策略与规则。</small></label
+              <small class="muted">数字越大越优先；最高优先级模型担任主 Agent。</small></label
             >
             <label
               >最大并行请求<input
@@ -179,6 +179,16 @@ defineExpose({
               <small class="muted">同一预设在全部任务间共享额度。</small></label
             >
           </div>
+          <label class="full-field"
+            >能力说明（选填）
+            <textarea
+              v-model="draft.capabilities"
+              rows="2"
+              maxlength="500"
+              placeholder="例如：适合规则推理和跨表关联；或擅长格式稳定的表格提取。"
+            />
+            <small class="muted">帮助主 Agent 判断任务适配度；优先级表示偏好，不代表能力。</small>
+          </label>
           <label class="check"
             ><input
               v-model="draft.scheduling_enabled"
@@ -186,7 +196,8 @@ defineExpose({
             />参与多模型协作</label
           >
           <p class="muted">
-            当前启用的预设始终参与。简单参数提取优先分配给其他协作模型，再按优先级选择空闲模型。
+            当前启用预设始终参与。主 Agent
+            根据具体任务难度、能力说明、优先级及剩余额度选择执行模型。
           </p>
         </fieldset>
         <details class="advanced">

@@ -152,7 +152,7 @@ class StructuredReader:
 
             role_control = RoleControl()
             role_client = TaskLLMClient(
-                client, role_control, task, "simple" if role.name == "facts" else "complex"
+                client, role_control, task
             )
             report_task(control, task, "queued", evidence_count=len(batch.focus_ids))
             batch_control.checkpoint("reading_" + role.name)

@@ -11,6 +11,7 @@ from uuid import uuid4
 from erp_agent.adapters.llm import LangChainLLMClient
 from erp_agent.adapters.model_catalog import protocol_catalog, requires_api_key
 from erp_agent.application.contracts import JSONObject, array, dumps, integer, loads, obj, string
+from erp_agent.application.model_dispatch import DISPATCH_VERSION
 from erp_agent.application.model_scheduler import ModelCapacity, ScheduledLLMClient
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse, ModelBinding
 from erp_agent.config import LLM_BASE_URLS, Settings
@@ -29,7 +30,7 @@ MODEL_FIELDS = {
     "llm_thinking_mode",
     "llm_thinking_budget",
 }
-SCHEDULING_FIELDS = {"priority", "max_parallel", "scheduling_enabled"}
+SCHEDULING_FIELDS = {"priority", "max_parallel", "scheduling_enabled", "capabilities"}
 EDIT_FIELDS = {
     "base_url",
     "model",
@@ -80,12 +81,14 @@ class ModelPreset:
     priority: int = 100
     max_parallel: int = 2
     scheduling_enabled: bool = False
+    capabilities: str = ""
 
 
 class SchedulingOptions(TypedDict):
     priority: int
     max_parallel: int
     scheduling_enabled: bool
+    capabilities: str
 
 
 def _configuration(settings: Settings) -> JSONObject:
@@ -161,14 +164,22 @@ class ModelSettingsService:
             saved = obj(loads(self.path.read_text(encoding="utf-8")))
             if "schema_version" in saved:
                 obj(saved, {"schema_version", "active_id", "presets"})
-                version = integer(saved["schema_version"], 1, 2)
-                migrate = version == 1
+                version = integer(saved["schema_version"], 1, 3)
+                migrate = version < 3
                 self._active_id = string(saved["active_id"])
                 for item in array(saved["presets"]):
                     entry = obj(
                         item,
                         {"id", "name", "revision", "settings"}
-                        | (SCHEDULING_FIELDS if version == 2 else set()),
+                        | (
+                            (
+                                SCHEDULING_FIELDS
+                                if version == 3
+                                else SCHEDULING_FIELDS - {"capabilities"}
+                            )
+                            if version >= 2
+                            else set()
+                        ),
                     )
                     preset_id = string(entry["id"], maximum=100)
                     if not preset_id or preset_id in self._presets:
@@ -211,6 +222,9 @@ class ModelSettingsService:
                 data.get("max_parallel", current.max_parallel if current else 2), 1, 16
             ),
             "scheduling_enabled": enabled,
+            "capabilities": string(
+                data.get("capabilities", current.capabilities if current else ""), 500
+            ).strip(),
         }
 
     def _sync_capacity(self) -> None:
@@ -253,6 +267,7 @@ class ModelSettingsService:
             "priority": preset.priority,
             "max_parallel": preset.max_parallel,
             "scheduling_enabled": preset.scheduling_enabled,
+            "capabilities": preset.capabilities,
             **_configuration(preset.settings),
         }
 
@@ -299,7 +314,11 @@ class ModelSettingsService:
                 configuration = _configuration(preset.settings)
                 configuration.pop("api_key_set")
                 configuration.pop("api_key_required")
-                configuration.update(priority=preset.priority, max_parallel=preset.max_parallel)
+                configuration.update(
+                    priority=preset.priority,
+                    max_parallel=preset.max_parallel,
+                    capabilities=preset.capabilities,
+                )
                 models.append(
                     ModelBinding(preset.id, preset.name, preset.revision, configuration, client)
                 )
@@ -312,13 +331,14 @@ class ModelSettingsService:
                 configuration={
                     **primary.configuration,
                     "model_pool": [m.metadata() for m in models],
+                    "dispatcher_version": DISPATCH_VERSION,
                 },
                 client=ScheduledLLMClient(tuple(models), self._capacity),
             )
 
     def _persist(self, presets: dict[str, ModelPreset], active_id: str) -> None:
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "active_id": active_id,
             "presets": [
                 {
@@ -328,6 +348,7 @@ class ModelSettingsService:
                     "priority": p.priority,
                     "max_parallel": p.max_parallel,
                     "scheduling_enabled": p.scheduling_enabled,
+                    "capabilities": p.capabilities,
                     "settings": {
                         field: getattr(p.settings, field) for field in sorted(MODEL_FIELDS)
                     },
