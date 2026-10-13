@@ -127,6 +127,10 @@ class LangChainLLMClient:
         self.model_factory = model_factory
 
     @property
+    def max_input_chars(self) -> int:
+        return self.settings.llm_max_input_chars
+
+    @property
     def configured(self) -> bool:
         return bool(self.settings.llm_model and (
             self.settings.llm_api_key or not requires_api_key(self.settings)

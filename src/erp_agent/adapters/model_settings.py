@@ -31,6 +31,10 @@ class RuntimeLLMClient:
     def configured(self) -> bool:
         return self.current().configured
 
+    @property
+    def max_input_chars(self) -> int:
+        return getattr(self.current(), "max_input_chars", 100_000)
+
     def current(self) -> LLMClient:
         with self._lock:
             return self._client

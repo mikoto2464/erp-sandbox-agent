@@ -178,6 +178,7 @@ export interface Snapshot {
   };
 }
 export interface Job {
+  completed?: number;
   id: string;
   kind: string;
   status: string;

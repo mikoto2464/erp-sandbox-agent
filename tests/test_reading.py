@@ -199,8 +199,8 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-10")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.prompt_version, "reader-11")
+        self.assertEqual(len(calls), 3)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)
         self.assertEqual(loads(calls[0].user)["documents"], loads(calls[1].user)["documents"])
@@ -232,7 +232,7 @@ class ReadingTests(unittest.TestCase):
 
         result = StructuredReader(Client()).read((document,), Control())
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertIsNone(loads(calls[1].user)["previous_output"])
         for code in ("llm_incomplete", "llm_http_error", "llm_timeout"):
             calls.clear()
@@ -281,6 +281,7 @@ class ReadingTests(unittest.TestCase):
             self.result(refs=(document.evidence[0].id,)))) + '\n```'
         llm = FakeLLM(content)
         result = StructuredReader(llm).read((document,), Control())
-        self.assertEqual(len(llm.calls), 1)
-        self.assertEqual(result.raw_response, content)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(decode_reading(result.raw_response, result.model).problem.facts[0],
+                         result.problem.facts[0])
         self.assertEqual(result.problem.facts[0].state, KnowledgeState.KNOWN)

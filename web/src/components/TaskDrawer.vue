@@ -45,6 +45,12 @@ const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWor
         </div>
         <p class="muted">{{ stageNames[job.stage] || job.stage }}</p>
         <p
+          v-if="job.kind === 'read' && (job.completed ?? 0) > 0"
+          class="muted"
+        >
+          已完成 {{ job.completed }} 个提取子任务
+        </p>
+        <p
           v-if="job.metadata.filename"
           class="muted"
         >

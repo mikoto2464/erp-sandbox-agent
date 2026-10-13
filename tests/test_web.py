@@ -421,7 +421,19 @@ class WebTests(unittest.TestCase):
                 'evidence_ids': [manual_id], 'conversion': 'identity', 'explanation': ''}],
                 'rules': [], 'issues': []})
         manual_id = text_source('手动题目', inputs['problem_text'], 'manual_').evidence[0].id
-        self.llm.response = output()
+        original_generate = self.llm.generate
+
+        def generate_batch(request):
+            payload = loads(request.user)
+            if request.schema_name == 'erp_reading_review':
+                self.llm.response = dumps({'issues': []})
+            if request.schema_name == 'erp_reading':
+                available = set(payload['focus_evidence_ids'])
+                self.llm.response = output() if payload['role'] == 'facts' and manual_id in available else dumps(
+                    {'title': '手动题目', 'facts': [], 'rules': [], 'issues': []})
+            return original_generate(request)
+
+        self.llm.generate = generate_batch
         job = self.request(base + '/read', {'document_ids': [], 'input_revision': 1})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         snapshot = self.request(base + '/problem')['snapshot']
@@ -446,8 +458,9 @@ class WebTests(unittest.TestCase):
         self.llm.response = output()
         job = self.request(base + '/read', {'document_ids': [document_id], 'input_revision': saved['revision']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
-        self.assertIn('订单数量不得超过详单', self.llm.calls[-1].user)
-        self.assertIn('贷款上限20000', self.llm.calls[-1].user)
+        requests = '\n'.join(call.user for call in self.llm.calls)
+        self.assertIn('订单数量不得超过详单', requests)
+        self.assertIn('贷款上限20000', requests)
 
     def test_historical_version_can_have_large_model_response(self):
         project, result = self.setup_problem()

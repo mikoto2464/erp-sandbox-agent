@@ -22,6 +22,7 @@ from erp_agent.application.access import AccessService
 from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string, to_json
 from erp_agent.application.ports import LLMClient, PlanEvaluator
 from erp_agent.application.reader import StructuredReader
+from erp_agent.application.reading.roles import ReaderLimits
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
 from erp_agent.application.workflow import WorkflowService
 from erp_agent.config import Settings, load_env_file
@@ -328,7 +329,10 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
     answerer = AnswererService(repository, jobs, models, DocxReportRenderer(),
                                XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice),
                                                     LibreOfficeFormulaRecalculator(settings.libreoffice)))
-    return WorkflowService(repository, jobs, parser, StructuredReader(client, client.current), solver,
+    reader = StructuredReader(client, client.current,
+                              ReaderLimits(settings.reader_max_request_chars,
+                                           settings.reader_max_batch_units))
+    return WorkflowService(repository, jobs, parser, reader, solver,
                            settings.default_solver, models, SpreadsheetBudgetParser(), answerer)
 
 

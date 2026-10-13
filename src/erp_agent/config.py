@@ -46,6 +46,8 @@ class Settings:
     llm_token_parameter: str = "max_completion_tokens"
     llm_thinking_mode: str = "default"
     llm_thinking_budget: int = 8192
+    reader_max_request_chars: int = 30_000
+    reader_max_batch_units: int = 12
     default_solver: SolverMode = SolverMode.LLM_ONLY
     libreoffice: str = "libreoffice"
     max_upload_mb: int = 20
@@ -78,7 +80,8 @@ class Settings:
         if not 0 <= self.llm_retries <= 5:
             raise ValueError("模型重试次数必须在 0 到 5 之间。")
         if min(self.max_upload_mb, self.llm_timeout, self.llm_max_input_chars,
-               self.llm_max_output_tokens) <= 0:
+               self.llm_max_output_tokens, self.reader_max_request_chars,
+               self.reader_max_batch_units) <= 0:
             raise ValueError("资源限制必须为正数。")
 
     @classmethod
@@ -101,6 +104,8 @@ class Settings:
             llm_token_parameter=os.getenv("ERP_LLM_TOKEN_PARAMETER", "max_completion_tokens"),
             llm_thinking_mode=os.getenv("ERP_LLM_THINKING_MODE", "default"),
             llm_thinking_budget=int(os.getenv("ERP_LLM_THINKING_BUDGET", "8192")),
+            reader_max_request_chars=int(os.getenv("ERP_READER_MAX_REQUEST_CHARS", "30000")),
+            reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "12")),
             default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
             max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),
