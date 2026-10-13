@@ -36,6 +36,7 @@ from erp_agent.domain.models import (
     SolverMode,
     SourceDocument,
     TemplateInputGroup,
+    TemplateIssueReview,
     TemplateReading,
     TemplateSheetReading,
     WorkbookEntry,
@@ -198,10 +199,19 @@ def template_reading(data: JSONObject) -> TemplateReading:
     issues = tuple(Issue(string(i["code"]), string(i["severity"]), string(i["target"]),
                          string(i["message"]), strings(i.get("evidence_ids", [])))
                    for value in array(data.get("issues", [])) for i in (obj(value),))
+    reviews = []
+    for value in array(data.get("issue_reviews", [])):
+        entry = obj(value)
+        issue = obj(entry["issue"])
+        reviews.append(TemplateIssueReview(
+            Issue(string(issue["code"]), string(issue["severity"]), string(issue["target"]),
+                  string(issue["message"]), strings(issue.get("evidence_ids", []))),
+            string(entry["answer"], maximum=5000),
+        ))
     return TemplateReading(string(data["template_id"]), string(data["sha256"]), tuple(sheets),
                            issues, data.get("reviewed") is True,
                            string(data.get("explanation", "")),
-                           string(data.get("prompt_version", "template-reader-1")))
+                           string(data.get("prompt_version", "template-reader-1")), tuple(reviews))
 
 
 def reading_inputs(data: JSONObject) -> ReadingInputs:

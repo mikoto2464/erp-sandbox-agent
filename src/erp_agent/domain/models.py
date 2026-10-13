@@ -181,6 +181,12 @@ class TemplateSheetReading:
 
 
 @dataclass(frozen=True)
+class TemplateIssueReview:
+    issue: Issue
+    answer: str
+
+
+@dataclass(frozen=True)
 class TemplateReading:
     template_id: str
     sha256: str
@@ -189,6 +195,7 @@ class TemplateReading:
     reviewed: bool = False
     explanation: str = ""
     prompt_version: str = "template-reader-1"
+    issue_reviews: tuple[TemplateIssueReview, ...] = ()
 
 
 @dataclass(frozen=True)

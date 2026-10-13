@@ -1,11 +1,34 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import AppSelect from './AppSelect.vue';
-import type { BudgetTemplate, TemplateReading } from '../lib/types';
+import TemplateIssueCard from './TemplateIssueCard.vue';
+import type { BudgetTemplate, Issue, TemplateReading } from '../lib/types';
 const props = defineProps<{ template: BudgetTemplate; reading: TemplateReading; busy: boolean }>();
-const emit = defineEmits<{ confirm: [explanation: string]; preview: [] }>();
+const emit = defineEmits<{
+  confirm: [explanation: string];
+  confirmIssue: [issue: Issue, answer: string];
+  preview: [];
+}>();
 const pending = computed(() => props.reading.issues.filter((issue) => issue.severity !== 'info'));
-const tab = ref(pending.value.length && !props.reading.reviewed ? 'issues' : 'data'),
+function issueKey(issue: Issue) {
+  return JSON.stringify([
+    issue.code,
+    issue.severity,
+    issue.target,
+    issue.message,
+    issue.evidence_ids,
+  ]);
+}
+function reviewFor(issue: Issue) {
+  return props.reading.issue_reviews?.find((review) => issueKey(review.issue) === issueKey(issue));
+}
+const changed = ref<Record<string, boolean>>({});
+const unresolved = computed(() =>
+  pending.value.filter(
+    (issue) => !reviewFor(issue)?.answer.trim() || changed.value[issueKey(issue)],
+  ),
+);
+const tab = ref(unresolved.value.length ? 'issues' : 'data'),
   search = ref(''),
   sheetName = ref(''),
   explanation = ref(props.reading.explanation);
@@ -66,10 +89,10 @@ function issueTitle(message: string, target: string) {
         <div>
           <h2>
             {{
-              reading.reviewed
+              reading.reviewed && !unresolved.length
                 ? '空表已确认'
-                : pending.length
-                  ? `先核对 ${pending.length} 项疑点`
+                : unresolved.length
+                  ? `还有 ${unresolved.length} 项疑点待确认`
                   : '解读完成，可以确认'
             }}
           </h2>
@@ -80,8 +103,8 @@ function issueTitle(message: string, target: string) {
         </div>
         <span
           class="badge"
-          :class="reading.reviewed ? 'known' : 'assumed'"
-          >{{ reading.reviewed ? '已确认' : '待确认' }}</span
+          :class="reading.reviewed && !unresolved.length ? 'known' : 'assumed'"
+          >{{ reading.reviewed && !unresolved.length ? '已确认' : '待确认' }}</span
         >
       </div>
     </div>
@@ -91,7 +114,7 @@ function issueTitle(message: string, target: string) {
           :class="{ active: tab === 'issues' }"
           @click="tab = 'issues'"
         >
-          {{ reading.reviewed ? '核对记录' : '待确认' }} {{ pending.length }}
+          待确认 {{ unresolved.length }} / {{ pending.length }}
         </button>
         <button
           :class="{ active: tab === 'data' }"
@@ -101,30 +124,23 @@ function issueTitle(message: string, target: string) {
         </button>
       </div>
       <div v-if="tab === 'issues'">
-        <article
-          v-for="(issue, index) in pending"
-          :key="index"
-          class="issue-item"
-          :class="issue.severity"
+        <p
+          v-if="pending.length && reading.explanation && !reading.issue_reviews?.length"
+          class="notice"
         >
-          <div class="issue-heading">
-            <span
-              class="badge"
-              :class="
-                reading.reviewed ? 'known' : issue.severity === 'error' ? 'conflicted' : 'assumed'
-              "
-              >{{ reading.reviewed ? '已记录处理说明' : '需核对' }}</span
-            >
-            <strong>{{ issueTitle(issue.message, issue.target) }}</strong>
-          </div>
-          <p>{{ issue.message }}</p>
-          <button
-            class="review-action"
-            @click="emit('preview')"
-          >
-            查看原表
-          </button>
-        </article>
+          旧版整体处理说明保留在下方，不会自动作为每条疑点的回答；请逐条补充确认。
+        </p>
+        <TemplateIssueCard
+          v-for="issue in pending"
+          :key="issueKey(issue)"
+          :issue="issue"
+          :title="issueTitle(issue.message, issue.target)"
+          :saved="reviewFor(issue)"
+          :busy="busy"
+          @confirm="emit('confirmIssue', issue, $event)"
+          @dirty="changed[issueKey(issue)] = $event"
+          @preview="emit('preview')"
+        />
         <p
           v-if="!pending.length"
           class="empty"
@@ -240,26 +256,25 @@ function issueTitle(message: string, target: string) {
         </p>
       </div>
       <label class="issue-explanation">
-        {{ pending.length ? '疑点处理说明' : '处理说明（选填）' }}
+        空表补充说明（选填）
         <textarea
           v-model="explanation"
           rows="3"
-          :required="!!pending.length"
           :disabled="busy"
-          :placeholder="
-            pending.length
-              ? '请针对上方疑点说明正确的期间、用途或条目含义；多项疑点请分别说明。'
-              : '可补充空表的用途或填表口径。'
-          "
+          placeholder="仅填写整份空表的补充信息，疑点请在对应问题下回答。"
         />
       </label>
       <footer class="panel-footer">
         <span class="muted">{{
-          reading.reviewed ? '已确认结构可供各项目导入' : '确认后可在经营方案中导入'
+          unresolved.length
+            ? `还有 ${unresolved.length} 条疑点未确认`
+            : reading.reviewed
+              ? '已确认结构可供各项目导入'
+              : '各条疑点已保存，可确认整份空表'
         }}</span>
         <button
           class="primary"
-          :disabled="busy || (!!pending.length && !explanation.trim())"
+          :disabled="busy || !!unresolved.length"
           @click="emit('confirm', explanation)"
         >
           {{ busy ? '正在保存…' : reading.reviewed ? '保存处理说明' : '确认解读' }}

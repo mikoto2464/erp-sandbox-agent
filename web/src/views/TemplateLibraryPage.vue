@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import { request, post } from '../lib/api';
-import type { BudgetTemplate, TemplateLibraryItem, TemplateReading } from '../lib/types';
+import type { BudgetTemplate, Issue, TemplateLibraryItem, TemplateReading } from '../lib/types';
 import AppModal from '../components/AppModal.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
 import FileUploadZone from '../components/FileUploadZone.vue';
@@ -120,6 +120,17 @@ async function confirm(explanation: string) {
   if (detail.value?.id === id) detail.value.reading = reading;
   await refresh();
   notify('空表已确认，可供各项目导入。', 'success');
+}
+async function confirmIssue(issue: Issue, answer: string) {
+  if (!detail.value) return;
+  const id = detail.value.id;
+  const reading = await post<TemplateReading>(`/api/template-library/${id}/review`, {
+    issue,
+    answer,
+  });
+  if (detail.value?.id === id) detail.value.reading = reading;
+  await refresh();
+  notify('这条疑点已确认并保存。', 'success');
 }
 async function cancel(item: TemplateLibraryItem) {
   const job = active.value.find((value) => value.metadata.template_id === item.id);
@@ -303,6 +314,9 @@ onBeforeUnmount(() => {
         :reading="detail.reading"
         :busy="operations.has('library-confirm-' + detail.id)"
         @confirm="run('library-confirm-' + detail!.id, () => confirm($event))"
+        @confirm-issue="
+          (issue, answer) => run('library-confirm-' + detail!.id, () => confirmIssue(issue, answer))
+        "
         @preview="preview = detail!.template"
       />
     </div>

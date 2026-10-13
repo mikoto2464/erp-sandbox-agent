@@ -5,7 +5,15 @@ from dataclasses import replace
 from uuid import uuid4
 
 from erp_agent.application.codec import budget_template, template_reading
-from erp_agent.application.contracts import JSONObject, JSONValue, array, obj, string, to_json
+from erp_agent.application.contracts import (
+    JSONObject,
+    JSONValue,
+    array,
+    obj,
+    string,
+    strings,
+    to_json,
+)
 from erp_agent.application.ports import (
     BudgetTemplateParser,
     JobRunner,
@@ -20,7 +28,13 @@ from erp_agent.application.template_reader import (
     TemplateReader,
 )
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import BudgetTemplate, SourceDocument, TemplateReading
+from erp_agent.domain.models import (
+    BudgetTemplate,
+    Issue,
+    SourceDocument,
+    TemplateIssueReview,
+    TemplateReading,
+)
 
 
 class TemplateLibrary:
@@ -194,10 +208,40 @@ class TemplateLibrary:
             reading = template_reading(
                 self.repository.get("template_reading", LIBRARY_SCOPE, template_id)
             )
-            explanation = string(data.get("explanation", "")).strip()
-            if any(i.severity != "info" for i in reading.issues) and not explanation:
-                raise ERPError("template_review_answer", "请填写对空表疑点的处理说明后确认。")
-            saved = replace(reading, reviewed=data.get("reviewed") is True, explanation=explanation)
+            if "issue" in data:
+                entry = obj(data["issue"], {
+                    "code", "severity", "target", "message", "evidence_ids",
+                })
+                issue = Issue(
+                    string(entry["code"]), string(entry["severity"]), string(entry["target"]),
+                    string(entry["message"]), strings(entry.get("evidence_ids", [])),
+                )
+                if issue not in reading.issues or issue.severity == "info":
+                    raise ERPError(
+                        "template_review_issue", "疑点已变更，请刷新空表解读后处理。", 409
+                    )
+                answer = string(data.get("answer", ""), maximum=5000).strip()
+                if not answer:
+                    raise ERPError("template_review_answer", "请填写对这条疑点的回答后确认。")
+                reviews = tuple(r for r in reading.issue_reviews if r.issue != issue)
+                saved = replace(reading, reviewed=False,
+                                issue_reviews=reviews + (TemplateIssueReview(issue, answer),))
+            else:
+                reviewed = data.get("reviewed") is True
+                answered = {r.issue for r in reading.issue_reviews if r.answer.strip()}
+                unresolved = [
+                    i for i in reading.issues if i.severity != "info" and i not in answered
+                ]
+                if reviewed and unresolved:
+                    raise ERPError(
+                        "template_review_answer",
+                        f"还有 {len(unresolved)} 条疑点未逐条确认，"
+                        "请分别回答后再确认空表。",
+                    )
+                saved = replace(
+                    reading, reviewed=reviewed,
+                    explanation=string(data.get("explanation", reading.explanation)).strip(),
+                )
             self.repository.put("template_reading", LIBRARY_SCOPE, template_id, saved)
             return obj(to_json(saved))
 
@@ -233,6 +277,10 @@ class TemplateLibrary:
                         reading,
                         template_id=tid,
                         issues=tuple(replace(i, target=tid) for i in reading.issues),
+                        issue_reviews=tuple(
+                            replace(r, issue=replace(r.issue, target=tid))
+                            for r in reading.issue_reviews
+                        ),
                     ),
                 )
 

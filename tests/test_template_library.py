@@ -14,7 +14,7 @@ from erp_agent.application.ports import LLMResponse
 from erp_agent.application.template_reader import TemplateReader, template_material
 from erp_agent.config import Settings
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import SourceDocument
+from erp_agent.domain.models import Issue, SourceDocument, TemplateReading
 from tests.helpers import Control, FakeLLM, snapshot
 
 
@@ -46,6 +46,65 @@ def output(target="B2"):
 
 
 class TemplateReaderTests(unittest.TestCase):
+    def test_library_reviews_each_issue_and_preserves_answers_on_import(self):
+        from erp_agent.application.codec import template_reading
+        from erp_agent.application.template_library import LIBRARY_SCOPE
+
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = create_workflow(Settings(data_dir=Path(directory)), FakeLLM(output()))
+            try:
+                library = workflow.template_library
+                job = library.upload("budget.xlsx", workbook_bytes())
+                workflow.jobs.futures[job["id"]].result(3)
+                tid = job["metadata"]["template_id"]
+                first = Issue("template.period", "warning", tid, "预算：期间是否为第一季？")
+                second = Issue("template.unit", "warning", tid, "预算：金额是否以元填写？")
+                reading = TemplateReading(tid, "hash", (), (first, second),
+                                          explanation="旧版整体说明")
+                workflow.repository.put("template_reading", LIBRARY_SCOPE, tid, reading)
+                with self.assertRaisesRegex(ERPError, "2 条疑点"):
+                    library.review(tid, {"reviewed": True, "explanation": "整体回答不能代替逐条处理"})
+                with self.assertRaisesRegex(ERPError, "这条疑点"):
+                    library.review(tid, {"issue": to_json(first), "answer": " "})
+                with self.assertRaisesRegex(ERPError, "疑点已变更"):
+                    library.review(tid, {"issue": to_json(replace(first, message="改动后的问题")),
+                                         "answer": "第一季"})
+                saved = template_reading(library.review(tid, {"issue": to_json(first),
+                                                             "answer": "第一季"}))
+                self.assertFalse(saved.reviewed)
+                self.assertEqual(saved.explanation, "旧版整体说明")
+                self.assertEqual(len(saved.issue_reviews), 1)
+                with self.assertRaisesRegex(ERPError, "1 条疑点"):
+                    library.review(tid, {"reviewed": True})
+                library.review(tid, {"issue": to_json(second), "answer": "以元填写"})
+                library.review(tid, {"reviewed": True})
+                stored = template_reading(obj(library.detail(tid)["reading"]))
+                self.assertTrue(stored.reviewed)
+                self.assertEqual([(r.issue, r.answer) for r in stored.issue_reviews],
+                                 [(first, "第一季"), (second, "以元填写")])
+                revised = template_reading(library.review(tid, {"issue": to_json(first),
+                                                               "answer": "第一年四季"}))
+                self.assertFalse(revised.reviewed)
+                self.assertEqual(len(revised.issue_reviews), 2)
+                self.assertEqual(next(r.answer for r in revised.issue_reviews if r.issue == second),
+                                 "以元填写")
+                library.review(tid, {"reviewed": True})
+                project = workflow.create_project("项目")["id"]
+                actual = library.detail(tid)["template"]["source"]["sha256"]
+                stored = template_reading(obj(library.detail(tid)["reading"]))
+                workflow.repository.put("template_reading", LIBRARY_SCOPE, tid,
+                                        replace(stored, sha256=actual))
+                imported = workflow.import_library_template(project, {"template_id": tid})
+                copy = template_reading(workflow.repository.get(
+                    "imported_template_reading", project, imported["template_id"]))
+                self.assertEqual([r.answer for r in copy.issue_reviews],
+                                 [r.answer for r in stored.issue_reviews])
+                self.assertEqual({r.issue for r in copy.issue_reviews}, set(copy.issues))
+                self.assertTrue(copy.reviewed)
+            finally:
+                workflow.jobs.close()
+                workflow.memory.close()
+
     def test_gateway_failure_splits_then_restart_reuses_completed_segments(self):
         content = workbook_bytes()
         template = SpreadsheetBudgetParser().parse(

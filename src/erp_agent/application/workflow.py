@@ -161,7 +161,9 @@ class WorkflowService:
                                 {**original, "source": to_json(source)})
             self.repository.put("template", project_id, source.id, replace(template, source=source))
             copied = replace(reading, template_id=source.id,
-                             issues=tuple(replace(i, target=source.id) for i in reading.issues))
+                             issues=tuple(replace(i, target=source.id) for i in reading.issues),
+                             issue_reviews=tuple(replace(r, issue=replace(r.issue, target=source.id))
+                                                 for r in reading.issue_reviews))
             self.repository.put("imported_template_reading", project_id, source.id, copied)
             if not self.repository.versions(project_id):
                 return {"template_id": source.id, "version": None}

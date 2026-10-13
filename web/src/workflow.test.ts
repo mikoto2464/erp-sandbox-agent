@@ -158,7 +158,17 @@ function setup() {
         };
         jobs.push(data as Job);
       } else if (url.endsWith('/review')) {
-        Object.assign(item.reading!, JSON.parse(String(options.body)));
+        const payload = JSON.parse(String(options.body));
+        if (payload.issue) {
+          const previous = item.reading!.issue_reviews || [];
+          item.reading!.issue_reviews = [
+            ...previous.filter(
+              (entry) => JSON.stringify(entry.issue) !== JSON.stringify(payload.issue),
+            ),
+            { issue: payload.issue, answer: payload.answer },
+          ];
+          item.reading!.reviewed = false;
+        } else Object.assign(item.reading!, payload);
         data = structuredClone(item.reading);
       } else if (options.method === 'DELETE') {
         library.splice(library.indexOf(item), 1);
@@ -350,6 +360,13 @@ describe('Vue migration', () => {
           message: '第一年：请确认期间是否为第一年。',
           evidence_ids: [],
         },
+        {
+          code: 'unit',
+          severity: 'warning',
+          target: 'library',
+          message: '第一年：融资金额是否以元填写？',
+          evidence_ids: [],
+        },
       ],
     };
     libraryTemplates[0].sheets = [
@@ -396,7 +413,32 @@ describe('Vue migration', () => {
     );
     expect(wrapper.find('.template-reading .issue-heading strong').text()).toBe('第一年');
     expect(action('确认解读').attributes('disabled')).toBeDefined();
-    await wrapper.find('.template-reading textarea').setValue('该表用于第一年的四个季度。');
+    const cards = () => wrapper.findAll('.template-reading .issue-item');
+    await cards()[0].find('textarea').setValue('该表用于第一年的四个季度。');
+    await cards()[0]
+      .findAll('button')
+      .find((button) => button.text() === '确认处理')!
+      .trigger('click');
+    await flushPromises();
+    expect(cards()[0].text()).toContain('已确认');
+    expect(cards()[1].find('textarea').element).toHaveProperty('value', '');
+    expect(action('确认解读').attributes('disabled')).toBeDefined();
+    await action('核对解读').trigger('click');
+    await flushPromises();
+    expect(cards()[0].find('textarea').element).toHaveProperty(
+      'value',
+      '该表用于第一年的四个季度。',
+    );
+    await cards()[1].find('textarea').setValue('融资金额以元填写。');
+    await cards()[1]
+      .findAll('button')
+      .find((button) => button.text() === '确认处理')!
+      .trigger('click');
+    await flushPromises();
+    expect(action('确认解读').attributes('disabled')).toBeUndefined();
+    await cards()[0].find('textarea').setValue('修改待确认');
+    expect(action('确认解读').attributes('disabled')).toBeDefined();
+    await cards()[0].find('textarea').setValue('该表用于第一年的四个季度。');
     await action('空表数据 2').trigger('click');
     await wrapper.find('[aria-label="搜索空表数据"]').setValue('材料');
     expect(wrapper.find('.template-reading tbody').text()).toContain('材料采购');
@@ -404,7 +446,11 @@ describe('Vue migration', () => {
     await action('确认解读').trigger('click');
     await flushPromises();
     expect(wrapper.find('.file-entry').text()).toContain('已确认');
-    expect(library[0].reading.explanation).toBe('该表用于第一年的四个季度。');
+    expect(library[0].reading.issue_reviews?.map((review) => review.answer)).toEqual([
+      '该表用于第一年的四个季度。',
+      '融资金额以元填写。',
+    ]);
+    expect(library[0].reading.explanation).toBe('');
     await wrapper.find('[aria-label="删除共享预算.xlsx"]').trigger('click');
     await flushPromises();
     await action('删除文件').trigger('click');

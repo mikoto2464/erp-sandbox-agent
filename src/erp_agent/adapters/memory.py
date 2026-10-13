@@ -201,7 +201,8 @@ class SQLiteMemoryService:
                 entries.append({"id": template.template_id + ":" + sheet.name,
                     "state": "reviewed" if template.reviewed else "unreviewed",
                     "text": f"空表 {sheet.name}：{sheet.purpose}；期间 {sheet.periods}；"
-                            + dumps(sheet.input_groups) + "；" + template.explanation,
+                            + dumps(sheet.input_groups) + "；" + template.explanation
+                            + "；逐条核对：" + dumps(template.issue_reviews),
                     "evidence_ids": [], "template_id": template.template_id,
                     "sha256": template.sha256})
         self.write(

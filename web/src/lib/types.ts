@@ -197,6 +197,11 @@ export interface TemplateReading {
     input_groups: { label: string; range: string; unit: string; description: string }[];
   }[];
   issues: Issue[];
+  issue_reviews?: TemplateIssueReview[];
+}
+export interface TemplateIssueReview {
+  issue: Issue;
+  answer: string;
 }
 export interface TemplateLibraryItem {
   id: string;
