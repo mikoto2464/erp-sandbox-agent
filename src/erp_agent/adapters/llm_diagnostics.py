@@ -1,11 +1,14 @@
 from erp_agent.application.contracts import JSONObject
 from erp_agent.config import Settings
-from erp_agent.domain.errors import ERPError
+from erp_agent.domain.errors import ERPError, ModelOutputTruncated
 
 MAX_RESPONSE_CHARS = 16 * 1024 * 1024
 
 
-def validate_completion(metadata: JSONObject, usage: JSONObject, settings: Settings) -> None:
+def validate_completion(
+    metadata: JSONObject, usage: JSONObject, settings: Settings,
+    configured_limit: int | None = None,
+) -> None:
     reason = metadata.get("stop_reason", metadata.get("finish_reason", metadata.get("done_reason")))
     status = metadata.get("status")
     if isinstance(status, str) and status in {"incomplete", "failed", "cancelled"}:
@@ -33,6 +36,17 @@ def validate_completion(metadata: JSONObject, usage: JSONObject, settings: Setti
         message += f" 接口报告输出 {output} Token。"
     if isinstance(reasoning, int) and not isinstance(reasoning, bool) and reasoning >= 0:
         message += f" 思考用量 {reasoning} Token。"
-    message += ("可关闭思考或调高输出预算后重新读题；截断结果未保存。" if truncated
-                else "请检查接口返回状态，当前不自动续轮。")
+    if truncated:
+        maximum = configured_limit or settings.llm_max_output_tokens
+        message += (
+            "本次总预算包含思考与回答；截断内容未采用，可增加当前任务预算后重试。"
+            if settings.llm_max_output_tokens < maximum
+            else "已达到模型预设输出上限；可调高预设上限或缩小任务后重试，截断内容未采用。"
+        )
+        raise ModelOutputTruncated(
+            message, settings.llm_max_output_tokens, maximum,
+            output if isinstance(output, int) and not isinstance(output, bool) else None,
+            reasoning if isinstance(reasoning, int) and not isinstance(reasoning, bool) else None,
+        )
+    message += "请检查接口返回状态，当前不自动续轮。"
     raise ERPError("llm_incomplete", message, 502)

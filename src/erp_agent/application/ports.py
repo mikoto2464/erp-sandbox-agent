@@ -38,12 +38,18 @@ class LLMRequest:
     max_output_tokens: int | None = None
     retries: int | None = None
     task: TaskContext | None = None
+    reasoning_reserve_tokens: int = 0
+    stream: bool = False
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str
     model: str
+    output_limit: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    elapsed_seconds: float | None = None
 
 
 class LLMClient(Protocol):

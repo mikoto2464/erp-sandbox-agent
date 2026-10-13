@@ -54,7 +54,7 @@ class PlanBudgetPlanner:
         ) -> Plan:
             payload = {
                 "problem_version": snapshot.version,
-                "problem": problem_material(snapshot),
+                "problem": problem_material(snapshot, order_details=False),
                 "rules": to_json(snapshot.reading.rules),
                 "generation": to_json(context.config),
                 "plan": to_json(replace(plan, budget_items=())),
@@ -151,7 +151,7 @@ class PlanBudgetPlanner:
                 return result
 
             if len(children) > 1 and (
-                (saved and saved.get("split")) or len(dumps(payload)) > 28000
+                (saved and saved.get("split")) or len(dumps(material)) > 28000
             ):
                 return split()
             client = TaskLLMClient(self.llm, self.control, task)
@@ -165,6 +165,8 @@ class PlanBudgetPlanner:
                         "erp_solver_budget",
                         schema,
                         max_output_tokens=6000,
+                        reasoning_reserve_tokens=8192,
+                        stream=True,
                         retries=0,
                         task=task,
                     )

@@ -76,6 +76,7 @@ export const stageNames: Record<string, string> = {
   planning_collaboration: '协作规划',
   planning_budget_values: '根据经营行动逐表安排预算',
   retrying_strategy: '退避后重试当前规划任务',
+  expanding_output_budget: '增加思考与回答预算后重试',
   splitting_strategy: '缩小当前空表规划范围',
   saving_planning_progress: '保存已完成的协作建议',
   synthesizing_strategy: '汇总协作建议与逐期方案',

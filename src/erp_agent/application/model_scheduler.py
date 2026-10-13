@@ -2,6 +2,7 @@ import hashlib
 import threading
 
 from erp_agent.application.contracts import JSONObject, loads, obj
+from erp_agent.application.llm_budget import output_token_limit
 from erp_agent.application.model_dispatch import (
     DispatchDecision,
     ModelAssignment,
@@ -52,6 +53,9 @@ class ModelCapacity:
                     "capabilities": m.configuration.get("capabilities", "未填写"),
                     "max_input_chars": m.configuration["max_input_chars"],
                     "max_output_tokens": m.configuration.get("max_output_tokens"),
+                    "thinking_mode": m.configuration.get("thinking_mode", "default"),
+                    "thinking_budget": m.configuration.get("thinking_budget", 8192),
+                    "provider": m.configuration.get("provider", ""),
                 }
                 for m in models
             ]
@@ -382,9 +386,7 @@ class ScheduledLLMClient:
             eligible_ids = {m.preset_id for m in eligible}
             assignments = tuple(a for a in decision.assignments if a.preset_id in eligible_ids)
             if not assignments:
-                raise ERPError(
-                    "llm_input_limit", "已分配模型无法承载完整任务，请拆小任务。", 413
-                )
+                raise ERPError("llm_input_limit", "已分配模型无法承载完整任务，请拆小任务。", 413)
             decision = DispatchDecision(
                 decision.difficulty, assignments, decision.summary, decision.fallback
             )
@@ -468,6 +470,14 @@ class ScheduledLLMClient:
                     preset_id=selected.preset_id,
                     preset_revision=selected.preset_revision,
                     assignment_reason=reason,
+                    input_chars=len(request.system) + len(request.user) + len(request.schema_json),
+                    output_limit=output_token_limit(
+                        request,
+                        int(selected.configuration.get("max_output_tokens") or 12000),
+                        str(selected.configuration.get("thinking_mode", "default")),
+                        str(selected.configuration.get("provider", "")),
+                        int(selected.configuration.get("thinking_budget") or 8192),
+                    ),
                     stage="model_execution",
                     model_loads=self.capacity.catalog(self.models),
                 )

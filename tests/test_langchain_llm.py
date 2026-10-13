@@ -84,6 +84,67 @@ def mock_transport(response, seen, status=200):
 
 
 class LangChainTests(unittest.TestCase):
+    def test_solver_streams_structured_output_and_rejects_truncated_stream(self):
+        from dataclasses import replace
+        chunks = [
+            {'id': 'chat-stream', 'object': 'chat.completion.chunk', 'created': 1,
+             'model': 'stream-model', 'choices': [{'index': 0, 'delta':
+             {'role': 'assistant', 'content': '{"value":'}, 'finish_reason': None}]},
+            {'id': 'chat-stream', 'object': 'chat.completion.chunk', 'created': 1,
+             'model': 'stream-model', 'choices': [{'index': 0, 'delta':
+             {'content': '3}'}, 'finish_reason': 'stop'}]},
+            {'id': 'chat-stream', 'object': 'chat.completion.chunk', 'created': 1,
+             'model': 'stream-model', 'choices': [], 'usage':
+             {'prompt_tokens': 10, 'completion_tokens': 7, 'total_tokens': 17,
+              'completion_tokens_details': {'reasoning_tokens': 4}}},
+        ]
+        seen = []
+        def send(client, request, _module=httpx, **kwargs):
+            seen.append(json.loads(request.content))
+            content = ''.join('data: '+json.dumps(chunk)+'\n\n' for chunk in chunks)
+            return _module.Response(200, request=request, content=content+'data: [DONE]\n\n',
+                                  headers={'content-type': 'text/event-stream'})
+        settings = Settings(llm_model='test', llm_api_key='fake', llm_retries=0)
+        request = replace(REQUEST, stream=True)
+        with ExitStack() as stack:
+            for module in (httpx, import_module('httpx2')):
+                def module_send(client, request, _module=module, **kwargs):
+                    return send(client, request, _module, **kwargs)
+                stack.enter_context(patch.object(module.Client, 'send', module_send))
+            result = LangChainLLMClient(settings).generate(request)
+            self.assertEqual(loads(result.content), {'value': 3})
+            self.assertEqual(result.reasoning_tokens, 4)
+            self.assertTrue(seen[0]['stream'])
+            self.assertEqual(seen[0]['response_format']['type'], 'json_schema')
+            chunks[1]['choices'][0]['finish_reason'] = 'length'
+            with self.assertRaises(ERPError) as caught:
+                LangChainLLMClient(settings).generate(request)
+            self.assertEqual(caught.exception.code, 'llm_incomplete')
+            chunks[1]['choices'][0]['finish_reason'] = None
+            with self.assertRaises(ERPError) as caught:
+                LangChainLLMClient(settings).generate(request)
+            self.assertEqual(caught.exception.code, 'llm_incomplete')
+
+    def test_solver_reserves_reasoning_without_changing_preset_or_thinking_mode(self):
+        from dataclasses import replace
+        request = replace(REQUEST, max_output_tokens=4000, reasoning_reserve_tokens=8192)
+        for mode, maximum, expected in [
+            ('default', 32000, 12192), ('disabled', 32000, 4000), ('default', 8000, 8000),
+        ]:
+            with self.subTest(mode=mode, maximum=maximum):
+                _, seen = self.invoke('openai_chat', request=request, llm_thinking_mode=mode,
+                                      llm_max_output_tokens=maximum)
+                payload = json.loads(seen[0].content)
+                self.assertEqual(payload['max_completion_tokens'], expected)
+                if mode == 'default':
+                    self.assertNotIn('thinking', payload)
+                else:
+                    self.assertEqual(payload['thinking'], {'type': 'disabled'})
+        _, seen = self.invoke('anthropic', request=request, llm_format='text',
+                              llm_thinking_mode='enabled', llm_thinking_budget=16000,
+                              llm_max_output_tokens=32000)
+        self.assertEqual(json.loads(seen[0].content)['max_tokens'], 20000)
+
     def test_reader_request_overrides_budget_and_avoids_duplicate_schema_text(self):
         from dataclasses import replace
         request = replace(REQUEST, system='提取当前批次。\nJSON schema:\n' + REQUEST.schema_json,

@@ -221,6 +221,9 @@ export interface ModelLoad {
 export interface AgentTask {
   input_chars?: number;
   output_limit?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+  elapsed_seconds?: number;
   recovery?: string;
   child_count?: number;
   input_group_count?: number;

@@ -13,11 +13,12 @@ from erp_agent.application.contracts import (
     object_schema,
     string,
 )
+from erp_agent.application.llm_budget import output_token_limit
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-3"
+DISPATCH_VERSION = "dispatcher-4"
 DISPATCH_SCHEMA = object_schema(
     {
         "difficulty": {"type": "string", "enum": ["simple", "moderate", "complex"]},
@@ -163,6 +164,7 @@ def task_material(request: LLMRequest) -> JSONObject:
         "object": task.object[:300] if task else request.schema_name,
         "input_chars": len(request.system) + len(request.user) + len(request.schema_json),
         "requested_output_tokens": request.max_output_tokens,
+        "reasoning_reserve_tokens": request.reasoning_reserve_tokens,
         "has_repair": any(key in data for key in ("error", "errors", "previous_output")),
         "can_reuse_same_table": table_dispatch_key(request) is not None,
         "keys": list(data),
@@ -218,6 +220,16 @@ class ModelDispatcher:
             task_ids[task_id] = request.task.id
             task["task_id"] = task_id
             allowed = [m for m in models if int(m["max_input_chars"]) >= int(task["input_chars"])]
+            task["model_output_budgets"] = {
+                str(m["id"]): output_token_limit(
+                    request,
+                    int(m.get("max_output_tokens") or 12000),
+                    str(m.get("thinking_mode", "default")),
+                    str(m.get("provider", "")),
+                    int(m.get("thinking_budget") or 8192),
+                )
+                for m in allowed
+            }
             if not allowed:
                 raise ERPError("llm_input_limit", "完整任务超过所有模型输入上限。", 413)
             task["eligible_model_ids"] = [m["id"] for m in allowed]
@@ -237,6 +249,8 @@ class ModelDispatcher:
                 "erp_solver_dispatch" if purpose == "solver" else "erp_reader_dispatch",
                 schema,
                 max_output_tokens=min(16000, max(2000, len(tasks) * 400)),
+                reasoning_reserve_tokens=8192,
+                stream=True,
                 retries=0,
             )
         )
@@ -305,6 +319,8 @@ class ModelDispatcher:
                 "erp_model_dispatch",
                 self.schema,
                 max_output_tokens=1600,
+                reasoning_reserve_tokens=8192,
+                stream=True,
                 retries=0,
             )
         )

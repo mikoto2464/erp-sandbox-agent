@@ -102,6 +102,9 @@ class LLMStrategyGenerator:
                     dumps(payload),
                     "erp_strategy",
                     schema,
+                    max_output_tokens=16000,
+                    reasoning_reserve_tokens=8192,
+                    stream=True,
                     retries=0,
                     task=getattr(self.llm, "task", None),
                 )

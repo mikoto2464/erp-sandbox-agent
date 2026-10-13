@@ -1,6 +1,7 @@
 from importlib import import_module
 from dataclasses import replace
 from functools import lru_cache
+from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -12,6 +13,7 @@ from erp_agent.adapters.llm_diagnostics import MAX_RESPONSE_CHARS, validate_comp
 from erp_agent.adapters.llm_errors import model_error
 from erp_agent.adapters.model_catalog import requires_api_key
 from erp_agent.application.contracts import dumps, loads, obj
+from erp_agent.application.llm_budget import output_token_limit
 from erp_agent.application.ports import LLMRequest, LLMResponse
 from erp_agent.config import Settings
 from erp_agent.domain.errors import ERPError
@@ -150,15 +152,16 @@ class LangChainLLMClient:
         if len(system) + len(request.user) > self.settings.llm_max_input_chars:
             raise ERPError("llm_input_limit", "材料超过输入字符限制，请拆分文件或调整预设。")
         settings = replace(self.settings,
-                           llm_max_output_tokens=min(request.max_output_tokens or self.settings.llm_max_output_tokens,
-                                                     self.settings.llm_max_output_tokens),
+                           llm_max_output_tokens=output_token_limit(
+                               request, self.settings.llm_max_output_tokens,
+                               self.settings.llm_thinking_mode, self.settings.llm_provider,
+                               self.settings.llm_thinking_budget),
                            llm_retries=self.settings.llm_retries if request.retries is None else request.retries)
-        if settings.llm_provider == "anthropic" and settings.llm_thinking_mode == "enabled":
-            settings = replace(settings, llm_max_output_tokens=min(
-                self.settings.llm_max_output_tokens,
-                max(settings.llm_max_output_tokens, settings.llm_thinking_budget + 1024)))
+        started = monotonic()
         try:
             model = self._model(settings)
+            if request.stream and "streaming" in type(model).model_fields:
+                model = model.model_copy(update={"streaming": True})
             runnable: Runnable[Any, Any] = model
             schema = obj(loads(request.schema_json))
             structured = settings.llm_format == "json_schema"
@@ -180,7 +183,8 @@ class LangChainLLMClient:
             messages = ChatPromptTemplate.from_messages([
                 ("system", "{instructions}"), ("human", "{material}")
             ]).invoke({"instructions": system, "material": request.user}).to_messages()
-            output = runnable.invoke(messages)
+            options = {"stream": True} if request.stream else {}
+            output = runnable.invoke(messages, **options)
         except ERPError:
             raise
         except Exception as error:
@@ -195,7 +199,11 @@ class LangChainLLMClient:
         usage = getattr(message, "usage_metadata", {}) or {}
         if not isinstance(metadata, dict) or not isinstance(usage, dict):
             raise ERPError("llm_invalid_response", "LangChain 消息元数据无效。", 502)
-        validate_completion(metadata, usage, settings)
+        if request.stream and not any(metadata.get(key) is not None for key in (
+            "finish_reason", "stop_reason", "done_reason", "status",
+        )) and metadata.get("done") is not True:
+            raise ERPError("llm_incomplete", "模型流式响应缺少完成标记，当前结果未采用。", 502)
+        validate_completion(metadata, usage, settings, self.settings.llm_max_output_tokens)
         additional = getattr(message, "additional_kwargs", {}) or {}
         if isinstance(additional, dict) and additional.get("refusal"):
             raise ERPError("llm_refusal", "模型拒绝生成结果。", 502)
@@ -232,7 +240,15 @@ class LangChainLLMClient:
         returned_model = metadata.get("model_name", metadata.get("model", settings.llm_model))
         if not isinstance(returned_model, str) or not returned_model:
             returned_model = settings.llm_model
-        return LLMResponse(content, returned_model)
+        output = usage.get("output_tokens")
+        details = usage.get("output_token_details")
+        reasoning = details.get("reasoning") if isinstance(details, dict) else None
+        return LLMResponse(
+            content, returned_model, settings.llm_max_output_tokens,
+            output if isinstance(output, int) and not isinstance(output, bool) else None,
+            reasoning if isinstance(reasoning, int) and not isinstance(reasoning, bool) else None,
+            round(monotonic() - started, 3),
+        )
 
     @lru_cache(maxsize=8)
     def _model(self, settings: Settings) -> BaseChatModel:

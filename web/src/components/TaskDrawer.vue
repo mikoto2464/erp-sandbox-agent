@@ -252,6 +252,13 @@ function duration(task: AgentTask) {
             <div class="task-metrics">
               <span v-if="task.input_chars != null">输入 {{ task.input_chars }} 字符</span>
               <span v-if="task.output_limit">请求输出预算 {{ task.output_limit }} Token</span>
+              <span v-if="task.output_tokens != null">实际输出 {{ task.output_tokens }} Token</span>
+              <span v-if="task.reasoning_tokens != null"
+                >其中思考 {{ task.reasoning_tokens }} Token</span
+              >
+              <span v-if="task.elapsed_seconds != null"
+                >接口耗时 {{ task.elapsed_seconds }} 秒</span
+              >
               <span v-if="task.child_count">{{ task.child_count }} 个恢复子任务</span>
               <span v-if="task.input_group_count != null"
                 >{{ task.input_group_count }} 组输入项目</span

@@ -24,3 +24,5 @@ kind 使用简洁稳定的英文动作名，description 说明操作与前置条
 parameters 必须为空数组，不生成搜索范围；所有预算值与行动保持一致。
 不输出任何自称已计算或已验证的评分。
 不得使用 Markdown 代码块、自然语言前后缀或多段 JSON。所有必需字段必须出现；没有值时按 schema 使用 null 或空数组。
+
+problem.fact_tables为重复实体的完整关联行表，与facts共同组成全部事实。columns对应values/fact_ids/evidence_refs的列序，row_columns定义行结构；column_defaults为各列共有类型/单位/状态/转换，cell_overrides按0起始列索引补充不同口径或说明，table_evidence_index还原来源编号。不遗漏表内订单；引用仍用原fact_ids和entity_id，订单池不是必得合同。

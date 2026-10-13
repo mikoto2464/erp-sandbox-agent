@@ -1,5 +1,6 @@
 import hashlib
 from dataclasses import replace
+from difflib import get_close_matches
 from importlib.resources import files
 
 from langchain_core.runnables import RunnableLambda
@@ -97,7 +98,7 @@ class CollaborativeStrategyGenerator:
                 "role": key,
                 "responsibility": responsibility,
                 "problem_version": snapshot.version,
-                "problem": problem_material(snapshot),
+                "problem": problem_material(snapshot, order_details=key != "budget"),
                 "rules": to_json(snapshot.reading.rules),
                 "issues": to_json(snapshot.reading.issues),
                 "generation": to_json(context.config),
@@ -139,7 +140,9 @@ class CollaborativeStrategyGenerator:
                 dumps(material),
                 "erp_solver_specialist",
                 schema,
-                max_output_tokens=3200,
+                max_output_tokens=4000,
+                reasoning_reserve_tokens=8192,
+                stream=True,
                 retries=0,
                 task=task,
             )
@@ -150,7 +153,7 @@ class CollaborativeStrategyGenerator:
                 + hashlib.sha256(
                     dumps(
                         {
-                            "version": "solver-6",
+                            "version": "solver-7",
                             "material": material,
                             "prompt": prompt,
                             "schema": schema,
@@ -165,12 +168,24 @@ class CollaborativeStrategyGenerator:
                 entry = obj(
                     value, {"entity_id", "periods", "recommendation", "fact_ids", "rule_ids"}
                 )
-                if (
-                    string(entry["entity_id"]) not in entities
-                    or {string(v) for v in array(entry["fact_ids"])} - fact_ids
-                    or {string(v) for v in array(entry["rule_ids"])} - rule_ids
+                for label, used, allowed in (
+                    ("实体", {string(entry["entity_id"])}, entities),
+                    ("字段", {string(v) for v in array(entry["fact_ids"])}, fact_ids),
+                    ("规则", {string(v) for v in array(entry["rule_ids"])}, rule_ids),
                 ):
-                    raise ERPError("solver_source", "协作建议引用未知实体、字段或规则。")
+                    unknown = sorted(used - allowed)
+                    if unknown:
+                        hints = [
+                            f"{value}（相近合法ID："
+                            f"{', '.join(get_close_matches(value, sorted(allowed), n=2))}）"
+                            for value in unknown[:3]
+                        ]
+                        raise ERPError(
+                            "solver_source",
+                            f"协作建议引用未知{label}："
+                            + "；".join(hints)
+                            + "。请核对输入，只用原ID或删除无依据引用。",
+                        )
                 string(entry["periods"])
                 string(entry["recommendation"])
             for value in array(data["dependencies"]) + array(data["risks"]):
@@ -293,7 +308,10 @@ class CollaborativeStrategyGenerator:
                 )
                 return {"role": task.role, "object": task.object, **data}
 
-            if children and ((saved and saved.get("split")) or len(request.user) > 24000):
+            if children and (
+                (saved and saved.get("split"))
+                or len(dumps(material.get("budget_templates", []))) > 24000
+            ):
                 return split()
             client = TaskLLMClient(self.llm, self.control, task)
             payload = material
@@ -311,7 +329,7 @@ class CollaborativeStrategyGenerator:
                         task,
                         "running",
                         input_chars=len(request.user),
-                        output_limit=3200,
+                        output_limit=4000,
                     )
                     response = recovery_call(client, request, self.control)
                     data = decode(obj(loads(normalize_model_json(response.content))))
@@ -373,10 +391,10 @@ class CollaborativeStrategyGenerator:
         results = RunnableLambda(run).batch(
             units, config={"max_concurrency": 2}, return_exceptions=True
         )
-        self.control.checkpoint("synthesizing_strategy")
         for result in results:
             if isinstance(result, Exception):
                 raise result
+        self.control.checkpoint("synthesizing_strategy")
         findings = [result for result in results if isinstance(result, dict)]
         generator = LLMStrategyGenerator(
             TaskLLMClient(self.llm, self.control, synthesis_task),
