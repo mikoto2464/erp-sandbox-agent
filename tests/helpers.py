@@ -41,6 +41,16 @@ class FakeLLM:
         if request.schema_name == "erp_solver_specialist":
             return LLMResponse(dumps({"recommendations": [], "dependencies": [], "risks": []}),
                                "test-model")
+        if request.schema_name == "erp_solver_budget":
+            from erp_agent.application.contracts import loads
+            payload = loads(self.response)
+            return LLMResponse(dumps({"budget_items": payload['plan'].get('budget_items', [])}),
+                               "test-model")
+        if request.schema_name == "erp_strategy" and "budget_items必须为空" in request.system:
+            from erp_agent.application.contracts import loads
+            payload = loads(self.response)
+            payload['plan']['budget_items'] = []
+            return LLMResponse(dumps(payload), "test-model")
         return LLMResponse(self.response, "test-model")
 
 

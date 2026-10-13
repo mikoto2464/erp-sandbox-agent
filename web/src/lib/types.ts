@@ -219,6 +219,10 @@ export interface ModelLoad {
   available: number;
 }
 export interface AgentTask {
+  input_chars?: number;
+  output_limit?: number;
+  recovery?: string;
+  child_count?: number;
   input_group_count?: number;
   recommendation_count?: number;
   task_kind?: string;

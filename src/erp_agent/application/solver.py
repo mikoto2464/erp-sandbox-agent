@@ -3,21 +3,13 @@ from dataclasses import replace
 from importlib.resources import files
 from uuid import uuid4
 
-from langchain_core.runnables import RunnableLambda
-
-from erp_agent.application.budget_context import budget_material
 from erp_agent.application.contracts import (
     PROPOSAL_SCHEMA,
-    TEXT,
     JSONObject,
-    array,
     decode_proposal,
     dumps,
-    loads,
-    obj,
-    object_schema,
-    string,
 )
+from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import (
     LLMClient,
@@ -25,9 +17,14 @@ from erp_agent.application.ports import (
     PlanEvaluator,
     RunControl,
     StrategyGenerator,
-    TaskContext,
 )
-from erp_agent.application.task_reporting import TaskLLMClient, report_task
+from erp_agent.application.solver_collaboration import (
+    CollaborativeStrategyGenerator as CollaborativeStrategyGenerator,
+)
+from erp_agent.application.solver_context import (
+    planning_templates,
+    problem_material,
+)
 from erp_agent.domain.budget_validation import validate_budget_items
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
@@ -55,6 +52,8 @@ class LLMStrategyGenerator:
         self.llm = llm
         self.on_repair = on_repair
         self.collaboration: tuple[JSONObject, ...] = ()
+        self.control: RunControl | None = None
+        self.defer_budget = False
 
     def propose(
         self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_PLANNING_CONTEXT
@@ -64,17 +63,17 @@ class LLMStrategyGenerator:
         material = {
             "project_id": snapshot.project_id,
             "problem_version": snapshot.version,
-            "problem": snapshot.reading.problem,
+            "problem": problem_material(snapshot),
             "rules": snapshot.reading.rules,
             "issues": snapshot.reading.issues,
         }
         instruction = "只生成完整经营方案，parameters 必须为空数组。"
         tones = {
             PlanTone.CONSERVATIVE: "保守：优先现金安全与履约，控制借款、扩产和前期投入，"
-                                   "说明收益取舍。",
+            "说明收益取舍。",
             PlanTone.BALANCED: "平稳：兼顾现金周转与增长，分阶段投入，给出适度的风险缓冲。",
             PlanTone.AGGRESSIVE: "激进：在题目硬约束内争取增长与得分，可提高投入或融资，"
-                                 "说明压力与退路。",
+            "说明压力与退路。",
             PlanTone.CUSTOM: "自定义：采用 custom_prompt 中的经营偏好，仍遵守题目与已确认规则。",
         }
         payload = {
@@ -82,11 +81,14 @@ class LLMStrategyGenerator:
             "mode_instruction": instruction,
             "generation": context.config,
             "tone_instruction": tones[context.config.tone],
-            "budget_templates": budget_material(context.templates),
+            "budget_templates": planning_templates(context.templates),
             "previous_plan": context.previous_plan,
             "template_readings": snapshot.template_readings,
             "collaboration": self.collaboration,
         }
+        if self.defer_budget:
+            prompt += "\n本阶段只统筹完整经营行动和策略，结合模板输入需求安排可执行动作；"
+            prompt += "budget_items必须为空，后续预算阶段基于固定行动逐表安排预算。"
         original_payload = payload
         for attempt in range(2):
             response = None
@@ -95,20 +97,36 @@ class LLMStrategyGenerator:
                     self.llm, "max_input_chars", 100_000
                 ):
                     raise ERPError("solver_input_limit", "方案输入超过模型容量，请减少空表或资料。")
-                response = self.llm.generate(
-                    LLMRequest(
-                        prompt + "\nJSON schema:\n" + schema,
-                        dumps(payload),
-                        "erp_strategy",
-                        schema,
-                    )
+                request = LLMRequest(
+                    prompt + "\nJSON schema:\n" + schema,
+                    dumps(payload),
+                    "erp_strategy",
+                    schema,
+                    retries=0,
+                    task=getattr(self.llm, "task", None),
+                )
+                response = (
+                    recovery_call(self.llm, request, self.control)
+                    if self.control
+                    else self.llm.generate(request)
                 )
                 proposal = decode_proposal(normalize_model_json(response.content), response.model)
-                if context.templates and not proposal.baseline.budget_items:
+                if self.defer_budget:
+                    if proposal.baseline.budget_items:
+                        raise ERPError("invalid_contract", "行动统筹阶段不能生成预算条目。")
+                    evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
+                    errors = [i.message for i in evaluation.issues if i.severity == "error"]
+                    if errors:
+                        raise ERPError("strategy_plan_invalid", "；".join(errors[:8]))
+                if (
+                    context.templates
+                    and not self.defer_budget
+                    and not proposal.baseline.budget_items
+                ):
                     raise ERPError(
                         "invalid_contract", "上传预算表后方案必须包含预算条目及未确定项。"
                     )
-                if context.templates and attempt == 0:
+                if context.templates and not self.defer_budget and attempt == 0:
                     issues = validate_budget_items(
                         SolveRequest(snapshot, SolverMode.LLM_ONLY, context=context),
                         proposal.baseline,
@@ -195,140 +213,6 @@ class DraftPlanEvaluator:
             tuple(issues),
             "结构校验草稿，尚未验证经营可行性",
         )
-
-
-class CollaborativeStrategyGenerator:
-    def __init__(self, llm: LLMClient, control: RunControl) -> None:
-        self.llm, self.control = llm, control
-
-    def propose(
-        self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_PLANNING_CONTEXT
-    ) -> StrategyProposal:
-        schema = dumps(
-            object_schema(
-                {
-                    "recommendations": {
-                        "type": "array",
-                        "items": object_schema(
-                            {
-                                "entity_id": TEXT,
-                                "periods": TEXT,
-                                "recommendation": TEXT,
-                                "fact_ids": {"type": "array", "items": TEXT},
-                                "rule_ids": {"type": "array", "items": TEXT},
-                            }
-                        ),
-                    },
-                    "dependencies": {"type": "array", "items": TEXT},
-                    "risks": {"type": "array", "items": TEXT},
-                }
-            )
-        )
-        roles = [
-            ("operations", "产销与资源规划", "协调产品、订单池、产能、材料、人力、研发与认证。"),
-            ("finance", "资金与风险规划", "协调融资、费用、现金时序、商誉、碳及得分条件。"),
-        ]
-        if context.templates:
-            roles.append(("budget", "模板预算规划", "按已核对空表识别输入项目与经营动作依赖。"))
-        entities = {f.entity_id for f in snapshot.reading.problem.facts} | {"company"}
-        fact_ids = {f.id for f in snapshot.reading.problem.facts}
-        rule_ids = {r.id for r in snapshot.reading.rules.rules}
-        prompt = files("erp_agent").joinpath("prompts/solver_specialist.txt").read_text()
-
-        synthesis_task = TaskContext(
-            "solver:synthesis", "Solver", "统筹逐期方案与预算",
-            snapshot.reading.problem.title, "solver",
-        )
-
-        def task_for(role: tuple[str, str, str]) -> TaskContext:
-            return TaskContext(
-                "solver:" + role[0], "Solver", role[1], snapshot.reading.problem.title, "solver"
-            )
-
-        for role in roles:
-            report_task(self.control, task_for(role), "queued")
-        report_task(self.control, synthesis_task, "queued")
-
-        def run(role: tuple[str, str, str]) -> JSONObject:
-            key, name, responsibility = role
-            task = task_for(role)
-            client = TaskLLMClient(self.llm, self.control, task)
-            material = {
-                "role": key,
-                "responsibility": responsibility,
-                "problem": snapshot.reading.problem,
-                "rules": snapshot.reading.rules,
-                "issues": snapshot.reading.issues,
-                "generation": context.config,
-                "previous_plan": context.previous_plan,
-                "template_readings": snapshot.template_readings,
-            }
-            if key == "budget":
-                material["budget_templates"] = budget_material(context.templates)
-            for attempt in range(2):
-                self.control.checkpoint("planning_" + key)
-                if len(prompt) + len(schema) + len(dumps(material)) > getattr(
-                    self.llm, "max_input_chars", 100_000
-                ):
-                    report_task(self.control, task, "failed", error="输入超过模型容量。")
-                    raise ERPError(
-                        "solver_input_limit", name + "输入超过模型容量，请减少空表或资料。"
-                    )
-                response = client.generate(
-                    LLMRequest(
-                        prompt + "\nJSON schema:\n" + schema,
-                        dumps(material),
-                        "erp_solver_specialist",
-                        schema,
-                        max_output_tokens=6000,
-                        retries=0,
-                    )
-                )
-                try:
-                    data = obj(
-                        loads(normalize_model_json(response.content)),
-                        {"recommendations", "dependencies", "risks"},
-                    )
-                    for value in array(data["recommendations"]):
-                        entry = obj(
-                            value,
-                            {"entity_id", "periods", "recommendation", "fact_ids", "rule_ids"},
-                        )
-                        if (
-                            string(entry["entity_id"]) not in entities
-                            or {string(v) for v in array(entry["fact_ids"])} - fact_ids
-                            or {string(v) for v in array(entry["rule_ids"])} - rule_ids
-                        ):
-                            raise ERPError("solver_source", "协作建议引用未知实体、字段或规则。")
-                        string(entry["periods"])
-                        string(entry["recommendation"])
-                    for value in array(data["dependencies"]) + array(data["risks"]):
-                        string(value)
-                    report_task(
-                        self.control,
-                        task,
-                        "succeeded",
-                        model=response.model,
-                        recommendation_count=len(array(data["recommendations"])),
-                    )
-                    return {"role": name, **data}
-                except ERPError as error:
-                    if attempt:
-                        report_task(self.control, task, "failed", error=error.message)
-                        raise
-                    material["error"] = error.message
-            raise ERPError("solver_specialist_invalid", "协作规划失败。")
-
-        findings = RunnableLambda(run).batch(roles, config={"max_concurrency": 3})
-        self.control.checkpoint("synthesizing_strategy")
-        generator = LLMStrategyGenerator(
-            TaskLLMClient(self.llm, self.control, synthesis_task),
-            lambda: self.control.checkpoint("repairing_strategy"),
-        )
-        generator.collaboration = tuple(findings)
-        proposal = generator.propose(snapshot, context)
-        report_task(self.control, synthesis_task, "succeeded", model=proposal.model)
-        return proposal
 
 
 class SolverService:

@@ -14,7 +14,9 @@ export function readingProgress(job: Job) {
   const candidates = (job.tasks || []).filter(
     (task) =>
       (job.kind === 'solve'
-        ? task.agent === 'Solver' && task.parent_id === 'solver'
+        ? task.agent === 'Solver' &&
+          !!task.parent_id &&
+          (task.parent_id === 'solver' || task.parent_id.startsWith('solver:'))
         : isExtraction(task)) && task.status !== 'split',
   );
   const parents = new Set(candidates.map((task) => task.parent_id).filter(Boolean));

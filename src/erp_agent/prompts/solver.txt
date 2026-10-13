@@ -11,15 +11,16 @@ previous_plan 存在时基于该方案调整，保留仍适用的安排，在 su
 不虚构未确认的贷款额度、竞单合同、市场份额、现金、利润或最终得分。
 存在缺口时明确列出 assumptions 和 risks；输出是待仿真验证草稿。
 period 从 1 开始连续编号；每期至少有一个行动，无经营操作时用 kind=review 记录该期复核任务。
-所有行动引用题目中已有 entity_id；全局财务复核用 entity_id=company。
+所有行动引用题目facts行中已有 entity_id；全局财务复核用 entity_id=company。
 amount 使用金额字符串或 null，quantity 使用非负整数或 null，不在字段混用数量、比例和金额。
 budget_templates 为用户希望输出的预算结构，不是赛题规则或真实经营数据。结合表名、行列标题、期间、单位和合并区域识别待规划条目，不按固定坐标猜语义。
 有空表时先识别每张工作表的输入区、期间、经营对象及单位，再围绕这些输入制定逐期 actions 和 budget_items，最后检查操作与预算互相对应。覆盖所有适用工作表与输入项目，不只填写少量借款或广告；数量、采购、生产、人力、研发、融资与费用分别按表中语义安排，缺少依据的报表输入留 null 并说明。模板未使用的经营对象只在方案明确不使用、对应项目已确认不发生时可规划为0；未知不等于0。
-模板 cells 每项为[坐标,原值,数字格式,是否公式,是否可写]；blank_ranges 每项为[空白格范围,数字格式,是否可写]，未列出的范围内空格没有专门格式信息。合并区域仅左上角可引用。
+problem.fact_columns定义facts每行的列序；facts保留所有实体、数值、单位、状态和提取/确认说明。规则和本次要求为权威，协作建议不能新增事实。
+budget_templates只包含原表非公式标签cells=[坐标,原值]和可写空白input_ranges=[范围,数字格式]，结合已核对template_readings的用途、期间、输入分组和issue_reviews逐条答复规划；不要重读模板、求公式展示值或改原有数据。合并区域仅左上角可引用。
 有模板时 budget_items 逐项给出 template_id、sheet、cell（A1格式）、label、period（同经营期编号或null）、unit、value（草稿值字符串或null）、action_indices（从0开始）及 explanation。
-覆盖适用的经营输入/预算条目，与 actions 相互关联；无法映射、依赖未确定条件或尚无计算依据时 value=null，说明原因和需补条件。只规划空白输入格，公式、已有数值/文字、隐藏/保护格和合并续格不列入 budget_items。input_ranges 是输入候选；formula_references 可辅助理解依赖，不代表所有空白格必填。
+覆盖适用的经营输入/预算条目，与 actions 相互关联；无法映射、依赖未确定条件或尚无计算依据时 value=null，说明原因和需补条件。只规划空白输入格，公式、已有数值/文字、隐藏/保护格和合并续格不列入 budget_items。input_ranges 是确定性筛出的空白可写候选，不代表全部必填；Reader的已核对输入组定义语义。
 金额/数量可提出有依据的暂定预算，在 explanation 标明依据、计算关系及未验证状态；不虚构已验证的财务报表。没有模板时 budget_items=[]。
 kind 使用简洁稳定的英文动作名，description 说明操作与前置条件。
 parameters 必须为空数组，不生成搜索范围；所有预算值与行动保持一致。
-范围须包含基线值并说明风险；不输出任何自称已计算或已验证的评分。
+不输出任何自称已计算或已验证的评分。
 不得使用 Markdown 代码块、自然语言前后缀或多段 JSON。所有必需字段必须出现；没有值时按 schema 使用 null 或空数组。

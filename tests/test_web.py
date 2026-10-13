@@ -168,7 +168,7 @@ class WebTests(unittest.TestCase):
         done = self.wait_job(project, job['id'])
         self.assertEqual(done['status'], 'succeeded')
         first = self.request(base + '/solutions')[0]
-        payload = loads(self.llm.calls[-1].user)
+        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_strategy'))
         self.assertEqual(payload['budget_templates'][0]['source']['id'], template['source']['id'])
         self.assertIn('保守', payload['tone_instruction'])
         self.assertIsNone(payload['previous_plan'])
@@ -186,7 +186,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(plans), 3)
         self.assertEqual(plans[0]['raw_response'], old_raw)
         self.assertEqual(plans[-1]['generation']['requirements'], ['第一年不增产线', '继续减少借款'])
-        payload = loads(self.llm.calls[-1].user)
+        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_strategy'))
         self.assertEqual(payload['previous_plan']['title'], '第一年不增产线')
         self.assertNotIn('raw_response', payload)
         self.assertEqual(len(self.request(base + '/documents')), 1)
@@ -843,7 +843,10 @@ class WebTests(unittest.TestCase):
         job = self.request(base + '/solve', {'version': revised['version']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         material = loads(self.llm.calls[-1].user)['snapshot']
-        self.assertEqual(material['problem']['facts'][-2:], [fact, basis])
+        columns = material['problem']['fact_columns']
+        rows = [dict(zip(columns, row, strict=True)) for row in material['problem']['facts'][-2:]]
+        self.assertEqual(rows, [{key: value for key, value in item.items() if key in columns}
+                                for item in (fact, basis)])
         self.assertIn(issue, material['issues'])
 
     def test_missing_horizon_uses_defaults_and_generates_without_confirmation(self):

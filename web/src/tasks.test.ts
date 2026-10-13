@@ -61,12 +61,29 @@ describe('reading progress and review summaries', () => {
       agent: 'Solver',
       parent_id: 'solver',
       role: id,
+      object: id,
       status: index === 0 ? 'succeeded' : 'queued',
     }));
     const job = { kind: 'solve', tasks: [...roles, { ...roles[0], agent: '主 Agent' }] } as Job;
     expect(readingProgress(job).total).toBe(3);
     expect(readingProgress(job).processed).toBe(1);
     expect(readingProgress(job).waiting).toBe(2);
+    job.tasks!.push(
+      { ...roles[0], id: 'solver:budget:0', parent_id: 'solver:budget', status: 'split' },
+      { ...roles[0], id: 'solver:budget:0:0', parent_id: 'solver:budget:0', status: 'cached' },
+      { ...roles[0], id: 'solver:budget:0:1', parent_id: 'solver:budget:0', status: 'running' },
+      { ...roles[0], id: 'solver:values:0:0', parent_id: 'solver', status: 'split' },
+      { ...roles[0], id: 'solver:values:0:0:0', parent_id: 'solver:values:0:0', status: 'queued' },
+    );
+    expect(readingProgress(job)).toEqual({
+      total: 6,
+      completed: 2,
+      processed: 2,
+      active: 1,
+      waiting: 3,
+      unresolved: 0,
+      failed: 0,
+    });
   });
 
   it('shows each specific cause once while preserving separate genuine concerns', () => {

@@ -250,6 +250,9 @@ function duration(task: AgentTask) {
               </details>
             </div>
             <div class="task-metrics">
+              <span v-if="task.input_chars != null">输入 {{ task.input_chars }} 字符</span>
+              <span v-if="task.output_limit">请求输出预算 {{ task.output_limit }} Token</span>
+              <span v-if="task.child_count">{{ task.child_count }} 个恢复子任务</span>
               <span v-if="task.input_group_count != null"
                 >{{ task.input_group_count }} 组输入项目</span
               >
@@ -265,6 +268,12 @@ function duration(task: AgentTask) {
               <span v-if="(task.attempt || 0) > 1">第 {{ task.attempt }} 次请求</span>
               <span v-if="duration(task)">{{ duration(task) }}</span>
             </div>
+            <p
+              v-if="task.recovery"
+              class="muted"
+            >
+              {{ task.recovery }}
+            </p>
             <p
               v-if="task.error"
               class="error"

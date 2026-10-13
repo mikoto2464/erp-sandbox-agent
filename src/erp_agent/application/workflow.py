@@ -565,16 +565,19 @@ class WorkflowService:
 
         def operation(control: RunControl) -> JSONValue:
             generator = self.solver.generator
+            role_memory = None
             if binding or isinstance(generator, LLMStrategyGenerator):
                 task = TaskContext("solver", "Solver", "策略生成", f"经营方案 · {snapshot.reading.problem.title}")
                 client = TaskLLMClient(binding.client if binding else generator.llm, control, task)
                 if self.memory:
                     self.memory.remember(snapshot)
                     role_memory = self.memory.scope(project_id, snapshot.version,
-                        "solver:" + hashlib.sha256(dumps(config).encode()).hexdigest())
+                        "solver:" + hashlib.sha256(dumps({"config": config, "version": "solver-6",
+                            "model": binding.metadata() if binding else None}).encode()).hexdigest(),
+                        snapshot.document_ids)
                     role_memory.put("requirements", {"generation": to_json(config)})
                     client = MemoryLLMClient(client, role_memory, "经营策略 " + dumps(config))
-                generator = CollaborativeStrategyGenerator(client, control)
+                generator = CollaborativeStrategyGenerator(client, control, role_memory)
             result = self.solver.solve(request, control, generator)
             report_task(control, TaskContext("solver", "Solver", "策略生成", snapshot.reading.problem.title),
                         "succeeded" if result.evaluation.feasible else "needs_input")
@@ -586,5 +589,5 @@ class WorkflowService:
 
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
-                                 "generation": to_json(config), "prompt_version": "solver-5",
+                                 "generation": to_json(config), "prompt_version": "solver-6",
                                  "model_preset": binding.metadata() if binding else None})

@@ -23,7 +23,23 @@ class MemoryLLMClient:
     def generate(self, request: LLMRequest) -> LLMResponse:
         return self._generate(request)
 
+    def plan_solver(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        planner = getattr(self.client, "plan_solver", None)
+        if planner:
+            planner(tuple(self._prepare(request) for request in requests), control, concurrency)
+
     def _generate(self, request: LLMRequest, control: RunControl | None = None) -> LLMResponse:
+        prepared = self._prepare(request)
+        controlled = getattr(self.client, "generate_controlled", None)
+        return (
+            controlled(prepared, control)
+            if controlled and control
+            else self.client.generate(prepared)
+        )
+
+    def _prepare(self, request: LLMRequest) -> LLMRequest:
         material = obj(loads(request.user))
         material["shared_alignment"] = self.memory.alignment()
         material["shared_memory"] = to_json(self.memory.recall(self.query, 1800))
@@ -44,11 +60,4 @@ class MemoryLLMClient:
             + "\n共享记忆仅辅助名称和口径一致，当前版本规范题目/方案与本次要求优先。"
             + "记忆不能替代数值或原文来源。"
         )
-        prepared = replace(request, system=system, user=dumps(material))
-        controlled = getattr(self.client, "generate_controlled", None)
-        response = (
-            controlled(prepared, control)
-            if controlled and control
-            else self.client.generate(prepared)
-        )
-        return response
+        return replace(request, system=system, user=dumps(material))

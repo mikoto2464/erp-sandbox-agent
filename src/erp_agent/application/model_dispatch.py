@@ -190,9 +190,16 @@ class ModelDispatcher:
         client: LLMClient,
         max_chars: int,
         concurrency: int,
+        purpose: str = "reader",
     ) -> dict[str, DispatchDecision]:
         prompt = (
-            files("erp_agent").joinpath("prompts/reader_dispatch.txt").read_text(encoding="utf-8")
+            files("erp_agent")
+            .joinpath(
+                "prompts/solver_dispatch.txt"
+                if purpose == "solver"
+                else "prompts/reader_dispatch.txt"
+            )
+            .read_text(encoding="utf-8")
         )
         schema = dumps(READING_DISPATCH_SCHEMA)
         tasks: list[JSONObject] = []
@@ -200,7 +207,7 @@ class ModelDispatcher:
         task_ids: dict[str, str] = {}
         for index, request in enumerate(requests):
             if request.task is None:
-                raise ERPError("dispatch_contract", "读题任务缺少标识。")
+                raise ERPError("dispatch_contract", "待分配任务缺少标识。")
             task = task_material(request)
             task.pop("instructions", None)
             sample = string(task["content_sample"])
@@ -212,14 +219,14 @@ class ModelDispatcher:
             task["task_id"] = task_id
             allowed = [m for m in models if int(m["max_input_chars"]) >= int(task["input_chars"])]
             if not allowed:
-                raise ERPError("llm_input_limit", "完整章节或表格超过所有模型输入上限。", 413)
+                raise ERPError("llm_input_limit", "完整任务超过所有模型输入上限。", 413)
             task["eligible_model_ids"] = [m["id"] for m in allowed]
             eligible_by_task[task_id] = allowed
             tasks.append(task)
         payload: JSONObject = {"models": models, "tasks": tasks, "worker_concurrency": concurrency}
         while len(prompt) + len(schema) + len(dumps(payload)) > max_chars:
             if all(len(string(task["content_sample"])) <= 150 for task in tasks):
-                raise ERPError("dispatch_input_limit", "章节任务目录超过主 Agent 输入上限。")
+                raise ERPError("dispatch_input_limit", "任务目录超过主 Agent 输入上限。")
             for task in tasks:
                 sample = string(task["content_sample"])
                 task["content_sample"] = sample[: max(150, len(sample) // 2)]
@@ -227,7 +234,7 @@ class ModelDispatcher:
             LLMRequest(
                 prompt,
                 dumps(payload),
-                "erp_reader_dispatch",
+                "erp_solver_dispatch" if purpose == "solver" else "erp_reader_dispatch",
                 schema,
                 max_output_tokens=min(16000, max(2000, len(tasks) * 400)),
                 retries=0,
@@ -239,12 +246,12 @@ class ModelDispatcher:
             item = obj(value, {"task_id", "difficulty", "assignments", "summary"})
             task_id = string(item.pop("task_id"))
             if task_id not in eligible_by_task or task_id in decisions:
-                raise ERPError("dispatch_contract", "主 Agent 返回了重复或未知章节任务。")
+                raise ERPError("dispatch_contract", "主 Agent 返回了重复或未知任务。")
             decisions[task_id] = self._decode(
                 {**item, "reuse_scope": "none"}, eligible_by_task[task_id]
             )
         if set(decisions) != set(eligible_by_task):
-            raise ERPError("dispatch_contract", "主 Agent 未完成全部章节与整表的分配。")
+            raise ERPError("dispatch_contract", "主 Agent 未完成全部任务的分配。")
         return {task_ids[key]: decision for key, decision in decisions.items()}
 
     def decide(

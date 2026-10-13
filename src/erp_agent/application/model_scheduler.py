@@ -221,25 +221,37 @@ class ScheduledLLMClient:
     def generate(self, request: LLMRequest) -> LLMResponse:
         return self.generate_controlled(request, None)
 
+    def plan_solver(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        self.plan_reading(requests, control, concurrency, purpose="solver")
+
     def plan_reading(
         self,
         requests: tuple[LLMRequest, ...],
         control: RunControl,
         concurrency: int,
+        purpose: str = "reader",
     ) -> None:
         if len(self.models) <= 1 or not requests:
             return
         if any(request.task is None for request in requests):
-            raise ERPError("dispatch_contract", "章节统筹请求缺少任务标识。")
+            raise ERPError("dispatch_contract", "统筹请求缺少任务标识。")
         primary = self.models[0]
+        solver = purpose == "solver"
         task = TaskContext(
-            "reader:dispatch",
+            purpose + ":dispatch",
             "主 Agent",
-            "统一分配章节与整表",
-            f"{len(requests)} 个读题任务",
-            "reader",
+            "统一分配协作规划" if solver else "统一分配章节与整表",
+            f"{len(requests)} 个{'规划' if solver else '读题'}任务",
+            purpose,
         )
-        report_task(control, task, "waiting", stage="dispatching_reading")
+        report_task(
+            control,
+            task,
+            "waiting",
+            stage="dispatching_solver" if solver else "dispatching_reading",
+        )
         acquired = self._acquire((primary,), control)
         try:
             self._check(control)
@@ -257,12 +269,14 @@ class ScheduledLLMClient:
                 model_loads=catalog,
             )
             try:
+                options = {"purpose": purpose} if solver else {}
                 decisions = self.dispatcher.plan_reading(
                     requests,
                     catalog,
                     primary.client,
                     int(primary.configuration["max_input_chars"]),
                     concurrency,
+                    **options,
                 )
             except Cancelled:
                 raise
@@ -301,6 +315,8 @@ class ScheduledLLMClient:
                 planned_count=len(decisions),
                 dispatch_reason=next(iter(decisions.values())).summary
                 if failed
+                else "已统一安排协作规划，子任务直接执行。"
+                if solver
                 else "已统一安排章节与整表，子任务直接执行。",
             )
             for request in requests:
@@ -318,7 +334,7 @@ class ScheduledLLMClient:
                         next(m.preset_name for m in self.models if m.preset_id == a.preset_id)
                         for a in decision.assignments
                     ],
-                    stage="reading_assigned",
+                    stage="planning_assigned" if solver else "reading_assigned",
                 )
         finally:
             self.capacity.release(acquired)
@@ -333,7 +349,14 @@ class ScheduledLLMClient:
         child = request.task
         with self._lock:
             planned = self._reading_plan.get(child.id) if child else None
-            if child and not planned and child.parent_id.startswith("template-read:"):
+            if (
+                child
+                and not planned
+                and (
+                    child.parent_id.startswith("template-read:")
+                    or child.parent_id.startswith("solver:")
+                )
+            ):
                 planned = self._reading_plan.get(child.parent_id)
         if planned:
             try:
@@ -343,8 +366,13 @@ class ScheduledLLMClient:
             except ERPError:
                 planned = None
         if planned:
+            solver = planned[1].startswith("solver:")
             dispatch = TaskContext(
-                planned[1], "主 Agent", "统一分配章节与整表", "读题统筹", "reader"
+                planned[1],
+                "主 Agent",
+                "统一分配协作规划" if solver else "统一分配章节与整表",
+                "规划统筹" if solver else "读题统筹",
+                "solver" if solver else "reader",
             )
         else:
             child, dispatch = self._task(request)
@@ -355,7 +383,7 @@ class ScheduledLLMClient:
             assignments = tuple(a for a in decision.assignments if a.preset_id in eligible_ids)
             if not assignments:
                 raise ERPError(
-                    "llm_input_limit", "已分配模型无法承载完整读题任务，请拆小任务。", 413
+                    "llm_input_limit", "已分配模型无法承载完整任务，请拆小任务。", 413
                 )
             decision = DispatchDecision(
                 decision.difficulty, assignments, decision.summary, decision.fallback

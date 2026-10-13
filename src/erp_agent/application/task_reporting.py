@@ -36,3 +36,10 @@ class TaskLLMClient:
         response = self.client.generate(request)
         report_task(self.control, self.task, "running", model=response.model)
         return response
+
+    def plan_solver(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        planner = getattr(self.client, "plan_solver", None)
+        if planner:
+            planner(requests, control, concurrency)
