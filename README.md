@@ -117,7 +117,9 @@ systemctl restart erp-sandbox-agent
 journalctl -u erp-sandbox-agent -n 50 --no-pager
 ```
 
-先安装新版依赖并校验配置，再切换 `current` 和重启服务；保留旧版本便于回退。服务器需 Python >= 3.11、venv 和 LibreOffice Writer（用于 DOC 转换）。上传代码不包含 `sample/`、本地项目数据库或 SSH 凭据。
+先安装新版依赖并校验配置，再切换 `current` 和重启服务；保留旧版本便于回退。服务器需 Python >= 3.11、venv 和 LibreOffice Writer（用于 DOC 转换）。上传代码不包含 `sample/` 或 SSH 凭据，本地项目数据默认不上传。明确要求同步本地服务数据时，用 SQLite backup API 制作数据库快照，先备份云端数据，再同步数据库和私有模型预设；保留云端访问密钥及环境配置。
+
+2026-10-14 已部署应用代码 `7ab4d73`，发布目录为 `/opt/erp-sandbox-agent/releases/7ab4d73-20261013T232502Z`。按用户要求同步本地项目、题目原件、空表库、快照、任务、共享记忆及 4 个模型预设。旧数据和配置备份在 `/var/backups/erp-sandbox-agent/7ab4d73-20261013T232502Z`。服务监听 `0.0.0.0:8000`，数据库完整性、业务与记忆内容一致性及登录/页面/API 检查通过；没有调用付费模型或执行完整方案求解。未完成任务按服务重启规则标记失败，可在界面重试。
 
 ## 使用
 
