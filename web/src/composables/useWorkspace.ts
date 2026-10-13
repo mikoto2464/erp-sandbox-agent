@@ -192,6 +192,11 @@ export function useWorkspace(router: Router) {
       void router.push('/projects');
     });
   }
+  function goTemplateLibrary() {
+    navigate(() => {
+      void router.push('/templates');
+    });
+  }
   function setStep(step: number) {
     if (project.value)
       void router.replace({
@@ -343,6 +348,28 @@ export function useWorkspace(router: Router) {
     }
     notify('预算表已提交解析。');
     await refresh();
+  }
+  async function importLibraryTemplate(templateId: string) {
+    if (!project.value) throw new Error('请先打开项目。');
+    if (readingDirty.value || inputChanged.value)
+      throw new Error('请先保存并读取题目修改，再导入空表。');
+    const captured = generation;
+    const result = await post<{ template_id: string; version: number | null }>(
+      base() + '/templates/import',
+      { template_id: templateId },
+    );
+    if (captured !== generation) return;
+    await refresh();
+    if (result.version) {
+      const value = await request<{ snapshot: Snapshot }>(base() + '/problem');
+      if (captured !== generation) return;
+      acceptReading(value.snapshot);
+    }
+    if (!readTemplateIds.value.includes(result.template_id))
+      readTemplateIds.value.push(result.template_id);
+    if (!templateIds.value.includes(result.template_id) && templateIds.value.length < 3)
+      templateIds.value.push(result.template_id);
+    notify('已导入空表及确认解读，无需重新读取。', 'success');
   }
   async function deleteUpload(kind: 'document' | 'template', id: string) {
     const captured = generation,
@@ -756,6 +783,7 @@ export function useWorkspace(router: Router) {
     navigate,
     discardAndNavigate,
     goProjects,
+    goTemplateLibrary,
     setStep,
     setReviewTab,
     annotation,
@@ -769,6 +797,7 @@ export function useWorkspace(router: Router) {
     upload,
     solve,
     uploadTemplates,
+    importLibraryTemplate,
     deleteUpload,
     selectSolution,
     cancelJob,

@@ -241,6 +241,30 @@ class WebTests(unittest.TestCase):
             self.request(base + '/read', {'append': True, 'document_ids': [extra['source']['id']]})
         self.assertEqual(duplicate.exception.code, 400)
 
+    def test_shared_template_library_http_import_requires_review_and_uses_no_model(self):
+        from tests.test_template_library import workbook_bytes, output
+
+        project, _ = self.setup_problem()
+        job = self.request('/api/template-library', content=workbook_bytes(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx'})
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        tid = self.request('/api/template-library')[0]['id']
+        self.llm.response = output()
+        job = self.request(f'/api/template-library/{tid}/read', {})
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        self.assertEqual(self.request('/api/template-library/jobs')[-1]['status'], 'needs_input')
+        with self.assertRaises(HTTPError) as blocked:
+            self.request(f'/api/projects/{project}/templates/import', {'template_id': tid})
+        self.assertEqual(blocked.exception.code, 409)
+        self.request(f'/api/template-library/{tid}/review', {'reviewed': True})
+        before = len(self.llm.calls)
+        imported = self.request(f'/api/projects/{project}/templates/import', {'template_id': tid})
+        self.assertEqual(imported['version'], 2)
+        self.assertEqual(len(self.llm.calls), before)
+        snapshot = self.request(f'/api/projects/{project}/problem')['snapshot']
+        self.assertTrue(snapshot['template_readings'][0]['reviewed'])
+        self.assertEqual(self.request(f'/api/template-library/{tid}/read', {})['reused'], True)
+
     def test_delete_uploads_keeps_history_and_cleans_current_inputs(self):
         project, _ = self.setup_problem()
         base = f'/api/projects/{project}'

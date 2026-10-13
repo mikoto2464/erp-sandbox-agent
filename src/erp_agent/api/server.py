@@ -1,30 +1,33 @@
 import logging
 import re
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import CookieError, SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from erp_agent.adapters.documents import LibreOfficeConverter
-from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
 from erp_agent.adapters.artifacts import (
-    DocxReportRenderer, XlsxWorkbookRenderer, LibreOfficeSpreadsheetConverter,
+    DocxReportRenderer,
     LibreOfficeFormulaRecalculator,
+    LibreOfficeSpreadsheetConverter,
+    XlsxWorkbookRenderer,
 )
-from erp_agent.application.answerer import AnswererService
+from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
 from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
+from erp_agent.adapters.documents import LibreOfficeConverter
 from erp_agent.adapters.jobs import ThreadJobRunner
-from erp_agent.adapters.persistence import SQLiteRepository
+from erp_agent.adapters.memory import SQLiteMemoryService
 from erp_agent.adapters.model_settings import ModelSettingsService
+from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.adapters.sessions import SQLiteSessionStore
 from erp_agent.application.access import AccessService
+from erp_agent.application.answerer import AnswererService
 from erp_agent.application.contracts import JSONObject, dumps, integer, loads, obj, string, to_json
 from erp_agent.application.ports import LLMClient, PlanEvaluator
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.reading.roles import ReaderLimits
-from erp_agent.adapters.memory import SQLiteMemoryService
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
+from erp_agent.application.template_reader import LIBRARY_SCOPE
 from erp_agent.application.workflow import WorkflowService
 from erp_agent.config import Settings, load_env_file
 from erp_agent.domain.errors import ERPError
@@ -168,6 +171,31 @@ class Handler(BaseHTTPRequestHandler):
                 raise ERPError("method_not_allowed", "不支持该操作。", 405)
             return
         parts = path.strip("/").split("/")
+        if parts[:2] == ["api", "template-library"]:
+            library = workflow.template_library
+            if len(parts) == 2 and method == "GET":
+                self._json(library.items())
+            elif len(parts) == 2 and method == "POST":
+                self._json(library.upload(unquote(self.headers.get("X-Filename", "")),
+                    self._body(self.server.settings.max_upload_mb * 1024 * 1024)), 202)
+            elif len(parts) == 3 and parts[2] == "jobs" and method == "GET":
+                self._json(workflow.repository.list("job", LIBRARY_SCOPE))
+            elif len(parts) == 5 and parts[2] == "jobs" and parts[4] == "cancel" and method == "POST":
+                self._json(workflow.jobs.cancel(LIBRARY_SCOPE, parts[3]))
+            elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "GET":
+                self._json(library.detail(parts[2]))
+            elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "DELETE":
+                self._json(library.delete(parts[2]))
+            elif len(parts) == 4 and ID.fullmatch(parts[2]) and method == "POST":
+                if parts[3] == "read":
+                    self._json(library.read(parts[2]), 202)
+                elif parts[3] == "review":
+                    self._json(library.review(parts[2], self._body_json()))
+                else:
+                    raise ERPError("not_found", "接口不存在。", 404)
+            else:
+                raise ERPError("not_found", "接口不存在。", 404)
+            return
         if (len(parts) == 3 and parts[:2] == ["api", "projects"]
                 and ID.fullmatch(parts[2]) and method == "DELETE"):
             workflow.delete_project(parts[2])
@@ -177,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
             raise ERPError("not_found", "接口不存在。", 404)
         project_id, resource = parts[2:4]
         workflow.project(project_id)
+        if resource == "templates" and len(parts) == 5 and parts[4] == "import" and method == "POST":
+            self._json(workflow.import_library_template(project_id, self._body_json()))
+            return
         if len(parts) == 4:
             if resource == "documents":
                 if method == "GET":

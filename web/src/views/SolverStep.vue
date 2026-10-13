@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import AppSelect from '../components/AppSelect.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
+import TemplateLibraryPicker from '../components/TemplateLibraryPicker.vue';
 import type { BudgetTemplate, PlanTone } from '../lib/types';
 const {
   snapshot,
@@ -128,8 +129,9 @@ async function revise() {
         <div class="section-heading">
           <div>
             <h3>预算空表 <span class="muted">选填</span></h3>
-            <p class="muted">这里只显示读题阶段已核对的空表。新增空表请返回第一步读取。</p>
+            <p class="muted">选择已有空表，或从空表库导入已处理的表格。</p>
           </div>
+          <TemplateLibraryPicker />
         </div>
         <div
           v-for="template in availableTemplates"

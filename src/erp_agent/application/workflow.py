@@ -13,6 +13,7 @@ from erp_agent.application.codec import (
     parsed_document,
     problem_snapshot,
     reading_inputs,
+    template_reading,
 )
 from erp_agent.application.contracts import (
     JSONObject,
@@ -48,7 +49,8 @@ from erp_agent.application.solver import (
     SolverService,
 )
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
-from erp_agent.application.template_reader import TemplateReader
+from erp_agent.application.template_library import TemplateLibrary
+from erp_agent.application.template_reader import LIBRARY_SCOPE, TemplateReader
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     KnowledgeState,
@@ -88,6 +90,47 @@ class WorkflowService:
         self._read_lock = threading.Lock()
         self._input_lock = threading.Lock()
         self._solve_lock = threading.Lock()
+        self._template_lock = threading.RLock()
+        self.template_library = TemplateLibrary(repository, jobs, template_parser, reader.llm,
+                                                model_settings)
+
+    def import_library_template(self, project_id: str, data: JSONObject) -> JSONObject:
+        with self._template_lock, self._read_lock, self._solve_lock:
+            self.project(project_id)
+            tid = string(data.get("template_id"), 100)
+            detail = self.template_library.detail(tid)
+            template = budget_template(obj(detail["template"]))
+            reading = template_reading(obj(detail["reading"])) if detail["reading"] else None
+            if not reading or not reading.reviewed or reading.sha256 != template.source.sha256:
+                raise ERPError("template_not_reviewed", "请先在空表库完成解读与确认。", 409)
+            if any(obj(j).get("status") in {"running", "queued"}
+                   and obj(j).get("kind") in {"read", "solve"}
+                   for j in self.repository.list("job", project_id)):
+                raise ERPError("project_busy", "请等待当前读题或方案任务完成后导入空表。", 409)
+            matches = [budget_template(obj(t)) for t in self.repository.list("template", project_id)]
+            existing = next((t for t in matches if t.source.sha256 == template.source.sha256), None)
+            source = existing.source if existing else replace(template.source, id=uuid4().hex)
+            original = self.repository.get("template_original", LIBRARY_SCOPE, tid)
+            self.repository.put("template_original", project_id, source.id,
+                                {**original, "source": to_json(source)})
+            self.repository.put("template", project_id, source.id, replace(template, source=source))
+            copied = replace(reading, template_id=source.id,
+                             issues=tuple(replace(i, target=source.id) for i in reading.issues))
+            self.repository.put("imported_template_reading", project_id, source.id, copied)
+            if not self.repository.versions(project_id):
+                return {"template_id": source.id, "version": None}
+            previous = self.problem(project_id)
+            if any(t == copied for t in previous.template_readings):
+                return {"template_id": source.id, "version": previous.version}
+            readings = tuple(t for t in previous.template_readings if t.template_id != source.id) + (copied,)
+            snapshot = replace(previous, version=previous.version + 1, created_at=timestamp(),
+                reading=replace(previous.reading, rules=replace(previous.reading.rules,
+                                version=previous.version + 1)), template_readings=readings,
+                revision_note="导入已处理空表")
+            saved = self.repository.save_snapshot(project_id, obj(to_json(snapshot)), previous.version)
+            if self.memory:
+                self.memory.remember(problem_snapshot(saved))
+            return {"template_id": source.id, "version": saved["version"]}
 
     @property
     def answerer(self) -> AnswererService:
@@ -322,6 +365,11 @@ class WorkflowService:
                             for t in self.repository.list("template", project_id)}
         existing_templates = {t.template_id: t for t in previous.template_readings
                               if t.template_id in active_templates} if previous else {}
+        imported = {string(obj(t)["template_id"]): template_reading(obj(t))
+                    for t in self.repository.list("imported_template_reading", project_id)}
+        for tid in requested_templates:
+            if tid in imported:
+                existing_templates.setdefault(tid, imported[tid])
         new_templates = tuple(t for t in templates if t.source.id not in existing_templates
                               or existing_templates[t.source.id].sha256 != t.source.sha256)
         for value in self.repository.list("job", project_id):
@@ -370,11 +418,13 @@ class WorkflowService:
                                          tuple(e for d in all_documents for e in d.evidence))
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
             template_results = dict(existing_templates)
-            template_client = MemoryLLMClient(client, memory, "空表项目与期间") if memory else client
             for template in new_templates:
                 self._require_upload(project_id, "template", template.source.id)
-                template_results[template.source.id] = TemplateReader().read(
-                    template, template_client, control, result)
+                template_results[template.source.id] = TemplateReader(self.repository).read(
+                    template, client, control)
+                self.template_library.publish(template,
+                    self.repository.get("template_original", project_id, template.source.id),
+                    template_results[template.source.id])
             if not sources and not previous:
                 result = validate_reading(result, ())
             control.checkpoint("saving_reading")
@@ -440,6 +490,13 @@ class WorkflowService:
         snapshot = ProblemSnapshot(project_id, expected + 1, timestamp(), old.document_ids,
                                    reading, note, old.inputs, old.additional_sources, template_reviews)
         saved = self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
+        for interpretation in template_reviews:
+            if interpretation.reviewed:
+                template = budget_template(self.repository.get("template", project_id,
+                                                               interpretation.template_id))
+                self.template_library.publish(template,
+                    self.repository.get("template_original", project_id, interpretation.template_id),
+                    interpretation)
         if self.memory:
             self.memory.remember(problem_snapshot(saved))
         return saved

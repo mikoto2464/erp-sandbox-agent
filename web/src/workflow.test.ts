@@ -13,6 +13,7 @@ import BudgetTemplatePreview from './components/BudgetTemplatePreview.vue';
 import MappingEditor from './components/MappingEditor.vue';
 import UploadStep from './views/UploadStep.vue';
 import FactEditor from './components/FactEditor.vue';
+import TemplateLibraryPicker from './components/TemplateLibraryPicker.vue';
 import { workspaceKey } from './composables/context';
 import {
   issueAnswer,
@@ -114,6 +115,10 @@ function setup() {
       };
     else if (url === '/api/projects')
       data = [{ id: projectId, name: '项目', created_at: '2026-10-12' }];
+    else if (url === '/api/template-library')
+      data = [
+        { id: 'library', source: { filename: '共享预算.xlsx' }, reading: { reviewed: true } },
+      ];
     else if (url.endsWith('/inputs'))
       data = options.method ? { ...JSON.parse(String(options.body)), revision: 1 } : inputs;
     else if (url.endsWith('/documents')) data = documents;
@@ -128,7 +133,34 @@ function setup() {
         if (job.metadata.template_id === id) job.metadata.upload_deleted = true;
       data = { deleted: true, inputs: null };
     } else if (url.endsWith('/solutions')) data = solutions;
-    else if (url.endsWith('/mappings')) data = options.method ? {} : mappings;
+    else if (url.endsWith('/templates/import')) {
+      snapshot = {
+        ...snapshot,
+        version: snapshot.version + 1,
+        template_readings: [
+          {
+            template_id: 'imported',
+            sha256: 'hash',
+            reviewed: true,
+            explanation: '',
+            sheets: [],
+            issues: [],
+          },
+        ],
+      };
+      templates.push({
+        source: {
+          id: 'imported',
+          filename: '共享预算.xlsx',
+          sha256: 'hash',
+          size: 1,
+          format: 'xlsx',
+        },
+        sheets: [],
+        warnings: [],
+      });
+      data = { template_id: 'imported', version: snapshot.version };
+    } else if (url.endsWith('/mappings')) data = options.method ? {} : mappings;
     else if (url.endsWith('/artifacts')) data = options.method ? {} : artifacts;
     else if (url.includes('/mappings/') && options.method) {
       const payload = JSON.parse(String(options.body));
@@ -189,6 +221,29 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('imports a reviewed shared template into the solver without calling reader', async () => {
+    const { router, fetcher } = setup();
+    await router.push(`/projects/${projectId}/steps/3`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const wrapper = mount(TemplateLibraryPicker, {
+      global: { provide: { [workspaceKey as symbol]: workspace }, plugins: [router] },
+    });
+    await wrapper.find('button').trigger('click');
+    await flushPromises();
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text() === '导入')!
+      .trigger('click');
+    await flushPromises();
+    expect(workspace.templateIds.value).toContain('imported');
+    expect(workspace.generationReady.value).toBe(true);
+    expect(workspace.snapshot.value?.version).toBe(2);
+    expect(fetcher.mock.calls.some(([url]) => url.endsWith('/read'))).toBe(false);
+    wrapper.unmount();
+    workspace.dispose();
+  });
+
   it('deletes uploaded topic files and budget templates without losing draft inputs', async () => {
     const { router, documents, templates, jobs } = setup();
     documents.push({

@@ -52,7 +52,7 @@ class SQLiteRepository:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._check_deleted(connection, project_id)
-            if kind in {"document", "template", "original", "template_original"}:
+            if kind in {"document", "template", "original", "template_original", "template_reading"}:
                 category = "document" if kind in {"document", "original"} else "template"
                 self._check_upload(connection, project_id, category, record_id)
             if kind == "solution":

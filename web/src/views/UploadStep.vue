@@ -5,6 +5,7 @@ import type { ParsedDocument } from '../lib/types';
 import DocumentPreview from '../components/DocumentPreview.vue';
 import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
+import TemplateLibraryPicker from '../components/TemplateLibraryPicker.vue';
 import type { BudgetTemplate } from '../lib/types';
 const {
   inputs,
@@ -159,6 +160,7 @@ function templateFiles(values: FileList | null) {
     <div class="input-section">
       <div class="section-heading">
         <h3>预算空表 <span class="muted">选填</span></h3>
+        <TemplateLibraryPicker />
         <label class="review-action template-upload"
           >上传空表<input
             type="file"
@@ -172,7 +174,9 @@ function templateFiles(values: FileList | null) {
             "
         /></label>
       </div>
-      <p class="muted">空表先在这里读取，第二步核对后用于方案生成和填表。公式与已有数据保留。</p>
+      <p class="muted">
+        可从空表库导入已确认解读，也可读取新空表；确认后自动保存到空表库供其他项目复用。
+      </p>
       <div
         v-for="template in templates"
         :key="template.source.id"

@@ -140,6 +140,12 @@ onBeforeUnmount(workspace.dispose);
         >
           项目列表
         </button>
+        <button
+          class="quiet nav-home"
+          @click="workspace.goTemplateLibrary"
+        >
+          空表库
+        </button>
         <div class="topbar-actions">
           <AppSelect
             :model-value="catalog?.active_id || ''"
