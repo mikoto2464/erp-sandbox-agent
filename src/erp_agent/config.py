@@ -46,8 +46,9 @@ class Settings:
     llm_token_parameter: str = "max_completion_tokens"
     llm_thinking_mode: str = "default"
     llm_thinking_budget: int = 8192
-    reader_max_request_chars: int = 30_000
-    reader_max_batch_units: int = 12
+    reader_max_request_chars: int = 12_000
+    reader_max_batch_units: int = 4
+    reader_concurrency: int = 2
     default_solver: SolverMode = SolverMode.LLM_ONLY
     libreoffice: str = "libreoffice"
     max_upload_mb: int = 20
@@ -55,6 +56,8 @@ class Settings:
     def __post_init__(self) -> None:
         if self.llm_provider not in LLM_BASE_URLS:
             raise ValueError("不支持的模型接口类型。")
+        if not 1 <= self.reader_concurrency <= 4:
+            raise ValueError("读题并发必须在 1 到 4 之间。")
         if not self.llm_base_url:
             object.__setattr__(self, "llm_base_url", LLM_BASE_URLS[self.llm_provider])
         url = urlsplit(self.llm_base_url)
@@ -104,8 +107,9 @@ class Settings:
             llm_token_parameter=os.getenv("ERP_LLM_TOKEN_PARAMETER", "max_completion_tokens"),
             llm_thinking_mode=os.getenv("ERP_LLM_THINKING_MODE", "default"),
             llm_thinking_budget=int(os.getenv("ERP_LLM_THINKING_BUDGET", "8192")),
-            reader_max_request_chars=int(os.getenv("ERP_READER_MAX_REQUEST_CHARS", "30000")),
-            reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "12")),
+            reader_max_request_chars=int(os.getenv("ERP_READER_MAX_REQUEST_CHARS", "12000")),
+            reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "4")),
+            reader_concurrency=int(os.getenv("ERP_READER_CONCURRENCY", "2")),
             default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
             max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),

@@ -23,6 +23,7 @@ from erp_agent.application.contracts import JSONObject, dumps, integer, loads, o
 from erp_agent.application.ports import LLMClient, PlanEvaluator
 from erp_agent.application.reader import StructuredReader
 from erp_agent.application.reading.roles import ReaderLimits
+from erp_agent.adapters.memory import SQLiteMemoryService
 from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
 from erp_agent.application.workflow import WorkflowService
 from erp_agent.config import Settings, load_env_file
@@ -44,6 +45,8 @@ class AppHTTPServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         self.workflow.jobs.close()
+        if self.workflow.memory:
+            self.workflow.memory.close()
         super().server_close()
 
 
@@ -320,6 +323,7 @@ def create_access(settings: Settings) -> AccessService:
 def create_workflow(settings: Settings, llm: LLMClient | None = None,
                     evaluator: PlanEvaluator | None = None) -> WorkflowService:
     repository = SQLiteRepository(settings.data_dir / "erp.sqlite3")
+    memory = SQLiteMemoryService(repository.path)
     jobs = ThreadJobRunner(repository)
     models = ModelSettingsService(settings, llm)
     client = models.client
@@ -328,12 +332,13 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
                            evaluator if evaluator is not None else DraftPlanEvaluator())
     answerer = AnswererService(repository, jobs, models, DocxReportRenderer(),
                                XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice),
-                                                    LibreOfficeFormulaRecalculator(settings.libreoffice)))
+                                                    LibreOfficeFormulaRecalculator(settings.libreoffice)),
+                               memory=memory)
     reader = StructuredReader(client, client.current,
                               ReaderLimits(settings.reader_max_request_chars,
-                                           settings.reader_max_batch_units))
+                                           settings.reader_max_batch_units, settings.reader_concurrency))
     return WorkflowService(repository, jobs, parser, reader, solver,
-                           settings.default_solver, models, SpreadsheetBudgetParser(), answerer)
+                           settings.default_solver, models, SpreadsheetBudgetParser(), answerer, memory)
 
 
 def create_server(settings: Settings, llm: LLMClient | None = None,
@@ -343,6 +348,8 @@ def create_server(settings: Settings, llm: LLMClient | None = None,
         return AppHTTPServer(settings, workflow)
     except Exception:
         workflow.jobs.close()
+        if workflow.memory:
+            workflow.memory.close()
         raise
 
 

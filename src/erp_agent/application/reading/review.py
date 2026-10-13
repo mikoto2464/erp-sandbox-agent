@@ -61,7 +61,8 @@ class LinkReviewRole:
             for attempt in range(2):
                 try:
                     response = client.generate(LLMRequest(self.system, dumps(material),
-                                                          "erp_reading_review", self.schema))
+                                                          "erp_reading_review", self.schema,
+                                                          max_output_tokens=2000, retries=0))
                     control.checkpoint("reading_review", completed)
                     root = obj(loads(normalize_model_json(response.content)), {"issues"})
                     decoded = decode_reading(dumps({"title": "复核", "facts": [], "rules": [],
@@ -74,7 +75,7 @@ class LinkReviewRole:
                 except Cancelled:
                     raise
                 except ERPError as error:
-                    if error.code == "llm_incomplete" and len(values) > 1:
+                    if error.code in {"llm_incomplete", "llm_timeout", "llm_gateway_timeout", "llm_unavailable"} and len(values) > 1:
                         middle = len(values) // 2
                         run(values[:middle])
                         run(values[middle:])

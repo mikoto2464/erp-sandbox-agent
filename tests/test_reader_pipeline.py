@@ -124,21 +124,44 @@ class ReaderPipelineTests(unittest.TestCase):
                 return super().generate(request)
 
         client = Client()
-        result = StructuredReader(client).read((document,), Control())
+        result = StructuredReader(client, limits=ReaderLimits(30000, 12, 1)).read((document,), Control())
         self.assertEqual(sum(loads(r.user)['role'] == 'facts' for r in client.calls), 1)
         self.assertGreater(sum(loads(r.user)['role'] == 'rules' for r in client.calls), 1)
+        self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 8)
+
+    def test_gateway_timeout_splits_failed_batch_and_preserves_all_rows(self):
+        document = self.table(6)
+
+        class Client(RowClient):
+            def generate(self, request):
+                payload = loads(request.user)
+                if payload['role'] == 'facts' and len(payload['focus_evidence_ids']) > 7:
+                    self.calls.append(request)
+                    raise ERPError('llm_gateway_timeout', 'HTTP 504', 504)
+                return super().generate(request)
+
+        client = Client()
+        result = StructuredReader(client, limits=ReaderLimits(30000, 12, 1)).read((document,), Control())
+        self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 6)
+
+    def test_complete_order_rows_avoid_redundant_rule_calls(self):
+        document = self.table(8)
+        client = RowClient()
+        result = StructuredReader(client, limits=ReaderLimits(15000, 3, 1)).read((document,), Control())
+        requests = [loads(r.user) for r in client.calls]
+        self.assertEqual(sum(r['role'] == 'rules' for r in requests), 1)
         self.assertEqual(len([f for f in result.problem.facts if f.category == 'order_pool']), 8)
 
     def test_cancellation_after_call_prevents_next_subrole(self):
         class CancelControl(Control):
             def checkpoint(self, stage, completed=0):
-                if len(self.stages) == 2:
+                if len(self.stages) == 3:
                     raise Cancelled()
                 super().checkpoint(stage, completed)
 
         client = RowClient()
         with self.assertRaises(Cancelled):
-            StructuredReader(client).read((self.table(),), CancelControl())
+            StructuredReader(client, limits=ReaderLimits(30000, 12, 1)).read((self.table(),), CancelControl())
         self.assertEqual(len(client.calls), 1)
 
     def test_long_paragraph_is_split_without_silently_dropping_text(self):

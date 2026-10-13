@@ -84,6 +84,23 @@ def mock_transport(response, seen, status=200):
 
 
 class LangChainTests(unittest.TestCase):
+    def test_reader_request_overrides_budget_and_avoids_duplicate_schema_text(self):
+        from dataclasses import replace
+        request = replace(REQUEST, system='提取当前批次。\nJSON schema:\n' + REQUEST.schema_json,
+                          max_output_tokens=4000, retries=0)
+        result, seen = self.invoke('openai_chat', request=request)
+        payload = json.loads(seen[0].content)
+        self.assertEqual(payload['max_completion_tokens'], 4000)
+        self.assertNotIn('JSON schema:', payload['messages'][0]['content'])
+        self.assertEqual(loads(result.content), {'value': 3})
+
+    def test_gateway_timeout_is_distinct_and_preserves_upstream_status(self):
+        with self.assertRaises(ERPError) as caught:
+            self.invoke('openai_chat', {'error': {'message': 'gateway timeout secret'}}, status=504)
+        self.assertEqual(caught.exception.code, 'llm_gateway_timeout')
+        self.assertEqual(caught.exception.status, 504)
+        self.assertNotIn('secret', caught.exception.message)
+
     def invoke(self, provider, response=None, status=200, request=REQUEST, **options):
         settings = Settings(llm_provider=provider, llm_model="test-model", llm_api_key="secret",
                             llm_retries=0, **options)

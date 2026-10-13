@@ -27,6 +27,8 @@ class LLMRequest:
     user: str
     schema_name: str
     schema_json: str
+    max_output_tokens: int | None = None
+    retries: int | None = None
 
 
 @dataclass(frozen=True)

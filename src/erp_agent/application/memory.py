@@ -1,0 +1,27 @@
+from dataclasses import dataclass
+from typing import Protocol
+
+from erp_agent.application.contracts import JSONObject
+from erp_agent.domain.models import ProblemSnapshot
+
+
+@dataclass(frozen=True)
+class MemoryContext:
+    project_id: str
+    problem_version: int
+    entries: tuple[JSONObject, ...] = ()
+
+
+class RoleMemory(Protocol):
+    def recall(self, query: str, max_chars: int = 1500) -> MemoryContext: ...
+    def get(self, key: str) -> JSONObject | None: ...
+    def put(self, key: str, value: JSONObject) -> None: ...
+
+
+class MemoryService(Protocol):
+    def scope(
+        self, project_id: str, version: int, fingerprint: str, document_ids: tuple[str, ...] = ()
+    ) -> RoleMemory: ...
+    def remember(self, snapshot: ProblemSnapshot) -> None: ...
+    def forget(self, project_id: str) -> None: ...
+    def close(self) -> None: ...

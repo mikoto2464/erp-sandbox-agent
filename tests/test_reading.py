@@ -199,7 +199,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-11")
+        self.assertEqual(result.prompt_version, "reader-12")
         self.assertEqual(len(calls), 3)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)
@@ -246,7 +246,7 @@ class ReadingTests(unittest.TestCase):
 
             with self.subTest(code=code), self.assertRaises(ERPError):
                 StructuredReader(FailingClient()).read((document,), Control())
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 2 if code == "llm_timeout" else 1)
 
     def test_document_capability_warnings_survive_reading(self):
         document = OOXMLDocumentParser().parse(

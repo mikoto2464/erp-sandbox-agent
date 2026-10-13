@@ -1,6 +1,7 @@
-import re
 from dataclasses import dataclass, replace
 from itertools import groupby
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from erp_agent.application.contracts import JSONObject, dumps
 from erp_agent.domain.errors import ERPError
@@ -99,14 +100,10 @@ class DocumentBatcher:
                 if block.kind == "paragraph":
                     if block.text.strip():
                         limit = max(256, min(3000, max_chars // 2))
-                        remaining = block.text
-                        while len(remaining) > limit:
-                            breaks = list(re.finditer(r"[。；;！？!?\n]", remaining[:limit]))
-                            end = breaks[-1].end() if breaks and breaks[-1].end() >= limit // 2 else limit
-                            units.append(replace(block, text=remaining[:end]))
-                            remaining = remaining[end:]
-                        if remaining:
-                            units.append(replace(block, text=remaining))
+                        splitter = RecursiveCharacterTextSplitter(
+                            chunk_size=limit, chunk_overlap=0, keep_separator=True,
+                            strip_whitespace=False, separators=["\n", "。", "；", "！", "？", " ", ""])
+                        units.extend(replace(block, text=part) for part in splitter.split_text(block.text))
                 else:
                     for _, row in groupby(sorted(block.cells, key=lambda c: (c.row, c.column)),
                                           key=lambda c: c.row):

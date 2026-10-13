@@ -1,9 +1,12 @@
 from importlib import import_module
+from dataclasses import replace
+from functools import lru_cache
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import Runnable
+from langchain_core.prompts import ChatPromptTemplate
 
 from erp_agent.adapters.llm_diagnostics import MAX_RESPONSE_CHARS, validate_completion
 from erp_agent.adapters.llm_errors import model_error
@@ -140,13 +143,22 @@ class LangChainLLMClient:
         if not self.configured:
             raise ERPError("llm_not_configured", "请配置模型名称和所需 API 密钥。", 503)
         system = request.system
-        if request.schema_json not in system:
+        if self.settings.llm_format == "json_schema":
+            system = system.replace("\nJSON schema:\n" + request.schema_json, "")
+        elif request.schema_json not in system:
             system += "\nJSON schema:\n" + request.schema_json
         if len(system) + len(request.user) > self.settings.llm_max_input_chars:
             raise ERPError("llm_input_limit", "材料超过输入字符限制，请拆分文件或调整预设。")
-        settings = self.settings
+        settings = replace(self.settings,
+                           llm_max_output_tokens=min(request.max_output_tokens or self.settings.llm_max_output_tokens,
+                                                     self.settings.llm_max_output_tokens),
+                           llm_retries=self.settings.llm_retries if request.retries is None else request.retries)
+        if settings.llm_provider == "anthropic" and settings.llm_thinking_mode == "enabled":
+            settings = replace(settings, llm_max_output_tokens=min(
+                self.settings.llm_max_output_tokens,
+                max(settings.llm_max_output_tokens, settings.llm_thinking_budget + 1024)))
         try:
-            model = self.model_factory(settings)
+            model = self._model(settings)
             runnable: Runnable[Any, Any] = model
             schema = obj(loads(request.schema_json))
             structured = settings.llm_format == "json_schema"
@@ -165,7 +177,9 @@ class LangChainLLMClient:
                     runnable = model.bind(format="json")
                 elif settings.llm_provider == "gemini":
                     runnable = model.bind(response_mime_type="application/json")
-            messages = [("system", system), ("human", request.user)]
+            messages = ChatPromptTemplate.from_messages([
+                ("system", "{instructions}"), ("human", "{material}")
+            ]).invoke({"instructions": system, "material": request.user}).to_messages()
             output = runnable.invoke(messages)
         except ERPError:
             raise
@@ -219,3 +233,7 @@ class LangChainLLMClient:
         if not isinstance(returned_model, str) or not returned_model:
             returned_model = settings.llm_model
         return LLMResponse(content, returned_model)
+
+    @lru_cache(maxsize=8)
+    def _model(self, settings: Settings) -> BaseChatModel:
+        return self.model_factory(settings)

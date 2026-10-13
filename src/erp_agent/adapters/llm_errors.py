@@ -78,6 +78,9 @@ def model_error(error: Exception, settings: Settings, request: LLMRequest) -> ER
         status = getattr(response, "status_code", None)
     if not isinstance(status, int) or not 100 <= status <= 599:
         return ERPError("llm_adapter_error", "LangChain 模型调用失败，请检查接口类型与模型参数。", 502)
+    if status in {502, 503, 504}:
+        return ERPError("llm_gateway_timeout" if status == 504 else "llm_unavailable",
+                        f"模型接口返回 HTTP {status}，上游暂时无法完成请求。", status)
     message = f"模型接口返回 HTTP {status}。"
     diagnostic = _diagnostic(error, settings, request) if status in {400, 422} else ""
     if diagnostic:

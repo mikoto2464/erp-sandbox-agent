@@ -78,6 +78,8 @@ export const stageNames: Record<string, string> = {
   reading_rules: '整理规则与限制',
   reading_linking: '合并条目与关联来源',
   reading_review: '核对跨章节关联',
+  reading_smaller_batch: '拆小超时批次',
+  reading_retry: '重试当前批次',
   repairing_reading: '修复读题格式',
   repairing_strategy: '修复方案格式',
   validating: '校验来源',

@@ -19,6 +19,8 @@ from erp_agent.application.ports import (
 )
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.reader import StructuredReader
+from erp_agent.application.memory import MemoryService
+from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.application.solver import LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
@@ -38,13 +40,15 @@ class WorkflowService:
                  default_solver: SolverMode = SolverMode.LLM_ONLY,
                  model_settings: ModelSettings | None = None,
                  template_parser: BudgetTemplateParser | None = None,
-                 answerer: AnswererService | None = None) -> None:
+                 answerer: AnswererService | None = None,
+                 memory: MemoryService | None = None) -> None:
         self.repository, self.jobs, self.parser = repository, jobs, parser
         self.reader, self.solver = reader, solver
         self.default_solver = default_solver
         self.model_settings = model_settings
         self.template_parser = template_parser
         self._answerer = answerer
+        self.memory = memory
         self._read_lock = threading.Lock()
         self._input_lock = threading.Lock()
         self._solve_lock = threading.Lock()
@@ -112,6 +116,8 @@ class WorkflowService:
         self.project(project_id)
         self.jobs.cancel_project(project_id)
         self.repository.delete_project(project_id)
+        if self.memory:
+            self.memory.forget(project_id)
 
     def upload(self, project_id: str, filename: str, content: bytes) -> JSONObject:
         self.project(project_id)
@@ -262,8 +268,12 @@ class WorkflowService:
 
         def operation(control: RunControl) -> JSONValue:
             sources = documents + extra_sources
-            result = (self.reader.read(sources, control, binding.client) if binding
-                      else self.reader.read(sources, control))
+            fingerprint = hashlib.sha256(dumps({"inputs": inputs, "sources": [d.source for d in sources],
+                "parsers": [d.parser_version for d in sources], "reader": self.reader.limits,
+                "model": binding.metadata() if binding else None, "version": "reader-12"}).encode()).hexdigest()
+            memory = self.memory.scope(project_id, 0, fingerprint,
+                                       tuple(d.source.id for d in documents)) if self.memory else None
+            result = self.reader.read(sources, control, binding.client if binding else None, memory)
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
             control.checkpoint("saving_reading")
             snapshot = ProblemSnapshot(project_id, expected_version + 1, timestamp(),
@@ -272,6 +282,8 @@ class WorkflowService:
             saved = self.repository.save_snapshot(
                 project_id, obj(to_json(snapshot)), expected_version,
             )
+            if self.memory:
+                self.memory.remember(problem_snapshot(saved))
             return {"version": saved["version"], "issues": len(result.issues),
                     "needs_input": any(i.severity == "error" for i in result.issues)}
 
@@ -300,7 +312,10 @@ class WorkflowService:
                           raw_response=old.reading.raw_response)
         snapshot = ProblemSnapshot(project_id, expected + 1, timestamp(), old.document_ids,
                                    reading, note, old.inputs, old.additional_sources)
-        return self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
+        saved = self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
+        if self.memory:
+            self.memory.remember(problem_snapshot(saved))
+        return saved
 
     def solve(self, project_id: str, data: JSONObject) -> JSONObject:
         with self._solve_lock:
@@ -359,8 +374,15 @@ class WorkflowService:
         def operation(control: RunControl) -> JSONValue:
             generator = self.solver.generator
             if binding or isinstance(generator, LLMStrategyGenerator):
+                client = binding.client if binding else generator.llm
+                if self.memory:
+                    self.memory.remember(snapshot)
+                    role_memory = self.memory.scope(project_id, snapshot.version,
+                        "solver:" + hashlib.sha256(dumps(config).encode()).hexdigest())
+                    role_memory.put("requirements", {"generation": to_json(config)})
+                    client = MemoryLLMClient(client, role_memory, "经营策略 " + dumps(config))
                 generator = LLMStrategyGenerator(
-                    binding.client if binding else generator.llm,
+                    client,
                     lambda: control.checkpoint("repairing_strategy"),
                     search_parameters=mode == SolverMode.LLM_MONTE_CARLO,
                 )

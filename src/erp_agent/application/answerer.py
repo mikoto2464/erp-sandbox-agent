@@ -14,6 +14,8 @@ from erp_agent.application.ports import (
     WorkbookMappingAnalyzer,
 )
 from erp_agent.application.workbook_mapper import WorkbookMapper
+from erp_agent.application.memory import MemoryService
+from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import ArtifactManifest, OutputSource, ReportData, WorkbookEntry, WorkbookMapping
 from erp_agent.domain.workbook import mapped_value, output_sources, validate_mapping
@@ -22,10 +24,12 @@ from erp_agent.domain.workbook import mapped_value, output_sources, validate_map
 class AnswererService:
     def __init__(self, repository: Repository, jobs: JobRunner, models: ModelSettings,
                  report_renderer: ReportRenderer, workbook_renderer: WorkbookRenderer,
-                 mapper: WorkbookMappingAnalyzer | None = None) -> None:
+                 mapper: WorkbookMappingAnalyzer | None = None,
+                 memory: MemoryService | None = None) -> None:
         self.repository, self.jobs, self.models = repository, jobs, models
         self.report_renderer, self.workbook_renderer = report_renderer, workbook_renderer
         self.mapper = mapper or WorkbookMapper()
+        self.memory = memory
         self._lock = threading.Lock()
 
     def context(self, project_id: str, solution_id: str) -> ReportData:
@@ -72,7 +76,15 @@ class AnswererService:
             raise ERPError('llm_not_configured', '预算表分析需要已配置的模型。', 503)
 
         def operation(control: RunControl) -> JSONValue:
-            mapping = self.mapper.analyze(report.solution, template, binding.client, control, report.snapshot)
+            client = binding.client
+            if self.memory:
+                self.memory.remember(report.snapshot)
+                shared = self.memory.scope(project_id, report.snapshot.version,
+                                            f"mapper:{report.solution.id}:{template.source.sha256}")
+                shared.put("solution", {"solution_id": report.solution.id,
+                                        "generation": to_json(report.solution.generation)})
+                client = MemoryLLMClient(client, shared, "预算表单位与口径 " + template.source.filename)
+            mapping = self.mapper.analyze(report.solution, template, client, control, report.snapshot)
             control.checkpoint('saving_mapping')
             self.repository.put('mapping', project_id, mapping.id, mapping)
             return {'mapping_id': mapping.id, 'needs_input': True}

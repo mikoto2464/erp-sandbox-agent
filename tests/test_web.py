@@ -636,7 +636,7 @@ class WebTests(unittest.TestCase):
     def test_delete_project_cleans_every_record_and_blocks_late_write(self):
         project, result = self.setup_problem()
         repository = self.server.workflow.repository
-        repository.put("solution", project, "s", {"id": "s"})
+        repository.put("solution", project, "s", {"id": "s", "problem_version": result['snapshot']['version']})
         code, _ = self.raw_request(f"/api/projects/{project}", method="DELETE")
         self.assertEqual(code, 200)
         self.assertEqual(repository.list("original", project), [])
