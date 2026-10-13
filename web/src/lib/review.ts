@@ -1,5 +1,27 @@
 import type { EditableReading, Fact, Issue } from './types';
 import { fieldNames } from './labels';
+export function distinctIssues(issues: Issue[]): Issue[] {
+  const generic = new Set(['validation.uncertain', 'validation.value_missing']);
+  const specificTargets = new Set(
+    issues
+      .filter((issue) => issue.severity !== 'info' && !generic.has(issue.code))
+      .map((issue) => issue.target),
+  );
+  const parseTargets = new Set(
+    issues
+      .filter((issue) => issue.code === 'reading.invalid_number' && issue.severity !== 'info')
+      .map((issue) => issue.target),
+  );
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    if (issue.code === 'validation.uncertain' && specificTargets.has(issue.target)) return false;
+    if (issue.code === 'validation.value_missing' && parseTargets.has(issue.target)) return false;
+    const key = JSON.stringify([issue.code, issue.target, issue.message]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 export function factInputError(fact: Fact): string {
   if (
     ['years', 'periods_per_year'].includes(fact.key) &&

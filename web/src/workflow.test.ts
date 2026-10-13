@@ -633,6 +633,7 @@ describe('Vue migration', () => {
         },
         {
           id: 'waiting',
+          parent_id: 'reader',
           agent: 'Reader',
           role: '规则整理',
           object: '规则.docx',
@@ -676,6 +677,9 @@ describe('Vue migration', () => {
       .trigger('click');
     await flushPromises();
     expect((wrapper.find('.drawer-modal').element as HTMLDialogElement).open).toBe(true);
+    expect(wrapper.find('.reading-progress').text()).toContain('已处理 0 / 2');
+    expect(wrapper.find('.reading-progress').text()).toContain('执行中 1');
+    expect(wrapper.find('.reading-progress').text()).toContain('待执行 1');
     await wrapper.find('.task-disclosure').trigger('click');
     expect(wrapper.find('.task-detail').text()).toContain('Reader · 参数提取');
     expect(wrapper.find('.task-detail').text()).toContain('订单.xls · 行 17–20');

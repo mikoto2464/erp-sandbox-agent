@@ -14,6 +14,7 @@ from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import (
     Evidence,
     Fact,
+    Issue,
     KnowledgeState,
     ProblemSpec,
     ReadingResult,
@@ -22,6 +23,7 @@ from erp_agent.domain.models import (
     SourceDocument,
     TableEvidenceContext,
 )
+from erp_agent.domain.validation import validate_reading
 from tests.helpers import Control, docx_bytes
 
 
@@ -162,6 +164,40 @@ class ReaderPipelineTests(unittest.TestCase):
         self.assertTrue(all(i.evidence_ids == refs and '请查看标出的原文' in i.message for i in result.issues))
         self.assertTrue(all(f.state == KnowledgeState.MISSING for f in result.problem.facts[2:]))
         self.assertIn('1e20', result.problem.facts[2].explanation)
+
+    def test_explicit_percent_is_recovered_once_and_proved_against_original_shift_cell(self):
+        document = text_source('题目', '8 时制 工人单次效率损失 5%', 'shift_')
+        batch = DocumentBatcher().tasks((document,))[0]
+        refs = (document.evidence[0].id,)
+        for value, conversion in [('5%', 'identity'), ('５％', 'percent_to_ratio'),
+                                   ('0.05', 'percent_to_ratio')]:
+            with self.subTest(value=value, conversion=conversion):
+                fact = Fact('loss', 'shift', 'shift8', '8 时制', 'efficiency_loss', value,
+                            'number', '', KnowledgeState.KNOWN, refs, conversion)
+                material = editable_reading(ReadingResult(ProblemSpec('题目', (fact,)),
+                                                            RuleSet(()), (), 'test'))
+                result = ExtractionRole('reading')._decode(dumps(material), 'test', batch)
+                checked = validate_reading(result, document.evidence)
+                self.assertEqual(checked.problem.facts[0].value, '0.05')
+                self.assertEqual(checked.problem.facts[0].state, KnowledgeState.KNOWN)
+                self.assertFalse(any(i.target == 'loss' for i in checked.issues))
+        wrong = Fact('loss', 'shift', 'shift8', '8 时制', 'efficiency_loss', '6%',
+                     'number', '', KnowledgeState.KNOWN, refs)
+        result = ExtractionRole('reading')._decode(dumps(editable_reading(ReadingResult(
+            ProblemSpec('题目', (wrong,)), RuleSet(()), (), 'test'))), 'test', batch)
+        self.assertEqual(validate_reading(result, document.evidence).problem.facts[0].state,
+                         KnowledgeState.CONFLICTED)
+
+    def test_parse_errors_do_not_trigger_another_semantic_review(self):
+        fact = Fact('broken', 'shift', 'shift', '8 时制', 'efficiency_loss', None,
+                    'number', '', KnowledgeState.MISSING, ('e',))
+        reading = ReadingResult(ProblemSpec('题目', (fact,)), RuleSet(()),
+            (Issue('reading.invalid_number', 'error', 'broken', '数值格式有误。', ('e',)),), 'test')
+        client = RowClient()
+        result = LinkReviewRole().review(reading, (Evidence('e', 'doc', '格', '5%'),),
+                                         client, Control(), 12000, 0, {'e': '0'})
+        self.assertEqual(result, ())
+        self.assertEqual(client.calls, [])
 
     def test_cross_file_equal_values_merge_and_conflicts_keep_both_sources(self):
         documents = tuple(text_source(name, '初始资金' + value + '元', 'doc_' + name)

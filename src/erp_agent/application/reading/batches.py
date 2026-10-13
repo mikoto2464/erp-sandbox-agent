@@ -123,7 +123,12 @@ class ReadingBatch:
             "document_id": self.document.source.id,
             "filename": self.document.source.filename,
             "format": self.document.source.format,
-            "warnings": list(self.document.warnings),
+            "warnings": [
+                warning for warning in self.document.warnings
+                if not warning.startswith(
+                    "XLS 二进制数值按 Excel 的 15 位有效数字规范化，消除存储浮点尾差；"
+                )
+            ],
             "cell_layout": [
                 "row",
                 "column",

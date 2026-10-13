@@ -48,7 +48,10 @@ class LinkReviewRole:
             if e.table_context
             for ref in e.table_context.heading_ids + e.table_context.column_header_ids
         }
-        parameters = tuple(f for f in reading.problem.facts if f.category not in ROW_CATEGORIES)
+        parse_errors = {i.target for i in reading.issues if i.code == "reading.invalid_number"
+                        and i.severity == "error"}
+        parameters = tuple(f for f in reading.problem.facts
+                           if f.category not in ROW_CATEGORIES and f.id not in parse_errors)
         units: list[tuple[Fact | Rule, ...]] = []
         disputed = {i.target for i in reading.issues if i.severity != "info"}
 
@@ -105,6 +108,8 @@ class LinkReviewRole:
                 "scope": "关联子集，不代表全题",
                 "facts": to_json(tuple(f for f in values if isinstance(f, Fact))),
                 "rules": to_json(tuple(r for r in values if isinstance(r, Rule))),
+                "existing_issues": to_json(tuple(i for i in reading.issues
+                                                  if i.target in {v.id for v in values})),
                 "evidence": [
                     [eid, sources[eid].text, sources[eid].location]
                     for eid in sorted(ids)
@@ -204,7 +209,8 @@ class LinkReviewRole:
                             "reading_review_source",
                             "llm_structured_response",
                         }:
-                            message = f"关联复核未完成（{error.message}），请核对这些条目的含义、适用对象与原文关联。"
+                            message = (f"关联复核未完成（{error.message}），"
+                                       "请核对这些条目的含义、适用对象与原文关联。")
                             issues.append(
                                 Issue(
                                     "reading.review_unresolved",

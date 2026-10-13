@@ -373,12 +373,12 @@ class WebTests(unittest.TestCase):
         snapshot = result["snapshot"]
         document_id = snapshot["document_ids"][0]
         parser = OOXMLDocumentParser()
-        content = docx_bytes('<w:p><w:r><w:t>每季付息，到期还 本</w:t></w:r></w:p>')
+        content = docx_bytes('<w:p><w:r><w:t>4 季贴现</w:t></w:r></w:p>')
         document = parser.parse(SourceDocument(document_id, 'topic.docx', '', len(content), 'docx'), content)
         self.server.workflow.repository.put('document', project, document_id, document)
-        fact = {'id': 'repayment', 'category': 'finance', 'entity_id': 'bank',
-                'entity_name': '长期银行融资', 'key': 'repayment_method',
-                'value': '每季付息，到期还本', 'value_type': 'text', 'unit': '无', 'state': 'known',
+        fact = {'id': 'repayment', 'category': 'discount', 'entity_id': 'bank',
+                'entity_name': '4 季贴现', 'key': 'name',
+                'value': '4季贴现', 'value_type': 'text', 'unit': '无', 'state': 'known',
                 'evidence_ids': [document.evidence[0].id], 'conversion': 'identity', 'explanation': ''}
         snapshot['reading']['raw_response'] = dumps({'title': '测试', 'facts': [fact], 'rules': [], 'issues': []})
         snapshot['reading']['problem']['facts'] = [{**fact, 'state': 'conflicted'}]

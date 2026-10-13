@@ -3,6 +3,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from erp_agent.domain.models import Evidence, Fact, Issue, KnowledgeState, ReadingResult
+from erp_agent.domain.text import normalized_text
 
 NUMBER = re.compile(r"(?<![A-Za-z\d_.])-?\d+(?:,\d{3})*(?:\.\d+)?\s*(%|％|万)?")
 CHINESE_DIGITS = "零〇一二两三四五六七八九十百千万亿"
@@ -39,15 +40,40 @@ def _default_horizon_facts(facts: tuple[Fact, ...]) -> tuple[Fact, ...]:
     return tuple(result)
 
 
-def _normalized_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", text).strip()
-    return re.sub(r"(?<=[\u3400-\u9fff]) (?=[\u3400-\u9fff])", "", text)
+def source_notice(document_id: str, message: str) -> Issue:
+    routine = message.startswith(
+        "XLS 二进制数值按 Excel 的 15 位有效数字规范化，消除存储浮点尾差；"
+    )
+    return Issue("reading.source_info" if routine else "reading.source_warning",
+                 "info" if routine else "warning", document_id, message)
+
+
+def _text_supported(value: str, source: str) -> bool:
+    value, source = normalized_text(value), normalized_text(source)
+    if not value:
+        return False
+    pattern = (r"(?<!\d)" if value[0].isdigit() else "") + re.escape(value)
+    pattern += r"(?!\d)" if value[-1].isdigit() else ""
+    return bool(re.search(pattern, source))
+
+
+def distinct_issues(issues: tuple[Issue, ...]) -> tuple[Issue, ...]:
+    specific_targets = {issue.target for issue in issues if issue.severity != "info"
+                        and issue.code not in {"validation.uncertain", "validation.value_missing"}}
+    parse_targets = {issue.target for issue in issues
+                     if issue.code == "reading.invalid_number" and issue.severity != "info"}
+    return tuple(dict.fromkeys(issue for issue in issues
+                               if not (issue.code == "validation.uncertain"
+                                       and issue.target in specific_targets)
+                               and not (issue.code == "validation.value_missing"
+                                        and issue.target in parse_targets)))
 
 
 def _only_unspecified_unit(issue: Issue) -> bool:
     return (issue.code.split(".")[-1].lower() in {
         "ambiguous_unit", "missing_unit", "unit_missing", "unknown_unit", "unit_unknown",
-    } and bool(re.search(r"未(?:明确|注明|提供|说明|列明)|不(?:清楚|明确)|未知|缺少", issue.message))
+    } and bool(re.search(r"未(?:明确|注明|提供|说明|列明)|不(?:清楚|明确)|未知|缺少",
+                         issue.message))
         and not re.search(r"冲突|不一致|换算|倍率|百分|万元|周期", issue.message))
 
 
@@ -55,6 +81,8 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     sources = {e.id: e for e in evidence}
     failed_ids = {i.target for i in reading.issues if i.code == "validation.unsupported_value"}
     issues = [i for i in reading.issues if not i.code.startswith("validation.")]
+    issues = [source_notice(i.target, i.message) if i.code == "reading.source_warning" else i
+              for i in issues]
     unit_issues = [i for i in issues if _only_unspecified_unit(i)]
     unit_targets = {i.target for i in unit_issues}
     issues = [replace(i, code="review.resolved." + i.code, severity="info",
@@ -65,10 +93,13 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     for fact in _default_horizon_facts(reading.problem.facts):
         current = _attach_unit_headers(fact, sources)
         unit = current.unit.strip()
-        current = replace(current, unit="" if unit.lower() in UNSPECIFIED_UNITS or (
-            current.id in unit_targets and current.conversion == "identity") else unit)
+        current = replace(current, unit="" if current.value_type == "text"
+                          or unit.lower() in UNSPECIFIED_UNITS or (
+                              current.id in unit_targets and current.conversion == "identity")
+                          else unit)
         if not fact.id or fact.id in ids:
-            issues.append(Issue("validation.duplicate_id", "error", fact.id, "字段 ID 为空或重复。"))
+            issues.append(Issue("validation.duplicate_id", "error", fact.id,
+                                "字段 ID 为空或重复。"))
         ids.add(fact.id)
         if not fact.key or not fact.entity_id:
             issues.append(Issue("validation.empty_key", "error", fact.id, "字段键或实体 ID 为空。"))
@@ -80,7 +111,8 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
         if fact.value is None:
             current = replace(current, state=KnowledgeState.CONFLICTED
                               if fact.category == "initial" and fact.key in DEFAULT_HORIZON
-                              and fact.state == KnowledgeState.CONFLICTED else KnowledgeState.MISSING)
+                              and fact.state == KnowledgeState.CONFLICTED
+                              else KnowledgeState.MISSING)
             acknowledged = fact.explanation.startswith("用户标注：")
             issues.append(Issue("validation.value_missing", "info" if acknowledged else "warning",
                                 fact.id, fact.explanation if acknowledged else "字段值尚未提供。"))
@@ -89,8 +121,7 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
                 _number_supported(current, linked) if fact.value_type in {"number", "integer"}
-                else bool(_normalized_text(fact.value)) and any(
-                    _normalized_text(fact.value) in _normalized_text(e.text) for e in linked)
+                else any(_text_supported(fact.value, e.text) for e in linked)
             )
             if not supported:
                 current = replace(current, state=KnowledgeState.CONFLICTED)
@@ -112,23 +143,28 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
         key = (fact.category, fact.entity_id, fact.key)
         if key in keys:
             issues.append(Issue("validation.duplicate_field", "error", fact.id,
-                                "同一实体的字段重复，请合并来源或处理冲突。", fact.evidence_ids))
+                                "同一实体的字段重复，请合并来源或处理冲突。",
+                                fact.evidence_ids))
         keys[key] = fact
     rule_ids: set[str] = set()
     for rule in reading.rules.rules:
         if not rule.id or rule.id in rule_ids:
-            issues.append(Issue("validation.duplicate_rule", "error", rule.id, "规则 ID 为空或重复。"))
+            issues.append(Issue("validation.duplicate_rule", "error", rule.id,
+                                "规则 ID 为空或重复。"))
         rule_ids.add(rule.id)
         if rule.state == KnowledgeState.KNOWN and (
             not rule.evidence_ids or any(eid not in sources for eid in rule.evidence_ids)
         ):
             issues.append(Issue("validation.rule_source", "error", rule.id,
-                                "已知规则必须引用存在的原文证据。", rule.evidence_ids))
+                                "已知规则必须引用存在的原文证据。",
+                                rule.evidence_ids))
         issues.append(Issue("validation.rule_unimplemented", "info", rule.id,
                             "规则已登记，尚未接入经营仿真；当前不能据此计算精确结果。"))
     if not any(not (fact.category == "initial" and fact.key in DEFAULT_HORIZON
-                    and fact.explanation.startswith("系统默认：")) for fact in reading.problem.facts):
-        issues.append(Issue("validation.no_facts", "error", "problem", "没有提取到任何规范字段。"))
+                    and fact.explanation.startswith("系统默认："))
+               for fact in reading.problem.facts):
+        issues.append(Issue("validation.no_facts", "error", "problem",
+                            "没有提取到任何规范字段。"))
     initial = [f for f in normalized if f.category == "initial"]
     if not any(f.key == "initial_cash" for f in initial):
         issues.append(Issue("validation.initial_cash", "warning", "initial_cash", "缺少初始现金。"))
@@ -164,8 +200,9 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
     if years is None or periods is None:
         issues.append(Issue("validation.horizon_missing", "warning", "horizon",
                             "经营周期存在无效值或尚未解决的冲突，请修正后生成方案。"))
-    problem = replace(reading.problem, facts=tuple(normalized), years=years, periods_per_year=periods)
-    return replace(reading, problem=problem, issues=tuple(issues))
+    problem = replace(reading.problem, facts=tuple(normalized), years=years,
+                      periods_per_year=periods)
+    return replace(reading, problem=problem, issues=distinct_issues(tuple(issues)))
 
 
 def _attach_unit_headers(fact: Fact, sources: dict[str, Evidence]) -> Fact:

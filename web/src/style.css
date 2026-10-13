@@ -2379,6 +2379,33 @@ button:active:enabled {
 .task-detail {
   width: 100%;
 }
+.reading-progress {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f3f6fb;
+}
+.reading-progress progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 12px 0;
+  border: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #dfe7f2;
+  accent-color: #4979be;
+}
+.reading-progress progress::-webkit-progress-bar {
+  background: #dfe7f2;
+}
+.reading-progress progress::-webkit-progress-value {
+  background: #4979be;
+  transition: width 0.2s ease;
+}
+.reading-progress progress::-moz-progress-bar {
+  background: #4979be;
+}
 .task-disclosure {
   display: flex;
   align-items: center;

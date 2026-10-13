@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from decimal import Decimal, localcontext
 
 from erp_agent.application.contracts import JSONObject, array, decimal, obj, string
 from erp_agent.domain.errors import ERPError
@@ -20,12 +21,24 @@ def recover_numbers(data: JSONObject) -> None:
         raw = fact["value"]
         try:
             text = unicodedata.normalize("NFKC", string(raw)).strip()
+            percent = bool(re.fullmatch(r"[+-]?\d+(?:\.\d+)?\s*%", text))
+            if percent:
+                with localcontext() as context:
+                    context.prec = max(28, len(text) + 2)
+                    text = format(Decimal(text.rstrip("% ")).scaleb(-2), "f")
             if re.fullmatch(r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?", text):
                 text = text.replace(",", "")
             value = decimal(text)
-            if fact["value_type"] == "integer" and value != value.to_integral_value():
+            if (not percent and fact["value_type"] == "integer"
+                    and value != value.to_integral_value()):
                 raise ERPError("invalid_contract", "整数条目包含小数。")
             fact["value"] = format(value, "f")
+            if percent:
+                fact.update(value_type="number", unit="比例", conversion="percent_to_ratio")
+                explanation = f"原值 {str(raw).strip()} 转为比例 {fact['value']}；仅转换一次。"
+                fact["explanation"] = "\n".join(
+                    filter(None, (str(fact.get("explanation", "")), explanation))
+                )
         except ERPError as error:
             message = (
                 f"{fact.get('entity_name', '')} · {fact.get('key', '')}："

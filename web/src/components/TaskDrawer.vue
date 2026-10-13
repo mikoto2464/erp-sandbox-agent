@@ -4,19 +4,21 @@ import type { AgentTask, Job } from '../lib/types';
 import AppModal from './AppModal.vue';
 import { useWorkspaceContext } from '../composables/context';
 import { statusNames, stageNames } from '../lib/labels';
+import { readingProgress } from '../lib/tasks';
 const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWorkspaceContext();
 const expanded = ref(new Set<string>());
 const difficultyNames: Record<string, string> = {
   simple: '简单',
   moderate: '中等',
   complex: '复杂',
-  unassessed: '单模型直达',
+  unassessed: '未评估',
 };
 const taskStatus: Record<string, string> = {
   ...statusNames,
   waiting: '等待模型额度',
   cached: '复用已完成结果',
   split: '已拆分',
+  needs_input: '需要核对',
 };
 function toggle(job: Job) {
   if (expanded.value.has(job.id)) expanded.value.delete(job.id);
@@ -74,12 +76,6 @@ function duration(task: AgentTask) {
         </div>
         <p class="muted">{{ stageNames[job.stage] || job.stage }}</p>
         <p
-          v-if="job.kind === 'read' && (job.completed ?? 0) > 0"
-          class="muted"
-        >
-          已完成 {{ job.completed }} 个提取子任务
-        </p>
-        <p
           v-if="job.metadata.filename"
           class="muted"
         >
@@ -96,6 +92,42 @@ function duration(task: AgentTask) {
           class="error"
         >
           {{ job.error.message }}
+        </p>
+      </div>
+      <div
+        v-if="job.kind === 'read' && readingProgress(job).total"
+        class="reading-progress"
+      >
+        <div class="task-row-heading">
+          <strong>章节 / 表格提取</strong>
+          <span
+            >已处理 {{ readingProgress(job).processed }} / {{ readingProgress(job).total }}</span
+          >
+        </div>
+        <progress
+          :value="readingProgress(job).processed"
+          :max="readingProgress(job).total"
+          aria-label="章节与表格提取进度"
+        />
+        <div class="task-metrics">
+          <span>完成 {{ readingProgress(job).completed }}</span>
+          <span>执行中 {{ readingProgress(job).active }}</span>
+          <span>待执行 {{ readingProgress(job).waiting }}</span>
+          <span v-if="readingProgress(job).unresolved"
+            >待核对 {{ readingProgress(job).unresolved }}</span
+          >
+          <span v-if="readingProgress(job).failed"
+            >失败 / 取消 {{ readingProgress(job).failed }}</span
+          >
+        </div>
+        <p
+          v-if="
+            readingProgress(job).processed === readingProgress(job).total &&
+            job.status === 'running'
+          "
+          class="muted"
+        >
+          提取已结束，{{ stageNames[job.stage] || job.stage }}。
         </p>
       </div>
       <button
@@ -155,10 +187,12 @@ function duration(task: AgentTask) {
               {{ [task.preset_name, task.model].filter(Boolean).join(' · ') }}
             </p>
             <p
-              v-if="task.status === 'waiting' && task.candidates"
+              v-if="['queued', 'waiting'].includes(task.status) && task.candidates?.length"
               class="muted"
             >
-              等待可用模型：{{ task.candidates.join('、') }}
+              {{ task.status === 'waiting' ? '等待可用模型' : '主 Agent 分配候选' }}：{{
+                task.candidates.join('、')
+              }}
             </p>
             <p
               v-if="task.stage && task.status === 'running'"
@@ -210,6 +244,9 @@ function duration(task: AgentTask) {
               </details>
             </div>
             <div class="task-metrics">
+              <span v-if="task.planned_count != null"
+                >已分配 {{ task.planned_count }} 个子任务</span
+              >
               <span v-if="task.evidence_count">{{ task.evidence_count }} 处原文</span>
               <span v-if="task.fact_count != null">{{ task.fact_count }} 个参数</span>
               <span v-if="task.rule_count != null">{{ task.rule_count }} 条规则</span>

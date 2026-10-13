@@ -2,6 +2,7 @@ import { computed, ref } from 'vue';
 import type { Router } from 'vue-router';
 import { ApiError, post, request } from '../lib/api';
 import { cloneJson } from '../lib/json';
+import { distinctIssues } from '../lib/review';
 import type {
   EditableReading,
   BudgetTemplate,
@@ -95,14 +96,17 @@ export function useWorkspace(router: Router) {
       : 'issues',
   );
   const issues = computed(() =>
-    [
-      ...(snapshot.value?.reading.issues.filter((issue) => issue.code.startsWith('validation.')) ||
-        []),
-      ...(editable.value?.issues || []),
-    ].filter(
-      (issue) =>
-        issue.code !== 'validation.rule_unimplemented' &&
-        !issue.code.startsWith('review.resolved.'),
+    distinctIssues(
+      [
+        ...(snapshot.value?.reading.issues.filter((issue) =>
+          issue.code.startsWith('validation.'),
+        ) || []),
+        ...(editable.value?.issues || []),
+      ].filter(
+        (issue) =>
+          issue.code !== 'validation.rule_unimplemented' &&
+          !issue.code.startsWith('review.resolved.'),
+      ),
     ),
   );
   const errors = computed(

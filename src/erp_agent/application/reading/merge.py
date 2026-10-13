@@ -1,5 +1,4 @@
 import hashlib
-import re
 from dataclasses import replace
 from decimal import Decimal
 
@@ -14,14 +13,10 @@ from erp_agent.domain.models import (
     Rule,
     RuleSet,
 )
+from erp_agent.domain.text import normalized_text as normalized_name
 from erp_agent.domain.validation import UNSPECIFIED_UNITS
 
 ROW_CATEGORIES = {"bom", "demand_forecast", "order_pool", "order_contract"}
-
-
-def normalized_name(value: str) -> str:
-    text = re.sub(r"\s+", " ", value).strip()
-    return re.sub(r"(?<=[\u3400-\u9fff]) (?=[\u3400-\u9fff])", "", text)
 
 
 def identifier(prefix: str, value: str) -> str:
@@ -83,7 +78,8 @@ class ReadingMerger:
                 refs = tuple(dict.fromkeys(previous.evidence_ids + current.evidence_ids))
                 explanations = "；".join(dict.fromkeys(filter(None, (
                     previous.explanation, current.explanation))))
-                if previous.state != KnowledgeState.CONFLICTED and current.state != KnowledgeState.CONFLICTED:
+                if (previous.state != KnowledgeState.CONFLICTED
+                        and current.state != KnowledgeState.CONFLICTED):
                     if previous.value is None and current.value is not None:
                         facts[key] = replace(current, evidence_ids=refs, explanation=explanations)
                         continue
@@ -99,12 +95,14 @@ class ReadingMerger:
                                          explanation=explanations)
                 else:
                     message = (f"{current.entity_name} · {current.key} 的不同来源给出"
-                               f"“{previous.value} {previous.unit}”与“{current.value} {current.unit}”，"
+                               f"“{previous.value} {previous.unit}”与"
+                               f"“{current.value} {current.unit}”，"
                                "应采用哪一个值，是否有明确的补充覆盖依据？")
                     facts[key] = replace(previous, evidence_ids=refs,
                         state=KnowledgeState.CONFLICTED,
                         explanation="；".join(filter(None, (explanations, message))))
-                    issues.append(Issue("reading.source_conflict", "warning", fid, message, refs))
+                    issues.append(Issue("reading.source_conflict", "warning", fid,
+                                        message, refs))
             for rule in part.result.rules.rules:
                 key = (normalized_name(rule.name), normalized_name(rule.expression))
                 rid = identifier("rule_", ":".join(key))
@@ -115,9 +113,10 @@ class ReadingMerger:
             for issue in part.result.issues:
                 issues.append(replace(issue, target=remap.get(issue.target, issue.target)))
         unique_issues = tuple(dict.fromkeys(issues))
-        title = next((p.result.problem.title for p in parts if p.result.problem.title.strip()), "ERP 赛题")
+        title = next((p.result.problem.title for p in parts if p.result.problem.title.strip()),
+                     "ERP 赛题")
         model = ", ".join(dict.fromkeys(p.result.model for p in parts))
         result = ReadingResult(ProblemSpec(title, tuple(facts.values())),
                                RuleSet(tuple(rules.values())), unique_issues, model,
-                               prompt_version="reader-15")
+                               prompt_version="reader-16")
         return replace(result, raw_response=dumps(editable_reading(result)))

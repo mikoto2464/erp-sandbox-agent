@@ -17,7 +17,7 @@ from erp_agent.application.reading.roles import ExtractionRole, ReaderLimits, Re
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Issue, ParsedDocument, ProblemSpec, ReadingResult, RuleSet
-from erp_agent.domain.validation import validate_reading
+from erp_agent.domain.validation import source_notice, validate_reading
 
 SPLIT_ERRORS = {
     "reading_batch_limit",
@@ -198,7 +198,8 @@ class StructuredReader:
 
             role_control = RoleControl()
             role_client = TaskLLMClient(client, role_control, task)
-            report_task(control, task, "queued", evidence_count=len(batch.focus_ids))
+            report_task(control, task, "queued", evidence_count=len(batch.focus_ids),
+                        task_kind="extraction")
             batch_control.checkpoint("reading_" + role.name)
             cached = memory.get(key) if memory else None
             if cached and cached.get("split") is True and len(batch.units) > 1:
@@ -363,6 +364,10 @@ class StructuredReader:
             f"{len(documents)} 份资料 · {len(batches)} 个章节/表格任务",
         )
         report_task(control, parent, "running", batch_count=len(batches))
+        for batch in batches:
+            role = self.combined_role or self.facts_role
+            report_task(control, task_for(role, batch), "queued",
+                        evidence_count=len(batch.focus_ids), task_kind="extraction")
         plan_reading = getattr(client, "plan_reading", None)
         if self.combined_role and plan_reading:
             requests: list[LLMRequest] = []
@@ -416,7 +421,7 @@ class StructuredReader:
             )
             reading = replace(reading, issues=tuple(dict.fromkeys(reading.issues + findings)))
         source_issues = tuple(
-            Issue("reading.source_warning", "warning", doc.source.id, warning)
+            source_notice(doc.source.id, warning)
             for doc in documents
             for warning in doc.warnings
         )

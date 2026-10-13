@@ -186,6 +186,9 @@ export interface ModelLoad {
   available: number;
 }
 export interface AgentTask {
+  task_kind?: string;
+  planned_count?: number;
+  batch_count?: number;
   difficulty?: string;
   dispatch_reason?: string;
   assignment_reason?: string;

@@ -1,14 +1,21 @@
 import unittest
 from dataclasses import replace
 
-from erp_agent.application.contracts import decode_reading, dumps, editable_reading, loads
-from erp_agent.application.reader import StructuredReader
 from erp_agent.adapters.documents import OOXMLDocumentParser
 from erp_agent.adapters.model_settings import RuntimeLLMClient
+from erp_agent.application.contracts import decode_reading, dumps, editable_reading, loads
 from erp_agent.application.ports import LLMResponse
+from erp_agent.application.reader import StructuredReader
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
-    Evidence, Fact, Issue, KnowledgeState, ProblemSpec, ReadingResult, RuleSet, SourceDocument,
+    Evidence,
+    Fact,
+    Issue,
+    KnowledgeState,
+    ProblemSpec,
+    ReadingResult,
+    RuleSet,
+    SourceDocument,
 )
 from erp_agent.domain.validation import validate_reading
 from tests.helpers import Control, FakeLLM, docx_bytes
@@ -27,6 +34,9 @@ class ReadingTests(unittest.TestCase):
     def test_text_layout_whitespace_is_supported_without_changing_meaning(self):
         for value, source, supported in [
             ("每季付息，到期还本", "每季付息，到期还 本", True),
+            ("4季贴现", "4 季贴现", True),
+            ("8时制", "8 时制", True),
+            ("4季贴现", "14 季贴现", False),
             ("本息同还", "每季付息，到期还 本", False),
             ("AB", "A B", False),
         ]:
@@ -40,6 +50,38 @@ class ReadingTests(unittest.TestCase):
                                    if i.code == "validation.unsupported_value")
                     self.assertIn("文字", message)
                     self.assertNotIn("单位", message)
+
+    def test_specific_errors_are_not_repeated_as_generic_state_issues(self):
+        source = (Evidence("p1", "doc", "格", "100"),)
+        checked = validate_reading(self.result("999"), source)
+        self.assertEqual([i.code for i in checked.issues if i.target == "cash"],
+                         ["validation.unsupported_value"])
+        reading = replace(self.result(None), issues=(
+            Issue("reading.invalid_number", "error", "cash", "数值格式有误。", ("p1",)),))
+        checked = validate_reading(reading, source)
+        self.assertEqual([i.code for i in checked.issues if i.target == "cash"],
+                         ["reading.invalid_number"])
+        reading = replace(self.result(None), issues=(
+            Issue("review.timing", "warning", "cash", "何时支付？", ("p1",)),))
+        checked = validate_reading(reading, source)
+        self.assertEqual([i.code for i in checked.issues if i.target == "cash"],
+                         ["review.timing", "validation.value_missing"])
+
+    def test_layout_support_keeps_explicit_conflicts_until_safe_workflow_recheck(self):
+        reading = self.result("4季贴现", kind="text")
+        reading = replace(reading, problem=replace(reading.problem, facts=(
+            replace(reading.problem.facts[0], state=KnowledgeState.CONFLICTED),)), issues=(
+            Issue("validation.unsupported_value", "error", "cash", "旧来源校验失败。"),))
+        source = (Evidence("p1", "doc", "格", "4 季贴现"),)
+        checked = validate_reading(reading, source)
+        self.assertEqual(checked.problem.facts[0].state, KnowledgeState.CONFLICTED)
+        self.assertEqual(checked.problem.facts[0].unit, "")
+        self.assertFalse(any(i.code == "validation.unsupported_value" for i in checked.issues))
+        disputed = replace(reading, issues=reading.issues + (
+            Issue("reading.source_conflict", "warning", "cash", "另一来源为3季贴现。"),))
+        self.assertEqual(validate_reading(disputed, source).problem.facts[0].state,
+                         KnowledgeState.CONFLICTED)
+        self.assertEqual(validate_reading(checked, source), checked)
 
     def test_unspecified_unit_is_empty_and_does_not_change_value_or_conversion(self):
         for unit in ("", "无", "不清楚", "unknown"):
@@ -199,7 +241,7 @@ class ReadingTests(unittest.TestCase):
         control = Control()
         result = StructuredReader(runtime, runtime.current).read((document,), control)
         self.assertEqual(result.model, "original-model")
-        self.assertEqual(result.prompt_version, "reader-15")
+        self.assertEqual(result.prompt_version, "reader-16")
         self.assertEqual(len(calls), 2)
         self.assertEqual(replacement.calls, [])
         self.assertIn("repairing_reading", control.stages)
@@ -259,6 +301,19 @@ class ReadingTests(unittest.TestCase):
         warnings = [issue for issue in result.issues if issue.code == "reading.source_warning"]
         self.assertEqual(len(warnings), 1)
         self.assertIn("OCR", warnings[0].message)
+
+    def test_excel_float_normalization_is_information_not_a_review_question(self):
+        document = OOXMLDocumentParser().parse(
+            SourceDocument("d", "topic.docx", "hash", 0, "docx"), docx_bytes(),
+        )
+        notice = "XLS 二进制数值按 Excel 的 15 位有效数字规范化，消除存储浮点尾差；共 29 格。"
+        document = replace(document, warnings=(notice, "图片尚未进行OCR。"))
+        llm = FakeLLM(dumps(editable_reading(self.result(refs=(document.evidence[0].id,)))))
+        result = StructuredReader(llm).read((document,), Control())
+        source_issues = [i for i in result.issues if i.code.startswith("reading.source_")]
+        self.assertEqual([(i.code, i.severity) for i in source_issues],
+                         [("reading.source_info", "info"), ("reading.source_warning", "warning")])
+        self.assertNotIn(notice, loads(llm.calls[0].user)["documents"][0]["warnings"])
 
     def test_assumed_horizon_is_usable_and_preserves_status(self):
         reading = self.result()
