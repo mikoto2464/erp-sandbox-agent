@@ -199,7 +199,7 @@ class AnswererService:
         reading = next((t for t in report.snapshot.template_readings
                         if t.template_id == template_id), None)
         if not reading or not reading.reviewed:
-            raise ERPError('template_not_reviewed', '空表须先经过读题解析与核对，再生成方案。', 409)
+            raise ERPError('template_not_reviewed', '空表须先在空表库解读核对并导入，再生成方案。', 409)
         if reading.sha256 != template.source.sha256:
             raise ERPError('template_changed', '空表与已读版本不一致，请重新读取并生成方案。', 409)
         if template_id not in report.solution.generation.template_ids:

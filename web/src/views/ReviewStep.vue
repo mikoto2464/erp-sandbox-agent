@@ -7,7 +7,7 @@ import EvidencePreview from '../components/EvidencePreview.vue';
 import IssueCard from '../components/IssueCard.vue';
 import { labels, fieldNames, stateNames } from '../lib/labels';
 import { confirmFact, factInputError, fieldConfirmation } from '../lib/review';
-import type { EditableReading, Fact, TemplateReading } from '../lib/types';
+import type { EditableReading, Fact } from '../lib/types';
 const {
   snapshot,
   editable,
@@ -26,25 +26,12 @@ const {
   continueToSolve,
   operations,
   notify,
-  templates,
 } = useWorkspaceContext();
 const search = ref(''),
   category = ref(''),
   state = ref(''),
   issueFilter = ref(''),
   editing = ref<Fact | null>(null);
-function confirmTemplate(reading: TemplateReading) {
-  if (
-    !reading.reviewed &&
-    reading.issues.some((issue) => issue.severity !== 'info') &&
-    !reading.explanation.trim()
-  ) {
-    notify('请在补充说明中回答空表疑点，再确认解读。');
-    return;
-  }
-  reading.reviewed = !reading.reviewed;
-  markReadingDirty();
-}
 const evidence = ref<{ ids: string[]; title: string; fact?: Fact } | null>(null),
   jsonText = ref('');
 const states = Object.entries(stateNames).map(([value, label]) => ({ value, label }));
@@ -185,63 +172,6 @@ function applyJSON() {
       上传文件或输入题目后，点击“读取题目”。
     </div>
     <template v-else>
-      <section
-        v-if="snapshot.template_readings?.length"
-        class="card"
-      >
-        <h2>预算空表核对</h2>
-        <article
-          v-for="reading in snapshot.template_readings"
-          :key="reading.template_id"
-          class="input-section"
-        >
-          <div class="section-heading">
-            <h3>
-              {{
-                templates.find((t) => t.source.id === reading.template_id)?.source.filename ||
-                '预算空表'
-              }}
-            </h3>
-            <button
-              class="review-action"
-              @click="confirmTemplate(reading)"
-            >
-              {{ reading.reviewed ? '已确认 · 重新核对' : '确认空表解读' }}
-            </button>
-          </div>
-          <div
-            v-for="sheet in reading.sheets"
-            :key="sheet.name"
-          >
-            <p>
-              <strong>{{ sheet.name }}</strong> · {{ sheet.purpose }}
-            </p>
-            <p>期间与口径：{{ sheet.periods || '未注明' }}</p>
-            <p
-              v-for="group in sheet.input_groups"
-              :key="group.range"
-            >
-              {{ group.label }} · {{ group.range }} · {{ group.unit || '无单位' }} —
-              {{ group.description }}
-            </p>
-          </div>
-          <p
-            v-for="issue in reading.issues"
-            :key="issue.code + issue.message"
-            class="notice"
-          >
-            {{ issue.message }}
-          </p>
-          <label
-            >补充说明（选填）<textarea
-              v-model="reading.explanation"
-              rows="2"
-              @input="markReadingDirty"
-              placeholder="需要修正的表格用途、期间或条目口径。"
-            />
-          </label>
-        </article>
-      </section>
       <div class="card review-guide">
         <div class="section-heading">
           <div>

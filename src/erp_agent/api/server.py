@@ -8,7 +8,6 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from erp_agent.adapters.artifacts import (
     DocxReportRenderer,
-    LibreOfficeFormulaRecalculator,
     LibreOfficeSpreadsheetConverter,
     XlsxWorkbookRenderer,
 )
@@ -174,6 +173,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts[:2] == ["api", "template-library"]:
             library = workflow.template_library
             if len(parts) == 2 and method == "GET":
+                workflow.migrate_legacy_templates()
                 self._json(library.items())
             elif len(parts) == 2 and method == "POST":
                 self._json(library.upload(unquote(self.headers.get("X-Filename", "")),
@@ -361,8 +361,7 @@ def create_workflow(settings: Settings, llm: LLMClient | None = None,
     solver = SolverService(LLMStrategyGenerator(client),
                            evaluator if evaluator is not None else DraftPlanEvaluator())
     answerer = AnswererService(repository, jobs, models, DocxReportRenderer(),
-                               XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice),
-                                                    LibreOfficeFormulaRecalculator(settings.libreoffice)),
+                               XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice)),
                                memory=memory)
     reader = StructuredReader(client, client.current,
                               ReaderLimits(settings.reader_max_request_chars,

@@ -114,28 +114,26 @@ class WebTests(unittest.TestCase):
         result = self.request(base + "/problem")
         return project, result
 
+    def upload_project_template(self, base, project, content):
+        job = self.request('/api/template-library', content=content, headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx'})
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        tid = job['metadata']['template_id']
+        saved = self.llm.response
+        self.llm.response = dumps({'purpose': '经营预算', 'periods': '第1期',
+            'input_groups': [{'label': '借款', 'range': 'B2', 'unit': '元',
+                              'description': '空白借款输入'}], 'issues': []})
+        job = self.request(f'/api/template-library/{tid}/read', {})
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        with self.assertRaises(HTTPError):
+            self.request(base + '/templates/import', {'template_id': tid})
+        self.request(f'/api/template-library/{tid}/review', {'reviewed': True, 'explanation': ''})
+        imported = self.request(base + '/templates/import', {'template_id': tid})
+        self.llm.response = saved
+        return imported
+
     def read_and_review_template(self, base, project, template):
-        saved_response = self.llm.response
-        self.llm.response = dumps({"purpose": "经营预算", "periods": "第1期",
-            "input_groups": [{"label": "借款", "range": "B2", "unit": "元",
-                              "description": "借款输入，保留公式"}], "issues": []})
-        job = self.request(base + '/read', {'append': True, 'document_ids': [],
-                           'template_ids': [template['source']['id']]})
-        self.assertEqual(self.wait_job(project, job['id'])['status'], 'needs_input')
-        current = self.request(base + '/problem')['snapshot']
-        generation = {'template_ids': [template['source']['id']]}
-        with self.assertRaises(HTTPError) as blocked:
-            self.request(base + '/solve', {'version': current['version'], 'generation': generation})
-        self.assertEqual(blocked.exception.code, 409)
-        revised = self.request(base + '/revisions', {'expected_version': current['version'],
-            'reading': {'title': current['reading']['problem']['title'],
-                        'facts': current['reading']['problem']['facts'],
-                        'rules': current['reading']['rules']['rules'],
-                        'issues': current['reading']['issues']},
-            'template_reviews': [{'template_id': template['source']['id'], 'reviewed': True,
-                                  'explanation': '按原表输入预算'}]})
-        self.llm.response = saved_response
-        return revised['version']
+        return self.request(base + '/problem')['snapshot']['version']
 
     def test_budget_tone_and_iterative_solution_context(self):
         project, _ = self.setup_problem()
@@ -152,10 +150,7 @@ class WebTests(unittest.TestCase):
         content = io.BytesIO()
         workbook.save(content)
         workbook.close()
-        job = self.request(base + '/templates', content=content.getvalue(), headers={
-            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
-        })
-        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        self.upload_project_template(base, project, content.getvalue())
         template = self.request(base + '/templates')[0]
         version = self.read_and_review_template(base, project, template)
         self.assertEqual(template['sheets'][0]['merged_ranges'], ['A4:C4'])
@@ -294,18 +289,17 @@ class WebTests(unittest.TestCase):
         workbook = Workbook()
         workbook.active.append(['项目', '第一季'])
         buffer = io.BytesIO()
+        workbook.active['B2'].number_format = '0.00'
         workbook.save(buffer)
-        job = self.request(base + '/templates', content=buffer.getvalue(), headers={
-            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
-        })
-        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
-        template_id = job['metadata']['template_id']
-        self.assertEqual(self.raw_request(base + '/templates/' + template_id, method='DELETE')[0], 200)
-        self.assertEqual(self.request(base + '/templates'), [])
+        other = self.request('/api/projects', {'name': '删除空表测试'})['id']
+        template_base = f'/api/projects/{other}'
+        imported = self.upload_project_template(template_base, other, buffer.getvalue())
+        template_id = imported['template_id']
+        self.assertEqual(self.raw_request(template_base + '/templates/' + template_id, method='DELETE')[0], 200)
+        self.assertEqual(self.request(template_base + '/templates'), [])
         with self.assertRaises(ERPError) as missing:
-            self.server.workflow.repository.get('template_original', project, template_id)
+            self.server.workflow.repository.get('template_original', other, template_id)
         self.assertEqual(missing.exception.code, 'not_found')
-        self.assertTrue(self.request(base + '/jobs/' + job['id'])['metadata']['upload_deleted'])
 
     def test_delete_file_during_parse_prevents_late_write_and_retry(self):
         project = self.request('/api/projects', {'name': '删除解析中附件'})['id']
@@ -349,10 +343,7 @@ class WebTests(unittest.TestCase):
         sheet['B3'] = '=SUM(B2)'
         content = io.BytesIO()
         workbook.save(content)
-        job = self.request(base + '/templates', content=content.getvalue(), headers={
-            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx',
-        })
-        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        self.upload_project_template(base, project, content.getvalue())
         template = self.request(base + '/templates')[0]
         version = self.read_and_review_template(base, project, template)
         with self.assertRaises(HTTPError) as unplanned:

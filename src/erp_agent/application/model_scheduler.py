@@ -333,6 +333,8 @@ class ScheduledLLMClient:
         child = request.task
         with self._lock:
             planned = self._reading_plan.get(child.id) if child else None
+            if child and not planned and child.parent_id.startswith("template-read:"):
+                planned = self._reading_plan.get(child.parent_id)
         if planned:
             try:
                 data = obj(loads(request.user))

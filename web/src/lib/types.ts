@@ -21,10 +21,16 @@ export interface BudgetTemplate {
       number_format: string;
       formula: boolean;
       writable: boolean;
+      horizontal?: string;
+      vertical?: string;
+      wrap?: boolean;
+      display_text?: string;
     }[];
     merged_ranges: string[];
     hidden: boolean;
     protected: boolean;
+    column_widths?: number[];
+    row_heights?: number[];
   }[];
   warnings: string[];
 }

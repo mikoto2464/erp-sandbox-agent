@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import AppSelect from '../components/AppSelect.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
+import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 import TemplateLibraryPicker from '../components/TemplateLibraryPicker.vue';
 import type { BudgetTemplate, PlanTone } from '../lib/types';
 const {
@@ -157,12 +158,17 @@ async function revise() {
           >
             预览
           </button>
+          <UploadDeleteButton
+            :id="template.source.id"
+            :filename="template.source.filename"
+            kind="template"
+          />
         </div>
         <p
           v-if="!availableTemplates.length"
           class="muted"
         >
-          请在第一步上传空表，并在第二步核对后使用；不使用空表也可生成方案。
+          在空表库完成上传、解读和核对后导入；不使用空表也可生成方案。
         </p>
       </div>
       <p class="notice">{{ note }}</p>

@@ -57,7 +57,7 @@ function editMapping(mapping: WorkbookMapping, index = 0) {
   editing.value = mapping;
 }
 const formulaNames: Record<string, string> = {
-  pending: '公式待重算',
+  pending: 'Excel 打开后自动计算',
   not_needed: '无公式',
   not_applicable: '文档检查完成',
   recalculated: '公式已重算',
@@ -133,7 +133,7 @@ const formulaNames: Record<string, string> = {
           v-if="!plannedTemplates.length"
           class="muted"
         >
-          这份方案未选择预算空表。请先在前两步读取并核对空表，再选择空表生成经营方案。
+          这份方案未选择预算空表。请先在空表库解读、核对并导入，再选择空表生成经营方案。
         </p>
         <article
           v-for="template in plannedTemplates"

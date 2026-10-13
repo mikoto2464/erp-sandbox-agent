@@ -167,7 +167,7 @@ class LibreOfficeSpreadsheetConverter:
 
 class PendingFormulaRecalculator:
     def recalculate(self, content: bytes) -> RenderedArtifact:
-        return RenderedArtifact(content, 'pending', ('公式未重算；请用 Excel 或 LibreOffice 打开后重新计算。',))
+        return RenderedArtifact(content, 'pending', ('原公式保持不变，Excel 打开后自动计算。',))
 
 
 class LibreOfficeFormulaRecalculator:
@@ -265,7 +265,7 @@ class XlsxWorkbookRenderer:
         notes.append(['方案编号', report.solution.id])
         notes.append(['题目版本', report.solution.problem_version])
         notes.append(['状态', '已验证' if report.solution.evaluation.verified else DRAFT_NOTICE])
-        notes.append(['公式状态', '保留原公式；尚未重算' if original_formulas else '无公式'])
+        notes.append(['公式状态', '保留原公式；Excel 打开后自动计算' if original_formulas else '无公式'])
         notes.append(['表格', '单元格', '项目', '来源', '转换', '写入值', '说明'])
         if mapping:
             for entry in mapping.entries:
@@ -283,7 +283,7 @@ class XlsxWorkbookRenderer:
                 cell.fill = PatternFill('solid', fgColor='3E58DB')
             for column in ('A', 'B', 'C', 'D', 'E', 'F', 'G'):
                 sheet.column_dimensions[column].width = 22 if column != 'B' else 45
-        workbook.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
+        workbook.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
         buffer = io.BytesIO()
         workbook.save(buffer)
         workbook.close()

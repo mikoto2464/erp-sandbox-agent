@@ -50,7 +50,7 @@ from erp_agent.application.solver import (
 )
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.application.template_library import TemplateLibrary
-from erp_agent.application.template_reader import LIBRARY_SCOPE, TemplateReader
+from erp_agent.application.template_reader import LIBRARY_SCOPE
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     KnowledgeState,
@@ -91,6 +91,7 @@ class WorkflowService:
         self._input_lock = threading.Lock()
         self._solve_lock = threading.Lock()
         self._template_lock = threading.RLock()
+        self._legacy_templates_migrated = False
         self.template_library = TemplateLibrary(repository, jobs, template_parser, reader.llm,
                                                 model_settings)
 
@@ -122,7 +123,9 @@ class WorkflowService:
             previous = self.problem(project_id)
             if any(t == copied for t in previous.template_readings):
                 return {"template_id": source.id, "version": previous.version}
-            readings = tuple(t for t in previous.template_readings if t.template_id != source.id) + (copied,)
+            active_ids = {t.source.id for t in matches} | {source.id}
+            readings = tuple(t for t in previous.template_readings
+                             if t.template_id in active_ids and t.template_id != source.id) + (copied,)
             snapshot = replace(previous, version=previous.version + 1, created_at=timestamp(),
                 reading=replace(previous.reading, rules=replace(previous.reading.rules,
                                 version=previous.version + 1)), template_readings=readings,
@@ -140,44 +143,36 @@ class WorkflowService:
 
     def upload_template(self, project_id: str, filename: str, content: bytes) -> JSONObject:
         self.project(project_id)
-        if not filename or len(filename) > 200 or any(c in filename for c in "/\\\x00"):
-            raise ERPError("invalid_filename", "文件名无效。")
-        fmt = filename.rsplit(".", 1)[-1].lower()
-        if fmt not in {"xlsx", "xls"}:
-            raise ERPError("unsupported_template", "预算空表支持 XLSX 或 XLS。")
-        if self.template_parser is None:
-            raise ERPError("template_parser_unavailable", "预算表解析器未配置。", 503)
-        source = SourceDocument(uuid4().hex, filename, hashlib.sha256(content).hexdigest(),
-                                len(content), fmt)
-        self.repository.put("template_original", project_id, source.id, {
-            "source": to_json(source), "content": base64.b64encode(content).decode(),
-        })
-        return self._template_job(project_id, source, content)
-
-    def _template_job(self, project_id: str, source: SourceDocument, content: bytes) -> JSONObject:
-        parser = self.template_parser
-        if parser is None:
-            raise ERPError("template_parser_unavailable", "预算表解析器未配置。", 503)
-
-        def operation(control: RunControl) -> JSONValue:
-            control.checkpoint("parsing_template")
-            template = parser.parse(source, content)
-            control.checkpoint("saving_template")
-            self.repository.put("template", project_id, source.id, template)
-            return {"template_id": source.id}
-
-        return self.jobs.submit(project_id, "template", operation,
-                                {"filename": source.filename, "template_id": source.id})
+        raise ERPError("template_library_required", "请在空表库上传、解读和核对，再导入项目。", 409)
 
     def retry_template(self, project_id: str, template_id: str) -> JSONObject:
         self.project(project_id)
+        self.repository.get("template_original", project_id, template_id)
         self._require_upload(project_id, "template", template_id)
-        original = self.repository.get("template_original", project_id, template_id)
-        data = obj(original["source"])
-        source = SourceDocument(string(data["id"]), string(data["filename"]), string(data["sha256"]),
-                                integer(data["size"], 0, 100 * 1024 * 1024), string(data["format"]))
-        return self._template_job(project_id, source,
-                                  base64.b64decode(string(original["content"], 150 * 1024 * 1024)))
+        raise ERPError("template_library_required", "请在空表库继续解读。", 409)
+
+    def migrate_legacy_templates(self) -> None:
+        with self._template_lock:
+            if not self._legacy_templates_migrated:
+                self._publish_legacy_templates()
+                self._legacy_templates_migrated = True
+
+    def _publish_legacy_templates(self) -> None:
+        for project in self.repository.list_all("project"):
+            project_id = string(project["id"])
+            readings = {}
+            if self.repository.versions(project_id):
+                snapshot = problem_snapshot(self.repository.snapshot(project_id))
+                readings = {t.template_id: t for t in snapshot.template_readings}
+            imported = {obj(r)["template_id"] for r in
+                        self.repository.list("imported_template_reading", project_id)}
+            for value in self.repository.list("template", project_id):
+                template = budget_template(obj(value))
+                tid = template.source.id
+                if tid in imported:
+                    continue
+                self.template_library.publish(template,
+                    self.repository.get("template_original", project_id, tid), readings.get(tid))
 
     def create_project(self, name: str) -> JSONObject:
         name = name.strip()
@@ -357,27 +352,22 @@ class WorkflowService:
             old_extra = {d.source.id for d in previous.additional_sources}
             extra_sources = tuple(d for d in extra_sources if d.source.id not in old_extra)
         requested_templates = strings(data.get("template_ids", [])) if data else ()
-        templates = tuple(budget_template(self.repository.get("template", project_id, tid))
-                          for tid in requested_templates)
-        for tid in requested_templates:
-            self._require_upload(project_id, "template", tid)
+        if requested_templates:
+            raise ERPError("template_library_required", "空表解读与核对请在空表库完成。", 409)
         active_templates = {obj(t)["source"]["id"]
                             for t in self.repository.list("template", project_id)}
         existing_templates = {t.template_id: t for t in previous.template_readings
-                              if t.template_id in active_templates} if previous else {}
-        imported = {string(obj(t)["template_id"]): template_reading(obj(t))
-                    for t in self.repository.list("imported_template_reading", project_id)}
-        for tid in requested_templates:
-            if tid in imported:
-                existing_templates.setdefault(tid, imported[tid])
-        new_templates = tuple(t for t in templates if t.source.id not in existing_templates
-                              or existing_templates[t.source.id].sha256 != t.source.sha256)
+                              if t.template_id in active_templates and t.reviewed} if previous else {}
+        for value in self.repository.list("imported_template_reading", project_id):
+            interpretation = template_reading(obj(value))
+            if interpretation.template_id in active_templates and interpretation.reviewed:
+                existing_templates[interpretation.template_id] = interpretation
         for value in self.repository.list("job", project_id):
             job = obj(value)
             if job.get("kind") == "read" and job.get("status") in {"running", "queued"}:
                 raise ERPError("reading_in_progress", "当前项目正在读题，请等待完成。", 409)
-        if not documents and not extra_sources and not new_templates:
-            raise ERPError("no_new_sources", "没有待读取的新文件或空表。")
+        if not documents and not extra_sources:
+            raise ERPError("no_new_sources", "没有待读取的新题目资料。")
         binding = self.model_settings.capture_pool() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
@@ -418,13 +408,6 @@ class WorkflowService:
                                          tuple(e for d in all_documents for e in d.evidence))
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
             template_results = dict(existing_templates)
-            for template in new_templates:
-                self._require_upload(project_id, "template", template.source.id)
-                template_results[template.source.id] = TemplateReader(self.repository).read(
-                    template, client, control)
-                self.template_library.publish(template,
-                    self.repository.get("template_original", project_id, template.source.id),
-                    template_results[template.source.id])
             if not sources and not previous:
                 result = validate_reading(result, ())
             control.checkpoint("saving_reading")
@@ -472,31 +455,11 @@ class WorkflowService:
         reading = replace(reading, rules=replace(reading.rules, version=expected + 1),
                           raw_response=old.reading.raw_response)
         template_reviews = old.template_readings
-        if "template_reviews" in data:
-            updates = {string(t["template_id"]): t for value in array(data["template_reviews"])
-                       for t in (obj(value, {"template_id", "reviewed", "explanation"}),)}
-            if set(updates) - {t.template_id for t in template_reviews}:
-                raise ERPError("template_not_read", "空表尚未经过 Reader 解析。", 409)
-            for template in template_reviews:
-                update = updates.get(template.template_id)
-                if (update and update.get("reviewed") is True
-                        and any(i.severity != "info" for i in template.issues)
-                        and not string(update.get("explanation", "")).strip()):
-                    raise ERPError("template_review_answer", "空表存在疑点，请填写处理说明后确认。")
-            template_reviews = tuple(replace(t,
-                reviewed=updates[t.template_id].get("reviewed") is True,
-                explanation=string(updates[t.template_id].get("explanation", "")))
-                if t.template_id in updates else t for t in template_reviews)
+        if data.get("template_reviews"):
+            raise ERPError("template_library_required", "请在空表库核对，再重新导入已确认解读。", 409)
         snapshot = ProblemSnapshot(project_id, expected + 1, timestamp(), old.document_ids,
                                    reading, note, old.inputs, old.additional_sources, template_reviews)
         saved = self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
-        for interpretation in template_reviews:
-            if interpretation.reviewed:
-                template = budget_template(self.repository.get("template", project_id,
-                                                               interpretation.template_id))
-                self.template_library.publish(template,
-                    self.repository.get("template_original", project_id, interpretation.template_id),
-                    interpretation)
         if self.memory:
             self.memory.remember(problem_snapshot(saved))
         return saved
@@ -545,7 +508,7 @@ class WorkflowService:
             template = next(t for t in templates if t.source.id == template_id)
             if (not interpretation or not interpretation.reviewed
                     or interpretation.sha256 != template.source.sha256):
-                raise ERPError("template_not_reviewed", "空表必须先在前两步读取并核对后才能生成方案。", 409)
+                raise ERPError("template_not_reviewed", "请先在空表库解读核对并导入空表，再生成方案。", 409)
         if len(dumps(budget_material(templates))) > 1500000:
             raise ERPError("template_context_limit", "所选预算表内容过多，请精简或减少模板。")
         request = SolveRequest(snapshot, mode, context=PlanningContext(config, templates, previous_plan))

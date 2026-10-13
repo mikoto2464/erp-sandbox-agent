@@ -4,9 +4,6 @@ import { useWorkspaceContext } from '../composables/context';
 import type { ParsedDocument } from '../lib/types';
 import DocumentPreview from '../components/DocumentPreview.vue';
 import UploadDeleteButton from '../components/UploadDeleteButton.vue';
-import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
-import TemplateLibraryPicker from '../components/TemplateLibraryPicker.vue';
-import type { BudgetTemplate } from '../lib/types';
 const {
   inputs,
   inputsDirty,
@@ -24,14 +21,10 @@ const {
   saveInputs,
   upload,
   startRead,
-  templates,
-  readTemplateIds,
-  uploadTemplates,
   snapshot,
 } = useWorkspaceContext();
 defineEmits<{ settings: [] }>();
 const preview = ref<ParsedDocument | null>(null),
-  templatePreview = ref<BudgetTemplate | null>(null),
   dragging = ref(false),
   fileInput = ref<HTMLInputElement>();
 const pendingFiles = computed(() => {
@@ -49,9 +42,6 @@ const pendingFiles = computed(() => {
 function files(values: FileList | null) {
   if (values) void run('upload', () => upload([...values]));
   if (fileInput.value) fileInput.value.value = '';
-}
-function templateFiles(values: FileList | null) {
-  if (values) void run('upload-template', () => uploadTemplates([...values]));
 }
 </script>
 <template>
@@ -103,7 +93,7 @@ function templateFiles(values: FileList | null) {
               v-if="!snapshot?.document_ids?.includes(doc.source.id)"
               class="review-action"
               :disabled="activeRead || operations.has('read')"
-              @click="run('read', () => startRead(!!snapshot, [doc.source.id], []))"
+              @click="run('read', () => startRead(!!snapshot, [doc.source.id]))"
             >
               读取此文件
             </button>
@@ -156,104 +146,6 @@ function templateFiles(values: FileList | null) {
           />
         </div>
       </article>
-    </div>
-    <div class="input-section">
-      <div class="section-heading">
-        <h3>预算空表 <span class="muted">选填</span></h3>
-        <TemplateLibraryPicker />
-        <label class="review-action template-upload"
-          >上传空表<input
-            type="file"
-            accept=".xlsx,.xls"
-            multiple
-            class="sr-only"
-            :disabled="activeRead || operations.has('upload-template')"
-            @change="
-              templateFiles(($event.target as HTMLInputElement).files);
-              ($event.target as HTMLInputElement).value = '';
-            "
-        /></label>
-      </div>
-      <p class="muted">
-        可从空表库导入已确认解读，也可读取新空表；确认后自动保存到空表库供其他项目复用。
-      </p>
-      <div
-        v-for="template in templates"
-        :key="template.source.id"
-        class="budget-template-row"
-      >
-        <label class="check"
-          ><input
-            v-model="readTemplateIds"
-            type="checkbox"
-            :value="template.source.id"
-          />
-          <span
-            ><strong>{{ template.source.filename }}</strong
-            ><small>{{ template.sheets.map((sheet) => sheet.name).join(' · ') }}</small></span
-          ></label
-        >
-        <span
-          class="badge"
-          :class="
-            snapshot?.template_readings?.some((t) => t.template_id === template.source.id)
-              ? 'known'
-              : 'missing'
-          "
-        >
-          {{
-            snapshot?.template_readings?.some((t) => t.template_id === template.source.id)
-              ? '已读题'
-              : '待读题'
-          }}</span
-        >
-        <button
-          class="review-action"
-          @click="templatePreview = template"
-        >
-          预览
-        </button>
-        <button
-          v-if="!snapshot?.template_readings?.some((t) => t.template_id === template.source.id)"
-          class="review-action"
-          :disabled="activeRead || operations.has('read')"
-          @click="run('read', () => startRead(!!snapshot, [], [template.source.id]))"
-        >
-          读取此空表
-        </button>
-        <UploadDeleteButton
-          :id="template.source.id"
-          :filename="template.source.filename"
-          kind="template"
-        />
-      </div>
-      <div
-        v-for="job in jobs.filter(
-          (job) =>
-            job.kind === 'template' &&
-            !job.metadata.upload_deleted &&
-            !templates.some((t) => t.source.id === job.metadata.template_id),
-        )"
-        :key="job.id"
-        class="budget-template-row"
-      >
-        <span
-          >{{ job.metadata.filename }} ·
-          {{
-            job.status === 'failed'
-              ? '解析失败'
-              : job.status === 'cancelled'
-                ? '已取消'
-                : '正在解析…'
-          }}</span
-        >
-        <UploadDeleteButton
-          v-if="job.metadata.template_id"
-          :id="job.metadata.template_id"
-          :filename="job.metadata.filename || '空表'"
-          kind="template"
-        />
-      </div>
     </div>
     <div class="input-section">
       <label for="problem-text">手动输入题目（选填）</label
@@ -312,7 +204,7 @@ function templateFiles(values: FileList | null) {
         :disabled="!canRead || operations.has('read')"
         @click="run('read', () => startRead())"
       >
-        {{ activeRead ? '正在读题…' : snapshot ? '追加读取新文件 →' : '读取题目与空表 →' }}
+        {{ activeRead ? '正在读题…' : snapshot ? '追加读取新文件 →' : '读取题目 →' }}
       </button>
       <button
         v-if="snapshot"
@@ -326,10 +218,6 @@ function templateFiles(values: FileList | null) {
     <DocumentPreview
       :document="preview"
       @close="preview = null"
-    />
-    <BudgetTemplatePreview
-      :template="templatePreview"
-      @close="templatePreview = null"
     />
   </section>
 </template>

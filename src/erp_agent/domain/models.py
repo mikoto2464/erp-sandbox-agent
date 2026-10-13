@@ -221,6 +221,10 @@ class BudgetCell:
     number_format: str = ""
     formula: bool = False
     writable: bool = True
+    horizontal: str = ""
+    vertical: str = ""
+    wrap: bool = False
+    display_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -249,6 +253,8 @@ class BudgetSheet:
     protected: bool = False
     formula_references: tuple[BudgetFormulaReference, ...] = ()
     validations: tuple[BudgetValidation, ...] = ()
+    column_widths: tuple[int, ...] = ()
+    row_heights: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,7 +262,7 @@ class BudgetTemplate:
     source: SourceDocument
     sheets: tuple[BudgetSheet, ...]
     warnings: tuple[str, ...] = ()
-    parser_version: str = "budget-2"
+    parser_version: str = "budget-3"
 
 
 @dataclass(frozen=True)

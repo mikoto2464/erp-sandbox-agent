@@ -285,7 +285,17 @@ describe('Vue migration', () => {
     expect(workspace.inputs.value.revision).toBe(2);
     expect(workspace.inputsDirty.value).toBe(true);
     uploaded.unmount();
-    const solver = mount(UploadStep, { global });
+    workspace.snapshot.value!.template_readings = [
+      {
+        template_id: 'template',
+        sha256: '',
+        reviewed: true,
+        explanation: '',
+        sheets: [],
+        issues: [],
+      },
+    ];
+    const solver = mount(SolverStep, { global });
     expect(workspace.templateIds.value).toContain('template');
     await solver.find('[aria-label="删除预算.xlsx"]').trigger('click');
     await flushPromises();
@@ -399,7 +409,9 @@ describe('Vue migration', () => {
       .trigger('click');
     await flushPromises();
     expect(wrapper.find('.budget-filled').text()).toBe('10');
-    expect(wrapper.find('.budget-formula').text()).toBe('=SUM(B2)');
+    expect(wrapper.find('.budget-formula').text()).toBe('ƒx');
+    expect(wrapper.find('.budget-formula').attributes('title')).toContain('=SUM(B2)');
+    expect(wrapper.find('.budget-preview colgroup').exists()).toBe(true);
     wrapper.findComponent(BudgetTemplatePreview).vm.$emit('close');
     await flushPromises();
     await wrapper
@@ -435,8 +447,6 @@ describe('Vue migration', () => {
     await wrapper.find('input[value="custom"]').setValue();
     expect(workspace.generationReady.value).toBe(false);
     await wrapper.find('.custom-tone textarea').setValue('减少借款');
-    await workspace.uploadTemplates([new File(['fixture'], 'budget.xlsx')]);
-    expect(workspace.generationReady.value).toBe(false);
     templates.push({
       source: { id: 'template', filename: 'budget.xlsx', size: 7, sha256: 'hash', format: 'xlsx' },
       sheets: [
@@ -452,7 +462,6 @@ describe('Vue migration', () => {
       ],
       warnings: [],
     });
-    jobs.at(-1)!.status = 'succeeded';
     setTemplateReadings([
       {
         template_id: 'template',

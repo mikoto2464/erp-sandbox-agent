@@ -62,6 +62,17 @@ class TemplateLibrary:
     def detail(self, template_id: str) -> JSONObject:
         self._active(template_id)
         template = self.repository.get("template", LIBRARY_SCOPE, template_id)
+        if template.get("parser_version") != "budget-3" and self.parser:
+            original = self.repository.get("template_original", LIBRARY_SCOPE, template_id)
+            source = budget_template(template).source
+            template = obj(
+                to_json(
+                    self.parser.parse(
+                        source, base64.b64decode(string(original["content"], 150 * 1024 * 1024))
+                    )
+                )
+            )
+            self.repository.put("template", LIBRARY_SCOPE, template_id, template)
         try:
             reading = self.repository.get("template_reading", LIBRARY_SCOPE, template_id)
         except ERPError as error:
@@ -126,9 +137,7 @@ class TemplateLibrary:
             ):
                 raise ERPError("template_busy", "这份空表正在处理，请等待完成。", 409)
             try:
-                template = budget_template(
-                    self.repository.get("template", LIBRARY_SCOPE, template_id)
-                )
+                template = budget_template(obj(self.detail(template_id)["template"]))
             except ERPError as error:
                 if error.code != "not_found":
                     raise
@@ -193,7 +202,7 @@ class TemplateLibrary:
             return obj(to_json(saved))
 
     def publish(
-        self, template: BudgetTemplate, original: JSONObject, reading: TemplateReading
+        self, template: BudgetTemplate, original: JSONObject, reading: TemplateReading | None
     ) -> None:
         with self.lock:
             existing = next(
@@ -203,13 +212,15 @@ class TemplateLibrary:
             tid = string(existing["id"]) if existing else template.source.sha256[:32]
             if self.repository.upload_deleted(LIBRARY_SCOPE, "template", tid):
                 return
+            if existing and existing.get("parsed"):
+                return
             source = replace(template.source, id=tid)
             self.repository.put(
                 "template_original", LIBRARY_SCOPE, tid, {**original, "source": to_json(source)}
             )
             self.repository.put("template", LIBRARY_SCOPE, tid, replace(template, source=source))
             # 库已确认的口径不被其他项目的解释静默覆盖。
-            if (
+            if reading is not None and (
                 not existing
                 or not existing.get("reading")
                 or not obj(existing["reading"]).get("reviewed")

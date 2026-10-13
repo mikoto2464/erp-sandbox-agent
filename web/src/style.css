@@ -2199,21 +2199,56 @@ button:active:enabled {
 .budget-template-row strong {
   overflow-wrap: anywhere;
 }
-.budget-plan table,
-.budget-preview table {
+.budget-plan table {
   width: 100%;
 }
 .budget-preview {
-  max-height: 55vh;
+  max-height: 60vh;
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
+.budget-preview table {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+.budget-preview td,
 .budget-preview th {
+  padding: 4px 6px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.budget-preview thead th {
   position: sticky;
-  background: #f5f7fd;
   top: 0;
+  z-index: 2;
+  height: 28px;
+  background: #f5f7fd;
+  text-align: center;
+}
+.budget-preview tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: center;
+  background: #f5f7fd;
+}
+.budget-preview thead th:first-child {
+  left: 0;
+  z-index: 3;
+}
+.budget-input {
+  background: #f1f6ff;
 }
 .budget-formula {
-  color: var(--primary);
-  background: #f4f7ff;
+  color: #778297;
+  background: #f5f6f8;
 }
 .budget-plan td {
   vertical-align: top;

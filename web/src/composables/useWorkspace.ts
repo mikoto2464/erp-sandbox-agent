@@ -81,7 +81,6 @@ export function useWorkspace(router: Router) {
       (planTone.value !== 'custom' || !!customPrompt.value.trim()),
   );
   const selected = ref<string[]>([]),
-    readTemplateIds = ref<string[]>([]),
     operations = ref(new Set<string>()),
     notifications = useToasts();
   let generation = 0,
@@ -136,11 +135,7 @@ export function useWorkspace(router: Router) {
     () =>
       !!project.value &&
       !!status.value?.llm_configured &&
-      !!(
-        selected.value.length ||
-        readTemplateIds.value.length ||
-        inputs.value.problem_text.trim()
-      ) &&
+      !!(selected.value.length || inputs.value.problem_text.trim()) &&
       !activeRead.value &&
       !loading.value,
   );
@@ -256,15 +251,6 @@ export function useWorkspace(router: Router) {
       expected_version: snapshot.value.version,
       note: '默认',
       reading: cloneJson(editable.value),
-      template_reviews: (snapshot.value.template_readings || [])
-        .filter((reading) =>
-          templates.value.some((template) => template.source.id === reading.template_id),
-        )
-        .map((reading) => ({
-          template_id: reading.template_id,
-          reviewed: reading.reviewed,
-          explanation: reading.explanation,
-        })),
     });
     if (captured !== generation) return;
     if (sequence !== readingSequence) {
@@ -284,18 +270,13 @@ export function useWorkspace(router: Router) {
       notify('请先修正题目中的错误或周期冲突。');
     } else setStep(3);
   }
-  async function startRead(
-    append = !!snapshot.value,
-    documentIds = selected.value,
-    templateIds = readTemplateIds.value,
-  ) {
+  async function startRead(append = !!snapshot.value, documentIds = selected.value) {
     if (readingDirty.value) throw new Error('请先保存读题修改。');
     const captured = generation;
     await saveInputs();
     if (captured !== generation) return;
     await post(base() + '/read', {
       document_ids: documentIds,
-      template_ids: templateIds,
       append,
       input_revision: inputs.value.revision,
     });
@@ -327,28 +308,6 @@ export function useWorkspace(router: Router) {
       await refresh();
     }
   }
-  async function uploadTemplates(files: File[]) {
-    if (!project.value) return;
-    const captured = generation,
-      url = base();
-    for (const file of files) {
-      if (!/\.(xlsx|xls)$/i.test(file.name)) throw new Error('预算空表支持 XLSX 或 XLS。');
-      if (file.size > (status.value?.max_upload_mb || 20) * 1024 * 1024)
-        throw new Error('预算表超过上传大小限制。');
-      const job = await request<Job>(url + '/templates', {
-        method: 'POST',
-        headers: {
-          'X-Filename': encodeURIComponent(file.name),
-          'Content-Type': 'application/octet-stream',
-        },
-        body: file,
-      });
-      if (captured !== generation) return;
-      if (job.metadata.template_id) readTemplateIds.value.push(job.metadata.template_id);
-    }
-    notify('预算表已提交解析。');
-    await refresh();
-  }
   async function importLibraryTemplate(templateId: string) {
     if (!project.value) throw new Error('请先打开项目。');
     if (readingDirty.value || inputChanged.value)
@@ -365,8 +324,6 @@ export function useWorkspace(router: Router) {
       if (captured !== generation) return;
       acceptReading(value.snapshot);
     }
-    if (!readTemplateIds.value.includes(result.template_id))
-      readTemplateIds.value.push(result.template_id);
     if (!templateIds.value.includes(result.template_id) && templateIds.value.length < 3)
       templateIds.value.push(result.template_id);
     notify('已导入空表及确认解读，无需重新读取。', 'success');
@@ -391,7 +348,6 @@ export function useWorkspace(router: Router) {
     } else {
       templates.value = templates.value.filter((template) => template.source.id !== id);
       templateIds.value = templateIds.value.filter((value) => value !== id);
-      readTemplateIds.value = readTemplateIds.value.filter((value) => value !== id);
     }
     await refresh();
     notify('文件已删除。', 'success');
@@ -476,7 +432,6 @@ export function useWorkspace(router: Router) {
       await saveInputs();
       await post(base() + '/read', {
         document_ids: job.metadata.document_ids || selected.value,
-        template_ids: job.metadata.template_ids || readTemplateIds.value,
         append: job.metadata.append || false,
         input_revision: inputs.value.revision,
       });
@@ -564,7 +519,6 @@ export function useWorkspace(router: Router) {
     const planChanged = newPlan && !solutions.value.some((solution) => solution.id === newPlan.id);
     solutions.value = plans;
     templates.value = budgetTemplates;
-    if (initial) readTemplateIds.value = budgetTemplates.map((template) => template.source.id);
     mappings.value = latestMappings;
     artifacts.value = latestArtifacts;
     if (initial && newPlan) selectSolution(newPlan.id);
@@ -608,7 +562,6 @@ export function useWorkspace(router: Router) {
     jobs.value = [];
     solutions.value = [];
     templates.value = [];
-    readTemplateIds.value = [];
     mappings.value = [];
     artifacts.value = [];
     templateIds.value = [];
@@ -763,7 +716,6 @@ export function useWorkspace(router: Router) {
     currentSolution,
     selectedSolutionId,
     selected,
-    readTemplateIds,
     operations,
     notifications,
     currentStep,
@@ -796,7 +748,6 @@ export function useWorkspace(router: Router) {
     startRead,
     upload,
     solve,
-    uploadTemplates,
     importLibraryTemplate,
     deleteUpload,
     selectSolution,
