@@ -5,7 +5,7 @@ import AppModal from './AppModal.vue';
 import { useWorkspaceContext } from '../composables/context';
 import { statusNames, stageNames } from '../lib/labels';
 import { readingProgress } from '../lib/tasks';
-const { taskOpen, jobs, project, run, cancelJob, retryJob, operations } = useWorkspaceContext();
+const { taskOpen, allJobs: jobs, run, cancelJob, retryJob, operations } = useWorkspaceContext();
 const expanded = ref(new Set<string>());
 const difficultyNames: Record<string, string> = {
   simple: '简单',
@@ -41,7 +41,7 @@ function duration(task: AgentTask) {
     title="任务记录"
     drawer
     @close="taskOpen = false"
-    ><p class="muted">{{ project?.name }}</p>
+    ><p class="muted">全部项目与空表库的任务</p>
     <p
       v-if="!jobs.length"
       class="empty"
@@ -56,17 +56,21 @@ function duration(task: AgentTask) {
       <div class="task-info">
         <div class="task-row-heading">
           <strong>{{
-            job.kind === 'parse'
-              ? '文件解析'
-              : job.kind === 'template'
-                ? '预算表解析'
-                : job.kind === 'mapping'
-                  ? '预算表映射'
-                  : job.kind === 'artifact'
-                    ? '文件生成'
-                    : job.kind === 'read'
-                      ? '读题'
-                      : '方案生成'
+            job.project_id === 'template-library'
+              ? job.kind === 'template'
+                ? '空表解析'
+                : '空表解读'
+              : job.kind === 'parse'
+                ? '文件解析'
+                : job.kind === 'template'
+                  ? '预算表解析'
+                  : job.kind === 'mapping'
+                    ? '预算表映射'
+                    : job.kind === 'artifact'
+                      ? '文件生成'
+                      : job.kind === 'read'
+                        ? '读题'
+                        : '方案生成'
           }}</strong
           ><span
             class="task-state"
@@ -74,7 +78,9 @@ function duration(task: AgentTask) {
             >{{ statusNames[job.status] }}</span
           >
         </div>
-        <p class="muted">{{ stageNames[job.stage] || job.stage }}</p>
+        <p class="muted">
+          {{ job.scope_name || '项目' }} · {{ stageNames[job.stage] || job.stage }}
+        </p>
         <p
           v-if="job.metadata.filename"
           class="muted"

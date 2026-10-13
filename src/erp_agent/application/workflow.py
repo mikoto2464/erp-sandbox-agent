@@ -29,6 +29,7 @@ from erp_agent.application.contracts import (
     to_json,
 )
 from erp_agent.application.input_sources import input_sources
+from erp_agent.application.jobs import ApplicationJobs
 from erp_agent.application.memory import MemoryService
 from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.application.model_output import normalize_model_json
@@ -94,6 +95,50 @@ class WorkflowService:
         self._legacy_templates_migrated = False
         self.template_library = TemplateLibrary(repository, jobs, template_parser, reader.llm,
                                                 model_settings)
+        self.application_tasks = ApplicationJobs(repository, jobs)
+
+    def application_jobs(self) -> list[JSONObject]:
+        return self.application_tasks.list()
+
+    def application_job(self, job_id: str) -> JSONObject:
+        return self.application_tasks.get(job_id)
+
+    def cancel_application_job(self, job_id: str) -> JSONObject:
+        return self.application_tasks.cancel(job_id)
+
+    def retry_application_job(self, job_id: str) -> JSONObject:
+        job = self.application_tasks.get(job_id)
+        if job["status"] not in {"failed", "cancelled"}:
+            raise ERPError("job_not_retryable", "只有失败或已取消的任务可以重试。", 409)
+        metadata = obj(job["metadata"])
+        if metadata.get("upload_deleted"):
+            raise ERPError("upload_deleted", "文件已删除，不能重试此任务。", 409)
+        project_id = string(job["project_id"])
+        if project_id == LIBRARY_SCOPE:
+            return self.template_library.read(string(metadata["template_id"]))
+        if job["kind"] == "parse":
+            return self.retry_parse(project_id, string(metadata["document_id"]))
+        if job["kind"] == "template":
+            raise ERPError("template_library_required", "旧空表任务请在空表库继续处理。", 409)
+        if job["kind"] == "read":
+            return self.read(project_id, {
+                "document_ids": metadata.get("document_ids", []),
+                "append": metadata.get("append", False),
+            })
+        if job["kind"] == "solve":
+            return self.solve(project_id, {
+                "version": metadata["version"], "generation": metadata.get("generation", {}),
+            })
+        if job["kind"] == "mapping":
+            return self.answerer.analyze(project_id, {
+                "solution_id": metadata["solution_id"], "template_id": metadata["template_id"],
+            })
+        if job["kind"] == "artifact":
+            return self.answerer.export(project_id, {
+                "solution_id": metadata["solution_id"], "kind": metadata["kind"],
+                "mapping_id": metadata.get("mapping_id"),
+            })
+        raise ERPError("job_not_retryable", "此类任务不支持重试。", 409)
 
     def import_library_template(self, project_id: str, data: JSONObject) -> JSONObject:
         with self._template_lock, self._read_lock, self._solve_lock:

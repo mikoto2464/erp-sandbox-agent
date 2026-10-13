@@ -239,6 +239,9 @@ export interface AgentTask {
   finished_at?: string;
 }
 export interface Job {
+  project_id?: string;
+  scope_name?: string;
+  created_at?: string;
   tasks?: AgentTask[];
   archived_tasks?: number;
   completed?: number;

@@ -3,6 +3,7 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 import { flushPromises, mount } from '@vue/test-utils';
 import App from './App.vue';
 import ProjectsPage from './views/ProjectsPage.vue';
+import TemplateLibraryPage from './views/TemplateLibraryPage.vue';
 import WorkflowPage from './views/WorkflowPage.vue';
 import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
@@ -66,6 +67,7 @@ function setup() {
     history: createMemoryHistory(),
     routes: [
       { path: '/projects', name: 'projects', component: ProjectsPage },
+      { path: '/templates', name: 'templates', component: TemplateLibraryPage },
       { path: '/projects/:projectId/steps/:step', name: 'workflow', component: WorkflowPage },
     ],
   });
@@ -119,6 +121,12 @@ function setup() {
       data = [
         { id: 'library', source: { filename: '共享预算.xlsx' }, reading: { reviewed: true } },
       ];
+    else if (url === '/api/jobs')
+      data = jobs.map((job) => ({
+        ...job,
+        project_id: job.project_id || projectId,
+        scope_name: job.scope_name || '项目',
+      }));
     else if (url.endsWith('/inputs'))
       data = options.method ? { ...JSON.parse(String(options.body)), revision: 1 } : inputs;
     else if (url.endsWith('/documents')) data = documents;
@@ -199,7 +207,7 @@ function setup() {
     } else if (url === '/api/model-presets/model')
       data = { ...preset, ...JSON.parse(String(options.body)), revision: 2 };
     else data = {};
-    return { ok: true, status: 200, json: async () => structuredClone(data) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(data) };
   });
   vi.stubGlobal('fetch', fetcher);
   return {
@@ -221,6 +229,68 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('shows application tasks outside projects and cancels the selected scope', async () => {
+    const { router, jobs, fetcher } = setup();
+    jobs.push({
+      id: 'library-task',
+      project_id: 'template-library',
+      scope_name: '空表库',
+      kind: 'read',
+      status: 'running',
+      stage: 'reading_template',
+      metadata: { template_id: 'library', filename: '共享预算.xlsx' },
+      tasks: [
+        {
+          id: 'sheet',
+          parent_id: 'reader',
+          agent: 'Reader',
+          role: '空表理解',
+          object: '共享预算.xlsx · 第一季',
+          status: 'running',
+        },
+      ],
+    });
+    jobs.push({
+      id: 'other-task',
+      project_id: 'other-project',
+      scope_name: '另一项目',
+      kind: 'solve',
+      status: 'running',
+      stage: 'solving',
+      metadata: {},
+    });
+    await router.push('/projects');
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } });
+    await flushPromises();
+    expect(wrapper.find('.task-toggle').exists()).toBe(true);
+    expect(wrapper.find('.task-badge').text()).toBe('2');
+    await wrapper.find('.task-toggle').trigger('click');
+    await flushPromises();
+    const drawer = wrapper
+      .findAll('dialog')
+      .find((dialog) => dialog.text().includes('全部项目与空表库'))!;
+    expect(drawer.text()).toContain('空表解读');
+    expect(drawer.text()).toContain('另一项目');
+    const library = drawer
+      .findAll('.task-card')
+      .find((card) => card.text().includes('共享预算.xlsx'))!;
+    await library
+      .findAll('button')
+      .find((button) => button.text() === '取消')!
+      .trigger('click');
+    await flushPromises();
+    expect(fetcher.mock.calls.some(([url]) => url === '/api/jobs/library-task/cancel')).toBe(true);
+    await router.push(`/projects/${projectId}/steps/1`);
+    await flushPromises();
+    expect(
+      wrapper
+        .findAll('dialog')
+        .find((dialog) => dialog.text().includes('全部项目与空表库'))!
+        .text(),
+    ).toContain('另一项目');
+    expect(wrapper.text()).not.toContain('正在读题…');
+    wrapper.unmount();
+  });
   it('imports a reviewed shared template into the solver without calling reader', async () => {
     const { router, fetcher } = setup();
     await router.push(`/projects/${projectId}/steps/3`);

@@ -4,18 +4,21 @@ export function isExtraction(task: AgentTask): boolean {
   return (
     task.task_kind === 'extraction' ||
     (task.agent === 'Reader' &&
-      task.parent_id === 'reader' &&
+      (task.parent_id === 'reader' ||
+        (task.role === '空表理解' && !!task.parent_id?.startsWith('template-read:'))) &&
       ['整理参数与规则', '参数提取', '规则整理', '空表理解'].includes(task.role))
   );
 }
 
 export function readingProgress(job: Job) {
-  const tasks = (job.tasks || []).filter(
+  const candidates = (job.tasks || []).filter(
     (task) =>
       (job.kind === 'solve'
         ? task.agent === 'Solver' && task.parent_id === 'solver'
         : isExtraction(task)) && task.status !== 'split',
   );
+  const parents = new Set(candidates.map((task) => task.parent_id).filter(Boolean));
+  const tasks = candidates.filter((task) => !parents.has(task.id));
   const count = (...states: string[]) =>
     tasks.filter((task) => states.includes(task.status)).length;
   const completed = count('succeeded', 'cached');

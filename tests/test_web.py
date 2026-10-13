@@ -870,3 +870,74 @@ class WebTests(unittest.TestCase):
         self.llm.response = dumps(proposal)
         job = self.request(base + '/solve', {'version': revised['version']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+
+    def test_template_posts_consume_body_before_next_request_on_same_connection(self):
+        from tests.test_template_library import workbook_bytes, output
+        library = self.server.workflow.template_library
+        job = library.upload('budget.xlsx', workbook_bytes())
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        tid = job['metadata']['template_id']
+        self.llm.response = output()
+
+        class MemorySocket:
+            def __init__(self, raw):
+                self.input = io.BytesIO(raw)
+                self.output = bytearray()
+            def makefile(self, mode, buffering=None):
+                return self.input
+            def sendall(self, data):
+                self.output.extend(data)
+            def settimeout(self, value):
+                pass
+
+        def sequence(path):
+            raw = (f'POST {path} HTTP/1.1\r\nHost: localhost:8000\r\n'
+                   f'Cookie: {self.cookie}\r\nContent-Type: application/json\r\n'
+                   'Content-Length: 2\r\n\r\n{}'
+                   'GET /api/jobs HTTP/1.1\r\nHost: localhost:8000\r\n'
+                   f'Cookie: {self.cookie}\r\nConnection: close\r\n\r\n').encode()
+            connection = MemorySocket(raw)
+            Handler(connection, ('127.0.0.1', 12345), self.server)
+            responses = bytes(connection.output)
+            self.assertEqual(responses.count(b'HTTP/1.1 '), 2)
+            self.assertEqual(responses.count(b'Content-Type: application/json'), 2)
+            self.assertNotIn(b'<!DOCTYPE', responses)
+            self.assertNotIn(b'HTTP/1.1 400', responses)
+
+        sequence(f'/api/template-library/{tid}/read')
+        jid = self.request('/api/jobs')[-1]['id']
+        sequence(f'/api/template-library/jobs/{jid}/cancel')
+
+    def test_application_jobs_include_projects_and_library_with_global_cancel_and_retry(self):
+        from tests.test_template_library import workbook_bytes
+        project = self.request('/api/projects', {'name': '甲项目'})['id']
+        other = self.request('/api/projects', {'name': '乙项目'})['id']
+        self.llm.response = ''
+        job = self.request(f'/api/projects/{project}/documents', content=docx_bytes(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'topic.docx'})
+        self.server.workflow.jobs.futures[job['id']].result(3)
+        template_job = self.request('/api/template-library', content=workbook_bytes(), headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'budget.xlsx'})
+        self.server.workflow.jobs.futures[template_job['id']].result(3)
+        values = self.request('/api/jobs')
+        self.assertEqual({j['project_id'] for j in values}, {project, 'template-library'})
+        self.assertEqual({j['scope_name'] for j in values}, {'甲项目', '空表库'})
+        self.assertEqual(self.request('/api/jobs/' + job['id'])['project_id'], project)
+        self.assertEqual(self.request('/api/jobs/' + template_job['id'] + '/cancel', {})['id'], template_job['id'])
+        with self.assertRaises(HTTPError) as rejected:
+            self.request('/api/jobs/' + job['id'] + '/retry', {})
+        self.assertEqual(rejected.exception.code, 409)
+        failure = self.server.workflow.jobs.submit(project, 'parse',
+            lambda control: (_ for _ in ()).throw(ERPError('temporary', '临时失败')),
+            {'document_id': job['metadata']['document_id']})
+        self.server.workflow.jobs.futures[failure['id']].result(3)
+        retried = self.request('/api/jobs/' + failure['id'] + '/retry', {})
+        self.assertEqual(retried['project_id'], project)
+        self.assertNotEqual(retried['project_id'], other)
+        self.server.workflow.jobs.futures[retried['id']].result(3)
+        self.assertEqual(self.request('/api/jobs/' + retried['id'])['status'], 'succeeded')
+        self.raw_request(f'/api/projects/{project}', method='DELETE')
+        self.assertEqual({j['project_id'] for j in self.request('/api/jobs')}, {'template-library'})
+        with self.assertRaises(HTTPError) as deleted:
+            self.request('/api/jobs/' + failure['id'] + '/retry', {})
+        self.assertEqual(deleted.exception.code, 404)

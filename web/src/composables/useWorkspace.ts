@@ -21,6 +21,7 @@ import type {
   Status,
 } from '../lib/types';
 import { useToasts } from './useToasts';
+import { useApplicationJobs } from './useApplicationJobs';
 const emptyInputs = (): ReadingInputs => ({
   revision: 0,
   problem_text: '',
@@ -36,7 +37,6 @@ export function useWorkspace(router: Router) {
     status = ref<Status | null>(null),
     catalog = ref<ModelCatalog | null>(null);
   const documents = ref<ParsedDocument[]>([]),
-    jobs = ref<Job[]>([]),
     solutions = ref<Solution[]>([]);
   const mappings = ref<WorkbookMapping[]>([]),
     artifacts = ref<Artifact[]>([]);
@@ -58,14 +58,9 @@ export function useWorkspace(router: Router) {
       solutions.value.at(-1) ||
       null,
   );
-  const templateParsing = computed(() =>
-    jobs.value.some((job) => job.kind === 'template' && ['queued', 'running'].includes(job.status)),
-  );
   const generationReady = computed(
     () =>
       canSolve.value &&
-      !templateParsing.value &&
-      !operations.value.has('upload-template') &&
       templateIds.value.every((id) =>
         templates.value.some(
           (template) =>
@@ -83,13 +78,15 @@ export function useWorkspace(router: Router) {
   const selected = ref<string[]>([]),
     operations = ref(new Set<string>()),
     notifications = useToasts();
+  const applicationTasks = useApplicationJobs(notifyJob),
+    allJobs = applicationTasks.jobs,
+    jobs = computed(() => allJobs.value.filter((job) => job.project_id === project.value?.id));
   let generation = 0,
     uploadRevision = 0,
     inputSequence = 0,
     readingSequence = 0,
     polling: ReturnType<typeof setInterval> | undefined,
     pollInFlight = false,
-    observed = new Map<string, string>(),
     knownDocuments = new Set<string>(),
     readVersion = 0;
   const base = () => `/api/projects/${project.value?.id}`;
@@ -382,7 +379,7 @@ export function useWorkspace(router: Router) {
     await refresh();
   }
   async function cancelJob(job: Job) {
-    await post(`${base()}/jobs/${job.id}/cancel`, {});
+    await post(`/api/jobs/${job.id}/cancel`, {});
     await refresh();
   }
   async function analyzeTemplate(templateId: string) {
@@ -413,108 +410,81 @@ export function useWorkspace(router: Router) {
     await refresh();
   }
   async function retryJob(job: Job) {
-    if (job.kind === 'parse')
-      await post(`${base()}/documents/${job.metadata.document_id}/retry`, {});
-    else if (job.kind === 'template')
-      await post(`${base()}/templates/${job.metadata.template_id}/retry`, {});
-    else if (job.kind === 'mapping')
-      await post(base() + '/mappings', {
-        solution_id: job.metadata.solution_id,
-        template_id: job.metadata.template_id,
-      });
-    else if (job.kind === 'artifact')
-      await post(base() + '/artifacts', {
-        solution_id: job.metadata.solution_id,
-        kind: job.metadata.kind,
-        mapping_id: job.metadata.mapping_id,
-      });
-    else if (job.kind === 'read') {
-      await saveInputs();
-      await post(base() + '/read', {
-        document_ids: job.metadata.document_ids || selected.value,
-        append: job.metadata.append || false,
-        input_revision: inputs.value.revision,
-      });
-    } else
-      await post(base() + '/solve', {
-        version: job.metadata.version,
-        generation: job.metadata.generation,
-      });
+    if (job.project_id === project.value?.id && job.kind === 'read') await saveInputs();
+    await post(`/api/jobs/${job.id}/retry`, {});
     await refresh();
   }
-  function notifyJobs(initial: boolean) {
-    for (const job of jobs.value) {
-      const previous = observed.get(job.id);
-      observed.set(job.id, job.status);
-      if (
-        initial ||
-        job.metadata.upload_deleted ||
-        previous === job.status ||
-        !['succeeded', 'needs_input', 'failed', 'cancelled'].includes(job.status)
-      )
-        continue;
-      const targetId = project.value!.id,
-        targetStep = ['parse', 'template'].includes(job.kind)
-          ? 1
-          : job.kind === 'read'
-            ? 2
-            : ['mapping', 'artifact'].includes(job.kind)
-              ? 4
-              : 3;
-      const name =
-          job.kind === 'parse'
-            ? '文件解析'
-            : job.kind === 'template'
-              ? '预算表解析'
-              : job.kind === 'mapping'
-                ? '预算表映射'
-                : job.kind === 'artifact'
-                  ? '文件生成'
-                  : job.kind === 'read'
-                    ? '读题'
-                    : '方案生成',
-        showResult = ['succeeded', 'needs_input'].includes(job.status);
-      const text =
-        job.status === 'failed'
-          ? `${name}失败：${(job.error?.message || '请查看任务详情。').slice(0, 160)}`
-          : job.status === 'needs_input'
-            ? `${name}已完成，有内容需要处理。`
-            : `${name}${job.status === 'cancelled' ? '已取消' : '已完成'}。`;
-      notifications.notify(
-        text,
-        job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'success' : 'info',
-        () =>
+  function notifyJob(job: Job) {
+    const library = job.project_id === 'template-library';
+    const targetId = job.project_id;
+    const targetStep =
+      job.kind === 'parse'
+        ? 1
+        : job.kind === 'read'
+          ? 2
+          : ['mapping', 'artifact'].includes(job.kind)
+            ? 4
+            : 3;
+    const name = library
+      ? job.kind === 'template'
+        ? '空表解析'
+        : '空表解读'
+      : job.kind === 'parse'
+        ? '文件解析'
+        : job.kind === 'mapping'
+          ? '预算表映射'
+          : job.kind === 'artifact'
+            ? '文件生成'
+            : job.kind === 'read'
+              ? '读题'
+              : '方案生成';
+    const text =
+      job.status === 'failed'
+        ? `${name}失败：${(job.error?.message || '请查看任务详情。').slice(0, 160)}`
+        : job.status === 'needs_input'
+          ? `${name}已完成，有内容需要核对。`
+          : `${name}${job.status === 'cancelled' ? '已取消' : '已完成'}。`;
+    const showResult = ['succeeded', 'needs_input'].includes(job.status);
+    notifications.notify(
+      `${job.scope_name ? job.scope_name + ' · ' : ''}${text}`,
+      job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'success' : 'info',
+      () => {
+        if (!showResult) {
+          taskOpen.value = true;
+          return;
+        }
+        if (library) goTemplateLibrary();
+        else if (targetId)
           navigate(() => {
-            if (project.value?.id === targetId) {
-              if (showResult) setStep(targetStep);
-              else taskOpen.value = true;
-            } else
-              void router.push({
-                name: 'workflow',
-                params: { projectId: targetId, step: targetStep },
-              });
-          }),
-        showResult ? '查看结果' : '查看任务',
-      );
-    }
+            void router.push({
+              name: 'workflow',
+              params: { projectId: targetId, step: targetStep },
+            });
+          });
+      },
+      showResult ? '查看结果' : '查看任务',
+    );
+  }
+  async function refreshTasks() {
+    if (authenticated.value) await applicationTasks.refresh();
   }
   async function refresh(initial = false) {
-    if (!authenticated.value || !project.value) return;
+    if (!authenticated.value) return;
     const captured = generation,
-      capturedUploads = uploadRevision,
-      url = base();
-    const [docs, latestJobs, plans, budgetTemplates, latestMappings, latestArtifacts] =
-      await Promise.all([
-        request<ParsedDocument[]>(url + '/documents'),
-        request<Job[]>(url + '/jobs'),
-        request<Solution[]>(url + '/solutions'),
-        request<BudgetTemplate[]>(url + '/templates'),
-        request<WorkbookMapping[]>(url + '/mappings'),
-        request<Artifact[]>(url + '/artifacts'),
-      ]);
+      capturedUploads = uploadRevision;
+    await refreshTasks();
+    if (!authenticated.value || !project.value || captured !== generation) return;
+    const url = base(),
+      latestJobs = jobs.value;
+    const [docs, plans, budgetTemplates, latestMappings, latestArtifacts] = await Promise.all([
+      request<ParsedDocument[]>(url + '/documents'),
+      request<Solution[]>(url + '/solutions'),
+      request<BudgetTemplate[]>(url + '/templates'),
+      request<WorkbookMapping[]>(url + '/mappings'),
+      request<Artifact[]>(url + '/artifacts'),
+    ]);
     if (captured !== generation || capturedUploads !== uploadRevision) return;
     documents.value = docs;
-    jobs.value = latestJobs;
     const newPlan = plans.at(-1);
     const planChanged = newPlan && !solutions.value.some((solution) => solution.id === newPlan.id);
     solutions.value = plans;
@@ -530,7 +500,6 @@ export function useWorkspace(router: Router) {
         knownDocuments.add(doc.source.id);
         selected.value.push(doc.source.id);
       }
-    notifyJobs(initial);
     const completed = Math.max(
       0,
       ...latestJobs
@@ -553,13 +522,11 @@ export function useWorkspace(router: Router) {
   }
   function resetProject() {
     generation++;
-    taskOpen.value = false;
     loading.value = false;
     inputsDirty.value = readingDirty.value = false;
     snapshot.value = editable.value = null;
     inputs.value = emptyInputs();
     documents.value = [];
-    jobs.value = [];
     solutions.value = [];
     templates.value = [];
     mappings.value = [];
@@ -569,7 +536,6 @@ export function useWorkspace(router: Router) {
     planTone.value = 'balanced';
     customPrompt.value = '';
     selected.value = [];
-    observed = new Map();
     knownDocuments = new Set();
     readVersion = 0;
     project.value = null;
@@ -606,6 +572,7 @@ export function useWorkspace(router: Router) {
     authenticated.value = true;
     await loadStatus();
     projects.value = await request<Project[]>('/api/projects');
+    await refreshTasks();
     await syncRoute();
   }
   async function initialize() {
@@ -626,6 +593,8 @@ export function useWorkspace(router: Router) {
   function expire() {
     authenticated.value = false;
     resetProject();
+    applicationTasks.clear();
+    taskOpen.value = false;
     projects.value = [];
     status.value = catalog.value = null;
     pendingNavigation.value = null;
@@ -667,7 +636,7 @@ export function useWorkspace(router: Router) {
     window.addEventListener('erp-session-expired', expire);
     window.addEventListener('beforeunload', beforeUnload);
     polling = setInterval(() => {
-      if (pollInFlight || loading.value || !authenticated.value || !project.value) return;
+      if (pollInFlight || !authenticated.value) return;
       pollInFlight = true;
       void refresh()
         .catch((error) => notify(error.message, 'error'))
@@ -679,6 +648,7 @@ export function useWorkspace(router: Router) {
   function dispose() {
     clearInterval(polling);
     generation++;
+    applicationTasks.clear();
     notifications.dispose();
     removeGuard();
     window.removeEventListener('erp-session-expired', expire);
@@ -694,6 +664,8 @@ export function useWorkspace(router: Router) {
     catalog,
     documents,
     jobs,
+    allJobs,
+    refreshTasks,
     solutions,
     snapshot,
     editable,
@@ -711,7 +683,6 @@ export function useWorkspace(router: Router) {
     confirmMapping,
     exportArtifact,
     templateIds,
-    templateParsing,
     generationReady,
     currentSolution,
     selectedSolutionId,

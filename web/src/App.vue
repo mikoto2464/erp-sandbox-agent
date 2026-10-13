@@ -18,7 +18,7 @@ const {
   project,
   currentStep,
   catalog,
-  jobs,
+  allJobs,
   errors,
   horizon,
   snapshot,
@@ -47,7 +47,7 @@ const modelOptions = computed(
     })) || [],
 );
 const running = computed(
-  () => jobs.value.filter((job) => ['queued', 'running'].includes(job.status)).length,
+  () => allJobs.value.filter((job) => ['queued', 'running'].includes(job.status)).length,
 );
 const steps = ['上传题目', '确认题目', '经营方案', '方案与表格', '方案答疑'];
 watch(
@@ -159,7 +159,6 @@ onBeforeUnmount(workspace.dispose);
           >
             模型预设</button
           ><button
-            v-if="project"
             class="quiet task-toggle"
             :class="{ 'has-running': running }"
             @click="taskOpen = true"

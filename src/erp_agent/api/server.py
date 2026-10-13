@@ -170,6 +170,22 @@ class Handler(BaseHTTPRequestHandler):
                 raise ERPError("method_not_allowed", "不支持该操作。", 405)
             return
         parts = path.strip("/").split("/")
+        if parts[:2] == ["api", "jobs"]:
+            if len(parts) == 2 and method == "GET":
+                self._json(workflow.application_jobs())
+            elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "GET":
+                self._json(workflow.application_job(parts[2]))
+            elif len(parts) == 4 and ID.fullmatch(parts[2]) and method == "POST":
+                self._body_json()
+                if parts[3] == "cancel":
+                    self._json(workflow.cancel_application_job(parts[2]))
+                elif parts[3] == "retry":
+                    self._json(workflow.retry_application_job(parts[2]), 202)
+                else:
+                    raise ERPError("not_found", "接口不存在。", 404)
+            else:
+                raise ERPError("not_found", "接口不存在。", 404)
+            return
         if parts[:2] == ["api", "template-library"]:
             library = workflow.template_library
             if len(parts) == 2 and method == "GET":
@@ -181,6 +197,7 @@ class Handler(BaseHTTPRequestHandler):
             elif len(parts) == 3 and parts[2] == "jobs" and method == "GET":
                 self._json(workflow.repository.list("job", LIBRARY_SCOPE))
             elif len(parts) == 5 and parts[2] == "jobs" and parts[4] == "cancel" and method == "POST":
+                self._body_json()
                 self._json(workflow.jobs.cancel(LIBRARY_SCOPE, parts[3]))
             elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "GET":
                 self._json(library.detail(parts[2]))
@@ -188,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(library.delete(parts[2]))
             elif len(parts) == 4 and ID.fullmatch(parts[2]) and method == "POST":
                 if parts[3] == "read":
+                    self._body_json()
                     self._json(library.read(parts[2]), 202)
                 elif parts[3] == "review":
                     self._json(library.review(parts[2], self._body_json()))

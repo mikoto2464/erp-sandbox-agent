@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import { request, post } from '../lib/api';
-import type { BudgetTemplate, TemplateReading, Job } from '../lib/types';
+import type { BudgetTemplate, TemplateReading } from '../lib/types';
 import AppModal from '../components/AppModal.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
-import { statusNames } from '../lib/labels';
-const { run, notify } = useWorkspaceContext();
+const { run, notify, allJobs, refreshTasks, cancelJob, taskOpen } = useWorkspaceContext();
 interface Item {
   id: string;
   source: BudgetTemplate['source'];
@@ -15,38 +14,24 @@ interface Item {
   sheet_names?: string[];
 }
 const items = ref<Item[]>([]),
-  jobs = ref<Job[]>([]),
   preview = ref<BudgetTemplate | null>(null),
   detail = ref<{ id: string; reading: TemplateReading } | null>(null),
   removing = ref<Item | null>(null),
   busy = ref(false);
-let timer: ReturnType<typeof setInterval> | undefined;
+const jobs = computed(() => allJobs.value.filter((j) => j.project_id === 'template-library'));
 const active = computed(() => jobs.value.filter((j) => ['queued', 'running'].includes(j.status)));
-const seen = new Map<string, string>();
 let disposed = false,
   refreshing = false;
-async function refresh(initial = false) {
+async function refresh(updateTasks = true) {
   if (refreshing) return;
   refreshing = true;
   try {
-    const [values, tasks] = await Promise.all([
+    const [values] = await Promise.all([
       request<Item[]>('/api/template-library'),
-      request<Job[]>('/api/template-library/jobs'),
+      updateTasks ? refreshTasks() : Promise.resolve(),
     ]);
     if (disposed) return;
     items.value = values;
-    jobs.value = tasks;
-    for (const job of tasks) {
-      const before = seen.get(job.id);
-      seen.set(job.id, job.status);
-      if (!initial && before !== job.status && !['queued', 'running'].includes(job.status))
-        notify(
-          job.status === 'failed'
-            ? `空表处理失败：${job.error?.message || '请查看任务'}`
-            : '空表处理完成。',
-          job.status === 'failed' ? 'error' : 'success',
-        );
-    }
   } finally {
     refreshing = false;
   }
@@ -97,14 +82,13 @@ async function confirm() {
   notify('空表已确认，可供各项目导入。', 'success');
 }
 onMounted(() => {
-  void run('library', () => refresh(true));
-  timer = setInterval(() => {
-    void run('library-poll', refresh);
-  }, 2000);
+  void run('library', () => refresh());
+});
+watch(jobs, () => {
+  if (!disposed) void run('library-poll', () => refresh(false));
 });
 onBeforeUnmount(() => {
   disposed = true;
-  clearInterval(timer);
 });
 </script>
 <template>
@@ -198,7 +182,8 @@ onBeforeUnmount(() => {
           class="review-action"
           @click="
             run('library-cancel', async () => {
-              await post(`/api/template-library/jobs/${latest(item)?.id}/cancel`, {});
+              const job = active.find((j) => j.metadata.template_id === item.id);
+              if (job) await cancelJob(job);
               await refresh();
             })
           "
@@ -212,30 +197,13 @@ onBeforeUnmount(() => {
           删除
         </button>
       </div>
-      <details
-        v-if="latest(item)?.tasks?.length"
-        class="input-section"
+      <button
+        v-if="latest(item)"
+        class="review-action"
+        @click="taskOpen = true"
       >
-        <summary>处理详情</summary>
-        <p
-          v-for="task in latest(item)?.tasks"
-          :key="task.id"
-          class="muted"
-        >
-          {{ task.role }} · {{ task.object }} ·
-          {{
-            task.status === 'cached'
-              ? '复用已完成结果'
-              : task.status === 'split'
-                ? '已拆小'
-                : task.status === 'waiting'
-                  ? '等待模型额度'
-                  : statusNames[task.status] || task.status
-          }}
-          {{ task.model || '' }}
-          <span v-if="task.error"> · {{ task.error }}</span>
-        </p>
-      </details>
+        查看任务详情
+      </button>
     </article>
     <BudgetTemplatePreview
       :template="preview"

@@ -9,12 +9,20 @@ export class ApiError extends Error {
 }
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...options, credentials: 'same-origin' });
-  const data = await response.json();
+  if (response.status === 401) window.dispatchEvent(new Event('erp-session-expired'));
+  let data;
+  try {
+    data = JSON.parse(await response.text());
+  } catch {
+    const message = [502, 503, 504].includes(response.status)
+      ? `服务暂时不可用（HTTP ${response.status}），请稍后重试。`
+      : `接口返回了非 JSON 内容（HTTP ${response.status}），请检查后端服务与 /api 转发。`;
+    throw new ApiError(message, 'invalid_api_response', response.status);
+  }
   if (!response.ok) {
-    if (response.status === 401) window.dispatchEvent(new Event('erp-session-expired'));
     throw new ApiError(
-      data.error?.message || `请求失败 ${response.status}`,
-      data.error?.code || '',
+      data?.error?.message || `请求失败 ${response.status}`,
+      data?.error?.code || '',
       response.status,
     );
   }

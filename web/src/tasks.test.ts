@@ -48,6 +48,14 @@ describe('reading progress and review summaries', () => {
   it('includes template reading and solver roles while excluding model dispatch tasks', () => {
     const task = { agent: 'Reader', parent_id: 'reader', role: '空表理解', status: 'succeeded' };
     expect(readingProgress({ kind: 'read', tasks: [task] } as Job).total).toBe(1);
+    const splitTemplate = {
+      kind: 'read',
+      tasks: [
+        { ...task, id: 'template-read:sheet' },
+        { ...task, id: 'child', parent_id: 'template-read:sheet' },
+      ],
+    } as Job;
+    expect(readingProgress(splitTemplate).total).toBe(1);
     const roles = ['operations', 'finance', 'synthesis'].map((id, index) => ({
       id,
       agent: 'Solver',
