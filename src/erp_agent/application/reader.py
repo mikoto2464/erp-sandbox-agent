@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableLambda
 
 from erp_agent.application.contracts import decode_reading, dumps, editable_reading
 from erp_agent.application.memory import RoleMemory
-from erp_agent.application.ports import LLMClient, RunControl, TaskContext
+from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
 from erp_agent.application.reading.batches import DocumentBatcher, ReadingBatch
 from erp_agent.application.reading.coverage import missing_table_rows
 from erp_agent.application.reading.merge import ReadingMerger
@@ -77,7 +77,44 @@ class StructuredReader:
                 "reading_input_limit",
                 "当前输入上限不足以容纳读题提示词和来源结构，请提高模型预设输入上限。",
             )
-        batches = self.batcher.batches(documents, max_chars - overhead, self.limits.max_batch_units)
+        if self.combined_role:
+
+            def fit(batch: ReadingBatch) -> tuple[ReadingBatch, ...]:
+                try:
+                    self.combined_role.request(batch, max_chars, memory=memory)
+                    return (batch,)
+                except ERPError as error:
+                    if error.code != "reading_batch_limit":
+                        raise
+                    if len(batch.units) > 1:
+                        return tuple(part for smaller in batch.split() for part in fit(smaller))
+                    if batch.units[0].kind != "paragraph":
+                        raise
+                    smaller = self.batcher.batches(
+                        (replace(batch.document, blocks=batch.units),),
+                        max_chars - overhead,
+                        self.limits.max_batch_units,
+                    )
+                    if len(smaller) <= 1:
+                        raise
+                    return tuple(
+                        part
+                        for item in smaller
+                        for part in fit(
+                            replace(
+                                item,
+                                document=batch.document,
+                                notes=batch.notes,
+                                label=batch.label,
+                            )
+                        )
+                    )
+
+            batches = tuple(part for batch in self.batcher.tasks(documents) for part in fit(batch))
+        else:
+            batches = self.batcher.batches(
+                documents, max_chars - overhead, self.limits.max_batch_units
+            )
         if not batches:
             raise ERPError("reading_empty", "未发现可读取的题目文字或表格。")
         parts: list[ReadingPart] = []
@@ -111,10 +148,7 @@ class StructuredReader:
 
         batch_control = BatchControl()
 
-        def run_role(
-            role: ExtractionRole, batch: ReadingBatch, parameters: ReadingPart | None = None
-        ) -> tuple[ReadingPart, ...]:
-            nonlocal completed
+        def task_for(role: ExtractionRole, batch: ReadingBatch) -> TaskContext:
             key = hashlib.sha256(
                 dumps(
                     {
@@ -128,10 +162,10 @@ class StructuredReader:
             ).hexdigest()
             blocks = ", ".join(str(i + 1) for i in sorted({u.index for u in batch.units}))
             rows = [c.row + 1 for u in batch.units for c in u.cells]
-            object_name = f"{batch.document.source.filename} · 正文块 {blocks}"
+            object_name = f"{batch.document.source.filename} · {batch.label or '正文块 ' + blocks}"
             if rows:
                 object_name += f" · 行 {min(rows)}–{max(rows)}"
-            task = TaskContext(
+            return TaskContext(
                 key,
                 "Reader",
                 "整理参数与规则"
@@ -142,6 +176,14 @@ class StructuredReader:
                 object_name,
                 "reader",
             )
+
+        def run_role(
+            role: ExtractionRole, batch: ReadingBatch, parameters: ReadingPart | None = None
+        ) -> tuple[ReadingPart, ...]:
+            nonlocal completed
+            task = task_for(role, batch)
+            key = task.id
+            object_name = task.object
 
             class RoleControl:
                 def checkpoint(self, stage, completed=0):
@@ -315,9 +357,33 @@ class StructuredReader:
             )
 
         parent = TaskContext(
-            "reader", "Reader", "读题统筹", f"{len(documents)} 份资料 · {len(batches)} 个批次"
+            "reader",
+            "Reader",
+            "读题统筹",
+            f"{len(documents)} 份资料 · {len(batches)} 个章节/表格任务",
         )
         report_task(control, parent, "running", batch_count=len(batches))
+        plan_reading = getattr(client, "plan_reading", None)
+        if self.combined_role and plan_reading:
+            requests: list[LLMRequest] = []
+
+            def prepare(batch: ReadingBatch) -> None:
+                task = task_for(self.combined_role, batch)
+                cached = memory.get(task.id) if memory else None
+                if cached and cached.get("split") is True and len(batch.units) > 1:
+                    for smaller in batch.split():
+                        prepare(smaller)
+                elif not cached:
+                    requests.append(
+                        replace(
+                            self.combined_role.request(batch, max_chars, memory=memory),
+                            task=task,
+                        )
+                    )
+
+            for batch in batches:
+                prepare(batch)
+            plan_reading(tuple(requests), batch_control, self.limits.concurrency)
         runner = RunnableLambda(read_batch)
         results = runner.batch(
             list(batches),

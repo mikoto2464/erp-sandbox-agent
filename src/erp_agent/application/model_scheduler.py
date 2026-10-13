@@ -1,7 +1,7 @@
 import hashlib
 import threading
 
-from erp_agent.application.contracts import JSONObject
+from erp_agent.application.contracts import JSONObject, loads, obj
 from erp_agent.application.model_dispatch import (
     DispatchDecision,
     ModelAssignment,
@@ -76,6 +76,7 @@ class ScheduledLLMClient:
         self._lock = threading.Lock()
         self._dispatch_cache: dict[str, tuple[DispatchDecision, int]] = {}
         self._dispatch_pending: dict[str, threading.Event] = {}
+        self._reading_plan: dict[str, tuple[DispatchDecision, str]] = {}
 
     @property
     def configured(self) -> bool:
@@ -99,19 +100,27 @@ class ScheduledLLMClient:
                 control.checkpoint("waiting_model")
 
     def _acquire(
-        self, candidates: tuple[ModelBinding, ...], control: RunControl | None
+        self,
+        candidates: tuple[ModelBinding, ...],
+        control: RunControl | None,
+        balance: bool = False,
     ) -> ModelBinding:
         while True:
             self._check(control)
             with self.capacity.condition:
-                selected = next(
-                    (
-                        m
-                        for m in candidates
-                        if self.capacity.used.get(m.preset_id, 0) < self.capacity.limit(m)
-                    ),
-                    None,
-                )
+                available = [
+                    m
+                    for m in candidates
+                    if self.capacity.used.get(m.preset_id, 0) < self.capacity.limit(m)
+                ]
+                if balance:
+                    available.sort(
+                        key=lambda m: (
+                            self.capacity.used.get(m.preset_id, 0) / self.capacity.limit(m),
+                            candidates.index(m),
+                        )
+                    )
+                selected = available[0] if available else None
                 if selected:
                     self.capacity.used[selected.preset_id] = (
                         self.capacity.used.get(selected.preset_id, 0) + 1
@@ -212,6 +221,108 @@ class ScheduledLLMClient:
     def generate(self, request: LLMRequest) -> LLMResponse:
         return self.generate_controlled(request, None)
 
+    def plan_reading(
+        self,
+        requests: tuple[LLMRequest, ...],
+        control: RunControl,
+        concurrency: int,
+    ) -> None:
+        if len(self.models) <= 1 or not requests:
+            return
+        if any(request.task is None for request in requests):
+            raise ERPError("dispatch_contract", "章节统筹请求缺少任务标识。")
+        primary = self.models[0]
+        task = TaskContext(
+            "reader:dispatch",
+            "主 Agent",
+            "统一分配章节与整表",
+            f"{len(requests)} 个读题任务",
+            "reader",
+        )
+        report_task(control, task, "waiting", stage="dispatching_reading")
+        acquired = self._acquire((primary,), control)
+        try:
+            self._check(control)
+            catalog = self.capacity.catalog(self.models)
+            for model in catalog:
+                model["available_after_dispatch"] = int(model["available"]) + (
+                    1 if model["id"] == primary.preset_id else 0
+                )
+            report_task(
+                control,
+                task,
+                "running",
+                model=primary.configuration["model"],
+                preset_name=primary.preset_name,
+                model_loads=catalog,
+            )
+            try:
+                decisions = self.dispatcher.plan_reading(
+                    requests,
+                    catalog,
+                    primary.client,
+                    int(primary.configuration["max_input_chars"]),
+                    concurrency,
+                )
+            except Cancelled:
+                raise
+            except ERPError as error:
+                reason = (
+                    "章节统筹失败，保守回退到可承载输入的最高优先级模型；" + error.message[:200]
+                )
+                decisions = {}
+                for request in requests:
+                    size = len(request.system) + len(request.user) + len(request.schema_json)
+                    model = next(
+                        (m for m in self.models if int(m.configuration["max_input_chars"]) >= size),
+                        None,
+                    )
+                    if model is None:
+                        raise ERPError(
+                            "llm_input_limit", "完整读题任务超过所有模型输入上限。", 413
+                        ) from error
+                    decisions[request.task.id] = DispatchDecision(
+                        "unassessed",
+                        (ModelAssignment(model.preset_id, reason),),
+                        reason,
+                        fallback=True,
+                    )
+            self._check(control)
+            with self._lock:
+                self._reading_plan.update(
+                    {key: (decision, task.id) for key, decision in decisions.items()}
+                )
+            failed = any(d.fallback for d in decisions.values())
+            report_task(
+                control,
+                task,
+                "failed" if failed else "succeeded",
+                dispatch_fallback=failed,
+                planned_count=len(decisions),
+                dispatch_reason=next(iter(decisions.values())).summary
+                if failed
+                else "已统一安排章节与整表，子任务直接执行。",
+            )
+            for request in requests:
+                decision = decisions[request.task.id]
+                report_task(
+                    control,
+                    request.task,
+                    "queued",
+                    difficulty=decision.difficulty,
+                    dispatch_reason=decision.summary,
+                    coordinator=task.id,
+                    dispatch_fallback=decision.fallback,
+                    dispatch_planned=True,
+                    candidates=[
+                        next(m.preset_name for m in self.models if m.preset_id == a.preset_id)
+                        for a in decision.assignments
+                    ],
+                    stage="reading_assigned",
+                )
+        finally:
+            self.capacity.release(acquired)
+
     def generate_controlled(self, request: LLMRequest, control: RunControl | None) -> LLMResponse:
         if not self.models:
             raise ERPError("llm_not_configured", "没有可调度的完整模型预设。", 503)
@@ -219,9 +330,35 @@ class ScheduledLLMClient:
         eligible = tuple(m for m in self.models if int(m.configuration["max_input_chars"]) >= size)
         if not eligible:
             raise ERPError("llm_input_limit", "任务输入超过所有协作模型的上限，请缩小任务。", 413)
-        child, dispatch = self._task(request)
+        child = request.task
+        with self._lock:
+            planned = self._reading_plan.get(child.id) if child else None
+        if planned:
+            try:
+                data = obj(loads(request.user))
+                if any(k in data for k in ("error", "errors", "previous_output")):
+                    planned = None
+            except ERPError:
+                planned = None
+        if planned:
+            dispatch = TaskContext(
+                planned[1], "主 Agent", "统一分配章节与整表", "读题统筹", "reader"
+            )
+        else:
+            child, dispatch = self._task(request)
         reused = False
-        if len(self.models) > 1:
+        if planned:
+            decision = planned[0]
+            eligible_ids = {m.preset_id for m in eligible}
+            assignments = tuple(a for a in decision.assignments if a.preset_id in eligible_ids)
+            if not assignments:
+                raise ERPError(
+                    "llm_input_limit", "已分配模型无法承载完整读题任务，请拆小任务。", 413
+                )
+            decision = DispatchDecision(
+                decision.difficulty, assignments, decision.summary, decision.fallback
+            )
+        elif len(self.models) > 1:
             key = table_dispatch_key(request)
             if key:
                 key += ":" + ",".join(m.preset_id for m in eligible)
@@ -277,10 +414,15 @@ class ScheduledLLMClient:
                 dispatch_reason=decision.summary,
                 dispatch_fallback=decision.fallback,
                 dispatch_reused=reused,
-                coordinator=dispatch.id if len(self.models) > 1 else None,
+                dispatch_planned=bool(planned),
+                coordinator=planned[1]
+                if planned
+                else dispatch.id
+                if len(self.models) > 1
+                else None,
                 stage="model_execution",
             )
-        selected = self._acquire(candidates, control)
+        selected = self._acquire(candidates, control, balance=bool(planned))
         try:
             self._check(control)
             reason = next(

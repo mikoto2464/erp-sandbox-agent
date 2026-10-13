@@ -17,7 +17,7 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-2"
+DISPATCH_VERSION = "dispatcher-3"
 DISPATCH_SCHEMA = object_schema(
     {
         "difficulty": {"type": "string", "enum": ["simple", "moderate", "complex"]},
@@ -32,6 +32,21 @@ DISPATCH_SCHEMA = object_schema(
         },
         "summary": TEXT,
         "reuse_scope": {"type": "string", "enum": ["none", "same_table"]},
+    }
+)
+READING_DISPATCH_SCHEMA = object_schema(
+    {
+        "tasks": {
+            "type": "array",
+            "items": object_schema(
+                {
+                    "task_id": TEXT,
+                    "difficulty": DISPATCH_SCHEMA["properties"]["difficulty"],
+                    "assignments": DISPATCH_SCHEMA["properties"]["assignments"],
+                    "summary": TEXT,
+                }
+            ),
+        },
     }
 )
 
@@ -168,6 +183,70 @@ class ModelDispatcher:
         )
         self.schema = dumps(DISPATCH_SCHEMA)
 
+    def plan_reading(
+        self,
+        requests: tuple[LLMRequest, ...],
+        models: list[JSONObject],
+        client: LLMClient,
+        max_chars: int,
+        concurrency: int,
+    ) -> dict[str, DispatchDecision]:
+        prompt = (
+            files("erp_agent").joinpath("prompts/reader_dispatch.txt").read_text(encoding="utf-8")
+        )
+        schema = dumps(READING_DISPATCH_SCHEMA)
+        tasks: list[JSONObject] = []
+        eligible_by_task: dict[str, list[JSONObject]] = {}
+        task_ids: dict[str, str] = {}
+        for index, request in enumerate(requests):
+            if request.task is None:
+                raise ERPError("dispatch_contract", "读题任务缺少标识。")
+            task = task_material(request)
+            task.pop("instructions", None)
+            sample = string(task["content_sample"])
+            task["content_sample"] = (
+                sample if len(sample) <= 900 else sample[:550] + "\n…\n" + sample[-350:]
+            )
+            task_id = f"t{index}"
+            task_ids[task_id] = request.task.id
+            task["task_id"] = task_id
+            allowed = [m for m in models if int(m["max_input_chars"]) >= int(task["input_chars"])]
+            if not allowed:
+                raise ERPError("llm_input_limit", "完整章节或表格超过所有模型输入上限。", 413)
+            task["eligible_model_ids"] = [m["id"] for m in allowed]
+            eligible_by_task[task_id] = allowed
+            tasks.append(task)
+        payload: JSONObject = {"models": models, "tasks": tasks, "worker_concurrency": concurrency}
+        while len(prompt) + len(schema) + len(dumps(payload)) > max_chars:
+            if all(len(string(task["content_sample"])) <= 150 for task in tasks):
+                raise ERPError("dispatch_input_limit", "章节任务目录超过主 Agent 输入上限。")
+            for task in tasks:
+                sample = string(task["content_sample"])
+                task["content_sample"] = sample[: max(150, len(sample) // 2)]
+        response = client.generate(
+            LLMRequest(
+                prompt,
+                dumps(payload),
+                "erp_reader_dispatch",
+                schema,
+                max_output_tokens=min(16000, max(2000, len(tasks) * 400)),
+                retries=0,
+            )
+        )
+        root = obj(loads(normalize_model_json(response.content)), {"tasks"})
+        decisions: dict[str, DispatchDecision] = {}
+        for value in array(root["tasks"]):
+            item = obj(value, {"task_id", "difficulty", "assignments", "summary"})
+            task_id = string(item.pop("task_id"))
+            if task_id not in eligible_by_task or task_id in decisions:
+                raise ERPError("dispatch_contract", "主 Agent 返回了重复或未知章节任务。")
+            decisions[task_id] = self._decode(
+                {**item, "reuse_scope": "none"}, eligible_by_task[task_id]
+            )
+        if set(decisions) != set(eligible_by_task):
+            raise ERPError("dispatch_contract", "主 Agent 未完成全部章节与整表的分配。")
+        return {task_ids[key]: decision for key, decision in decisions.items()}
+
     def decide(
         self, request: LLMRequest, models: list[JSONObject], client: LLMClient, max_chars: int
     ) -> DispatchDecision:
@@ -226,6 +305,10 @@ class ModelDispatcher:
             loads(normalize_model_json(response.content)),
             {"difficulty", "assignments", "summary", "reuse_scope"},
         )
+        return self._decode(root, models)
+
+    @staticmethod
+    def _decode(root: JSONObject, models: list[JSONObject]) -> DispatchDecision:
         difficulty = string(root["difficulty"])
         if difficulty not in {"simple", "moderate", "complex"}:
             raise ERPError("dispatch_contract", "主 Agent 返回了无效任务难度。")

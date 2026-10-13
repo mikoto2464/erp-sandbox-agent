@@ -1,15 +1,42 @@
 import unittest
 from pathlib import Path
-import xlrd
-from erp_agent.adapters.spreadsheet_documents import XLSDocumentParser
 
-from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
+import xlrd
+
 from erp_agent.adapters.budget_templates import SpreadsheetBudgetParser
+from erp_agent.adapters.document_dispatch import MultiFormatDocumentParser
+from erp_agent.adapters.spreadsheet_documents import XLSDocumentParser
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import SourceDocument
 
 
 class InputDocumentTests(unittest.TestCase):
+    def test_xlsx_sources_keep_whole_sheet_merges_percent_and_formula(self):
+        import io
+
+        from openpyxl import Workbook
+
+        from erp_agent.application.reading.batches import DocumentBatcher
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = '订单池'
+        sheet.merge_cells('A1:B1')
+        sheet['A1'] = '年度订单'
+        sheet.append(['产品', '数量', '比例', '合计'])
+        for i in range(30):
+            sheet.append(['P1', i + 1, 0.5, f'=B{i + 3}*2'])
+            sheet.cell(i + 3, 3).number_format = '0%'
+        output = io.BytesIO()
+        workbook.save(output)
+        content = output.getvalue()
+        document = MultiFormatDocumentParser().parse(SourceDocument('doc', 'orders.xlsx', '', len(content), 'xlsx'), content)
+        self.assertEqual(len(DocumentBatcher().tasks((document,))), 1)
+        self.assertTrue(any(c.column_span == 2 for b in document.blocks for c in b.cells))
+        self.assertTrue(any(c.text == '50.0%' for b in document.blocks for c in b.cells))
+        self.assertTrue(any(c.text == '=B3*2' for b in document.blocks for c in b.cells))
+        self.assertTrue(any('不重算' in w for w in document.warnings))
+
     def test_xls_binary_tail_is_normalized_using_excel_precision(self):
         for raw, expected in [(4050.0000000000005, "4050"), (2025.0000000000002, "2025"),
                               (0.123456789123456, "0.123456789123456")]:

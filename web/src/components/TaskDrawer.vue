@@ -180,6 +180,12 @@ function duration(task: AgentTask) {
               </p>
               <p>{{ task.assignment_reason || task.dispatch_reason }}</p>
               <p
+                v-if="task.dispatch_planned"
+                class="muted"
+              >
+                由主 Agent 首次统一分配，按实时并发额度执行。
+              </p>
+              <p
                 v-if="task.dispatch_reused"
                 class="muted"
               >

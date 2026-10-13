@@ -29,9 +29,9 @@ from erp_agent.domain.models import Fact, ReadingResult, RuleSet
 
 @dataclass(frozen=True)
 class ReaderLimits:
-    max_request_chars: int = 12_000
+    max_request_chars: int = 100_000
     max_batch_units: int = 16
-    concurrency: int = 2
+    concurrency: int = 4
 
     def __post_init__(self) -> None:
         if (
@@ -98,20 +98,18 @@ class ExtractionRole:
                 "conversion 为 identity/percent_to_ratio/wan_to_yuan。unit 为规范单位，未知用空字符串。"
             )
 
-    def extract(
+    def request(
         self,
         batch: ReadingBatch,
-        client: LLMClient,
-        control: RunControl,
         max_chars: int,
-        completed: int,
         facts: tuple[Fact, ...] = (),
         memory: RoleMemory | None = None,
-    ) -> ReadingPart:
+    ) -> LLMRequest:
+        aliases = {original: alias for alias, original in batch.source_aliases.items()}
         payload: JSONObject = {
             "role": self.name,
-            "documents": [batch.payload()],
-            "focus_evidence_ids": list(batch.focus_ids),
+            "documents": [batch.wire_payload()],
+            "focus_evidence_ids": [aliases.get(eid, eid) for eid in batch.focus_ids],
         }
         if memory:
             payload["memory"] = to_json(memory.recall(dumps(batch.payload())[:2000], 800))
@@ -135,19 +133,34 @@ class ExtractionRole:
             payload.pop("local_parameters", None)
         if system_size + len(dumps(payload)) > max_chars:
             raise oversized_batch(batch)
+        return LLMRequest(
+            self.system,
+            dumps(payload),
+            "erp_reading",
+            self.schema,
+            max_output_tokens=min(64000, max(8000, len(batch.focus_ids) * 90))
+            if self.name != "rules"
+            else 4000,
+            retries=0,
+        )
+
+    def extract(
+        self,
+        batch: ReadingBatch,
+        client: LLMClient,
+        control: RunControl,
+        max_chars: int,
+        completed: int,
+        facts: tuple[Fact, ...] = (),
+        memory: RoleMemory | None = None,
+    ) -> ReadingPart:
+        request = self.request(batch, max_chars, facts, memory)
+        payload = obj(loads(request.user))
+        system_size = len(self.system) + len(self.schema) + 16
         control.checkpoint(f"reading_{self.name}", completed)
         response = None
         try:
-            response = client.generate(
-                LLMRequest(
-                    self.system,
-                    dumps(payload),
-                    "erp_reading",
-                    self.schema,
-                    max_output_tokens=8000 if self.name != "rules" else 4000,
-                    retries=0,
-                )
-            )
+            response = client.generate(request)
             control.checkpoint(f"reading_{self.name}", completed)
             result = self._decode(response.content, response.model, batch)
         except Cancelled:
@@ -173,7 +186,7 @@ class ExtractionRole:
                     dumps(payload),
                     "erp_reading",
                     self.schema,
-                    max_output_tokens=8000 if self.name != "rules" else 4000,
+                    max_output_tokens=request.max_output_tokens,
                     retries=0,
                 )
             )
@@ -242,6 +255,13 @@ class ExtractionRole:
             "rules": data.get("rules", []) if self.name != "facts" else [],
             "issues": data.get("issues", []),
         }
+        aliases = batch.source_aliases
+        for collection in ("facts", "rules", "issues"):
+            for value in array(data[collection]):
+                item = obj(value)
+                item["evidence_ids"] = [
+                    aliases.get(string(ref), string(ref)) for ref in array(item.get("evidence_ids"))
+                ]
         recover_numbers(data)
         result = decode_reading(dumps(data), model)
         document = batch.payload()

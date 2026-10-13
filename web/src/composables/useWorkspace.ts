@@ -277,8 +277,8 @@ export function useWorkspace(router: Router) {
     const captured = generation,
       url = base();
     for (const file of files) {
-      if (!/\.(docx|doc|pdf|xls)$/i.test(file.name))
-        throw new Error('请选择 DOCX、DOC、PDF 或 XLS 文件。');
+      if (!/\.(docx|doc|pdf|xls|xlsx)$/i.test(file.name))
+        throw new Error('请选择 DOCX、DOC、PDF、XLS 或 XLSX 文件。');
       if (file.size > (status.value?.max_upload_mb || 20) * 1024 * 1024)
         throw new Error(`${file.name} 超过大小限制。`);
       await request(url + '/documents', {

@@ -60,11 +60,11 @@ function files(values: FileList | null) {
       "
       ><span class="upload-icon">↑</span
       ><strong>{{ operations.has('upload') ? '正在上传…' : '点击选择，或拖入文件' }}</strong
-      ><span class="muted">DOCX / DOC / PDF / XLS</span
+      ><span class="muted">DOCX / DOC / PDF / XLS / XLSX</span
       ><input
         ref="fileInput"
         type="file"
-        accept=".docx,.doc,.pdf,.xls"
+        accept=".docx,.doc,.pdf,.xls,.xlsx"
         multiple
         :disabled="operations.has('upload')"
         @change="files(($event.target as HTMLInputElement).files)"

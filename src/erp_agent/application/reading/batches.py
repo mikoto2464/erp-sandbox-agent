@@ -4,7 +4,7 @@ from itertools import groupby
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from erp_agent.application.contracts import JSONObject, dumps
+from erp_agent.application.contracts import JSONObject, JSONValue, dumps, obj
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import DocumentBlock, ParsedDocument
 
@@ -14,6 +14,7 @@ class ReadingBatch:
     document: ParsedDocument
     units: tuple[DocumentBlock, ...]
     notes: tuple[ParsedDocument, ...] = ()
+    label: str = ""
 
     @property
     def focus_ids(self) -> tuple[str, ...]:
@@ -30,6 +31,30 @@ class ReadingBatch:
     def split(self) -> tuple["ReadingBatch", "ReadingBatch"]:
         middle = len(self.units) // 2
         return replace(self, units=self.units[:middle]), replace(self, units=self.units[middle:])
+
+    @property
+    def source_aliases(self) -> dict[str, str]:
+        return {
+            f"e{index}": evidence.id
+            for index, evidence in enumerate(
+                self.document.evidence + tuple(e for note in self.notes for e in note.evidence)
+            )
+            if len(evidence.id) > 32
+        }
+
+    def wire_payload(self) -> JSONObject:
+        aliases = {original: alias for alias, original in self.source_aliases.items()}
+
+        def compact(value: JSONValue) -> JSONValue:
+            if isinstance(value, str):
+                return aliases.get(value, value)
+            if isinstance(value, list):
+                return [compact(item) for item in value]
+            if isinstance(value, dict):
+                return {key: compact(item) for key, item in value.items()}
+            return value
+
+        return obj(compact(self.payload()))
 
     def payload(self) -> JSONObject:
         sources = {e.id: e for e in self.document.evidence}
@@ -130,31 +155,116 @@ class ReadingBatch:
 
 
 class DocumentBatcher:
+    def tasks(self, documents: tuple[ParsedDocument, ...]) -> tuple[ReadingBatch, ...]:
+        tasks: list[ReadingBatch] = []
+        for document in documents:
+            notes = self._notes(document, documents)
+            numbered_headings = [
+                b.text.strip()
+                for b in document.blocks
+                if self._heading(b) and not b.text.strip().startswith("工作表：")
+            ]
+            major_style = (
+                "chapter"
+                if any(re.match(r"^第.+[章节]", text) for text in numbered_headings)
+                else (
+                    "chinese"
+                    if any(
+                        re.match(r"^[一二三四五六七八九十百]+[、．.]", text)
+                        for text in numbered_headings
+                    )
+                    else "arabic"
+                )
+            )
+            current: tuple[DocumentBlock, ...] = ()
+            label = "题目正文"
+            chapter = False
+            for block in document.blocks:
+                if block.kind == "paragraph" and not block.text.strip():
+                    continue
+                heading = self._heading(block) and (
+                    block.text.strip().startswith("工作表：")
+                    or major_style == "arabic"
+                    or bool(re.match(r"^第.+[章节]", block.text.strip()))
+                    or (
+                        major_style == "chinese"
+                        and bool(
+                            re.match(
+                                r"^[一二三四五六七八九十百]+[、．.]",
+                                block.text.strip(),
+                            )
+                        )
+                    )
+                )
+                standalone_table = (
+                    not chapter
+                    and block.kind == "table"
+                    and any(unit.kind == "table" for unit in current)
+                )
+                if current and (heading or standalone_table):
+                    tasks.append(ReadingBatch(document, current, notes, label))
+                    current = ()
+                if heading:
+                    label = block.text.strip()
+                    chapter = True
+                elif standalone_table:
+                    label = f"表格 {block.index + 1}"
+                if block.kind == "table":
+                    current += tuple(
+                        replace(block, cells=tuple(row))
+                        for _, row in groupby(
+                            sorted(block.cells, key=lambda c: (c.row, c.column)),
+                            key=lambda c: c.row,
+                        )
+                    )
+                else:
+                    current += (block,)
+            if current:
+                tasks.append(ReadingBatch(document, current, notes, label))
+        return tuple(tasks)
+
+    @staticmethod
+    def _heading(block: DocumentBlock) -> bool:
+        text = block.text.strip()
+        return block.kind == "paragraph" and (
+            text.startswith("工作表：")
+            or (
+                len(text) <= 80
+                and not re.search(r"[。；！？]", text)
+                and bool(
+                    re.match(
+                        r"^(?:[一二三四五六七八九十百]+[、．.]|\d+[、．.](?!\d)|第[一二三四五六七八九十百\d]+[章节])",
+                        text,
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def _notes(
+        document: ParsedDocument, documents: tuple[ParsedDocument, ...]
+    ) -> tuple[ParsedDocument, ...]:
+        notes = tuple(
+            d
+            for d in documents
+            if d.source.id.startswith(("annotation_", "supplement_"))
+            and d.source.id != document.source.id
+            and (
+                d.source.id.startswith("supplement_")
+                or any(document.source.id in e.text for e in d.evidence)
+            )
+            and len(dumps([[e.id, e.text] for e in d.evidence])) <= 2000
+        )
+        while notes and len(dumps([[e.id, e.text] for n in notes for e in n.evidence])) > 3000:
+            notes = notes[:-1]
+        return notes
+
     def batches(
         self, documents: tuple[ParsedDocument, ...], max_chars: int, max_units: int
     ) -> tuple[ReadingBatch, ...]:
         result: list[ReadingBatch] = []
-        notes = tuple(
-            d for d in documents if d.source.id.startswith(("annotation_", "supplement_"))
-        )
         for document in documents:
-            related = tuple(
-                n
-                for n in notes
-                if n.source.id != document.source.id
-                and (
-                    n.source.id.startswith("supplement_")
-                    or any(document.source.id in e.text for e in n.evidence)
-                )
-            )
-            # Long notes are read in their own batches rather than repeated in every request.
-            related = tuple(
-                n for n in related if len(dumps([[e.id, e.text] for e in n.evidence])) <= 2000
-            )
-            while (
-                related and len(dumps([[e.id, e.text] for n in related for e in n.evidence])) > 3000
-            ):
-                related = related[:-1]
+            related = self._notes(document, documents)
             units: list[DocumentBlock] = []
             for block in document.blocks:
                 if block.kind == "paragraph":

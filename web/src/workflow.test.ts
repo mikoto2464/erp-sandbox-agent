@@ -457,10 +457,10 @@ describe('Vue migration', () => {
       '',
     );
     expect(workspace.solutions.value[0].plan.title).toBe('第一版方案');
-    await wrapper.find('.budget-template-row button').trigger('click');
+    await wrapper.find('.budget-template-row > button.review-action').trigger('click');
     await flushPromises();
-    expect(wrapper.find('dialog').text()).toContain('现金预算');
-    wrapper.findComponent(AppModal).vm.$emit('close');
+    expect(wrapper.findComponent(BudgetTemplatePreview).text()).toContain('现金预算');
+    wrapper.findComponent(BudgetTemplatePreview).vm.$emit('close');
     workspace.selectSolution('first');
     expect(workspace.currentSolution.value?.id).toBe('first');
     wrapper.unmount();

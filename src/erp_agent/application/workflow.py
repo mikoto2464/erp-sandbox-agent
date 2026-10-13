@@ -152,8 +152,8 @@ class WorkflowService:
         if not filename or len(filename) > 200 or any(c in filename for c in "/\\\x00"):
             raise ERPError("invalid_filename", "文件名无效。")
         fmt = filename.rsplit(".", 1)[-1].lower()
-        if fmt not in {"doc", "docx", "pdf", "xls"}:
-            raise ERPError("unsupported_format", "请上传 DOCX、DOC、PDF 或 XLS 文件。")
+        if fmt not in {"doc", "docx", "pdf", "xls", "xlsx"}:
+            raise ERPError("unsupported_format", "请上传 DOCX、DOC、PDF、XLS 或 XLSX 文件。")
         source = SourceDocument(uuid4().hex, filename, hashlib.sha256(content).hexdigest(),
                                 len(content), fmt)
 
@@ -306,7 +306,7 @@ class WorkflowService:
             sources = tuple(replacements.get(d.source.id, d) for d in documents) + extra_sources
             fingerprint = hashlib.sha256(dumps({"inputs": inputs, "sources": [d.source for d in sources],
                 "parsers": [d.parser_version for d in sources], "reader": self.reader.limits,
-                "model": binding.metadata() if binding else None, "version": "reader-14"}).encode()).hexdigest()
+                "model": binding.metadata() if binding else None, "version": "reader-15"}).encode()).hexdigest()
             memory = self.memory.scope(project_id, 0, fingerprint,
                                        tuple(d.source.id for d in documents)) if self.memory else None
             result = self.reader.read(sources, control, binding.client if binding else None, memory)

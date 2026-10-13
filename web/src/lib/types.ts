@@ -191,6 +191,7 @@ export interface AgentTask {
   assignment_reason?: string;
   dispatch_fallback?: boolean;
   dispatch_reused?: boolean;
+  dispatch_planned?: boolean;
   model_loads?: ModelLoad[];
   id: string;
   parent_id?: string;

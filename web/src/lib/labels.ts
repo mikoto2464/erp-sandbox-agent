@@ -60,6 +60,8 @@ export const statusNames: Record<string, string> = {
 export const stageNames: Record<string, string> = {
   waiting_model: '等待可用模型',
   dispatching_model: '主 Agent 评估与分配模型',
+  dispatching_reading: '主 Agent 统一分配章节与整表',
+  reading_assigned: '已分配，等待执行',
   model_execution: '执行已分配任务',
   queued: '排队',
   starting: '开始',

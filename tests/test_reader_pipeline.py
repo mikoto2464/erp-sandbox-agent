@@ -55,6 +55,39 @@ class RowClient:
 
 
 class ReaderPipelineTests(unittest.TestCase):
+    def test_default_reader_keeps_large_table_in_one_task_and_restores_source_ids(self):
+        from dataclasses import replace
+
+
+        document = self.table(70)
+        old = document.source.id
+        new = 'd' * 32
+        document = replace(document, source=replace(document.source, id=new),
+            blocks=tuple(replace(b, evidence_id=b.evidence_id.replace(old, new),
+                cells=tuple(replace(c, evidence_id=c.evidence_id.replace(old, new)) for c in b.cells))
+                for b in document.blocks),
+            evidence=tuple(replace(e, id=e.id.replace(old, new), document_id=new,
+                table_context=replace(e.table_context,
+                    heading_ids=tuple(r.replace(old, new) for r in e.table_context.heading_ids),
+                    column_header_ids=tuple(r.replace(old, new) for r in e.table_context.column_header_ids),
+                    row_ids=tuple(r.replace(old, new) for r in e.table_context.row_ids)) if e.table_context else None)
+                for e in document.evidence))
+
+        class Client(RowClient):
+            def generate(self, request):
+                response = super().generate(request)
+                self.assert_short_ids = not any(new in ref for ref in loads(request.user)['focus_evidence_ids'])
+                return response
+
+        client = Client()
+        result = StructuredReader(client).read((document,), Control())
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(client.assert_short_ids)
+        facts = [f for f in result.problem.facts if f.category == 'order_pool']
+        self.assertEqual(len(facts), 70)
+        self.assertTrue(all(ref.startswith(new) for f in facts for ref in f.evidence_ids))
+        self.assertFalse(any('source' in i.code for i in result.issues))
+
     def test_default_reader_formats_small_table_once_and_keeps_rules(self):
         document = self.table(8)
         class Client(RowClient):
@@ -220,12 +253,21 @@ class ReaderPipelineTests(unittest.TestCase):
         self.assertEqual(''.join(unit.text for batch in batches for unit in batch.units),
                          document.blocks[0].text)
         self.assertTrue(all(len(dumps(batch.payload())) <= 10000 for batch in batches))
+        client = RowClient()
+        StructuredReader(client, limits=ReaderLimits(12000, 16, 1)).read((document,), Control())
+        parts = [block['paragraph'][1] for request in client.calls
+                 for block in loads(request.user)['documents'][0]['blocks'] if 'paragraph' in block]
+        self.assertEqual(''.join(parts), document.blocks[0].text)
 
     def test_numbered_rule_sentences_stay_together(self):
         document = text_source('规则', '1. 招聘后开始计薪。\n2. 每季支付工资。\n3. 离职需要赔偿。', 'manual_')
         batches = DocumentBatcher().batches((document,), 12000, 16)
         self.assertEqual(len(batches), 1)
         self.assertEqual(len(batches[0].units), 3)
+        chapters = text_source('题目', '一、工资\n1.工资结算\n2.入职时间\n二、贷款\n1.贷款利息', 'manual_')
+        tasks = DocumentBatcher().tasks((chapters,))
+        self.assertEqual([t.label for t in tasks], ['一、工资', '二、贷款'])
+        self.assertEqual([len(t.units) for t in tasks], [3, 2])
 
     def test_review_skips_repeated_headers_but_checks_cross_batch_rules(self):
         fact = Fact('salary', 'worker', 'worker', '工人', 'salary', '100', 'number', '元',

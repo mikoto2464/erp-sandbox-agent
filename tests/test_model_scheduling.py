@@ -9,12 +9,15 @@ from erp_agent.adapters.jobs import JobControl
 from erp_agent.adapters.model_settings import ModelSettingsService
 from erp_agent.adapters.persistence import SQLiteRepository
 from erp_agent.application.contracts import decimal, dumps, loads
+from erp_agent.application.input_sources import text_source
 from erp_agent.application.model_dispatch import table_dispatch_key, task_material
 from erp_agent.application.model_scheduler import ModelCapacity, ScheduledLLMClient
 from erp_agent.application.ports import LLMRequest, LLMResponse, ModelBinding, TaskContext
+from erp_agent.application.reader import StructuredReader
 from erp_agent.application.task_reporting import TaskLLMClient
 from erp_agent.config import Settings
 from erp_agent.domain.errors import Cancelled, ERPError
+from tests.helpers import Control
 
 
 def choice(preset_id, difficulty="complex", alternative=None):
@@ -37,6 +40,100 @@ def choice(preset_id, difficulty="complex", alternative=None):
 
 
 class ModelSchedulingTests(unittest.TestCase):
+    def test_reader_dispatches_all_chapters_once_and_workers_follow_main_agent(self):
+        dispatches, workers = [], []
+
+        class Client:
+            configured = True
+
+            def __init__(self, name):
+                self.name = name
+
+            def generate(self, request):
+                if request.schema_name == 'erp_reader_dispatch':
+                    material = loads(request.user)
+                    dispatches.append(material)
+                    return LLMResponse(dumps({'tasks': [
+                        {'task_id': task['task_id'], 'difficulty': 'simple',
+                         'assignments': [{'preset_id': ('ds', 'other', 'ds')[i],
+                                          'reason': '按章节格式与预计负载分配常规整理。'}],
+                         'summary': '主模型负责统筹，协作模型整理章节。'}
+                        for i, task in enumerate(material['tasks'])]}), self.name)
+                if request.schema_name == 'erp_model_dispatch':
+                    raise AssertionError('正常章节不应逐次重复调度')
+                workers.append(self.name)
+                return LLMResponse(dumps({'title': '题目', 'facts': [], 'rules': [], 'issues': []}), self.name)
+
+        models = tuple(ModelBinding(name, name, 1,
+            {'model': name, 'priority': priority, 'max_parallel': 2, 'max_input_chars': 100000}, Client(name))
+            for name, priority in [('main', 100), ('other', 90), ('ds', 80)])
+        scheduled = ScheduledLLMClient(models, ModelCapacity())
+        document = text_source('赛题', '一、初始资本\n现金100元\n二、市场\n产品A\n三、融资\n利率5%', 'manual_')
+        StructuredReader(scheduled).read((document,), Control())
+        self.assertEqual(len(dispatches), 1)
+        self.assertEqual(len(dispatches[0]['tasks']), 3)
+        self.assertEqual({m['id'] for m in dispatches[0]['models']}, {'main', 'ds', 'other'})
+        self.assertCountEqual(workers, ['ds', 'other', 'ds'])
+        self.assertEqual(scheduled.capacity.used, {'main': 0, 'ds': 0, 'other': 0})
+
+    def test_planned_reader_uses_idle_authorized_model_and_releases_capacity(self):
+        entered = threading.Barrier(2)
+        workers = []
+
+        class Client:
+            configured = True
+
+            def __init__(self, name):
+                self.name = name
+
+            def generate(self, request):
+                if request.schema_name == 'erp_reader_dispatch':
+                    return LLMResponse(dumps({'tasks': [
+                        {'task_id': task['task_id'], 'difficulty': 'simple',
+                         'assignments': [{'preset_id': name, 'reason': '具备常规整理能力。'}
+                                         for name in ('main', 'helper')],
+                         'summary': '两个模型皆可处理，按当前占用执行。'}
+                        for task in loads(request.user)['tasks']]}), self.name)
+                workers.append(self.name)
+                entered.wait(timeout=2)
+                return LLMResponse('{}', self.name)
+
+        models = tuple(ModelBinding(name, name, 1,
+            {'model': name, 'priority': priority, 'max_parallel': 2, 'max_input_chars': 100000}, Client(name))
+            for name, priority in [('main', 100), ('helper', 80)])
+        scheduled = ScheduledLLMClient(models, ModelCapacity())
+        requests = tuple(LLMRequest('整理数据', '{}', 'erp_reading', '{}',
+            task=TaskContext(str(i), 'Reader', '读题', '章节')) for i in range(2))
+        scheduled.plan_reading(requests, Control(), 2)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(scheduled.generate, requests))
+        self.assertCountEqual(workers, ['main', 'helper'])
+        self.assertEqual(scheduled.capacity.used, {'main': 0, 'helper': 0})
+
+    def test_incomplete_initial_reading_plan_is_reported_as_fallback(self):
+        events = []
+
+        class ReportingControl(Control):
+            def report_task(self, key, changes):
+                events.append(changes)
+
+        class Client:
+            configured = True
+
+            def generate(self, request):
+                return LLMResponse(dumps({'tasks': []}), 'main')
+
+        models = tuple(ModelBinding(name, name, 1,
+            {'model': name, 'priority': priority, 'max_parallel': 1, 'max_input_chars': 100000}, Client())
+            for name, priority in [('main', 100), ('helper', 80)])
+        scheduled = ScheduledLLMClient(models, ModelCapacity())
+        request = LLMRequest('整理数据', '{}', 'erp_reading', '{}',
+                             task=TaskContext('one', 'Reader', '读题', '章节'))
+        scheduled.plan_reading((request,), ReportingControl(), 2)
+        self.assertTrue(scheduled._reading_plan['one'][0].fallback)
+        self.assertTrue(any(e.get('dispatch_fallback') and e['status'] == 'failed' for e in events))
+        self.assertEqual(scheduled.capacity.used, {'main': 0})
+
     def test_main_agent_authorizes_same_table_reuse_and_repair_gets_new_assignment(self):
         dispatches, workers = [], []
         class Client:
