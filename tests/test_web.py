@@ -95,6 +95,7 @@ class WebTests(unittest.TestCase):
             "Content-Type": "application/octet-stream", "X-Filename": "topic.docx",
         })
         self.assertEqual(self.wait_job(project, job["id"])["status"], "succeeded")
+
         docs = self.request(base + "/documents")
         eid = docs[0]["evidence"][0]["id"]
         facts = []
@@ -112,6 +113,29 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.wait_job(project, job["id"])["status"], "succeeded")
         result = self.request(base + "/problem")
         return project, result
+
+    def read_and_review_template(self, base, project, template):
+        saved_response = self.llm.response
+        self.llm.response = dumps({"purpose": "经营预算", "periods": "第1期",
+            "input_groups": [{"label": "借款", "range": "B2", "unit": "元",
+                              "description": "借款输入，保留公式"}], "issues": []})
+        job = self.request(base + '/read', {'append': True, 'document_ids': [],
+                           'template_ids': [template['source']['id']]})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'needs_input')
+        current = self.request(base + '/problem')['snapshot']
+        generation = {'template_ids': [template['source']['id']]}
+        with self.assertRaises(HTTPError) as blocked:
+            self.request(base + '/solve', {'version': current['version'], 'generation': generation})
+        self.assertEqual(blocked.exception.code, 409)
+        revised = self.request(base + '/revisions', {'expected_version': current['version'],
+            'reading': {'title': current['reading']['problem']['title'],
+                        'facts': current['reading']['problem']['facts'],
+                        'rules': current['reading']['rules']['rules'],
+                        'issues': current['reading']['issues']},
+            'template_reviews': [{'template_id': template['source']['id'], 'reviewed': True,
+                                  'explanation': '按原表输入预算'}]})
+        self.llm.response = saved_response
+        return revised['version']
 
     def test_budget_tone_and_iterative_solution_context(self):
         project, _ = self.setup_problem()
@@ -133,6 +157,7 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         template = self.request(base + '/templates')[0]
+        version = self.read_and_review_template(base, project, template)
         self.assertEqual(template['sheets'][0]['merged_ranges'], ['A4:C4'])
         self.assertTrue(next(c for c in template['sheets'][0]['cells'] if c['coordinate'] == 'B3')['formula'])
         proposal = loads(proposal_json())
@@ -144,7 +169,7 @@ class WebTests(unittest.TestCase):
         self.llm.response = dumps(proposal)
         generation = {'tone': 'conservative', 'custom_prompt': '',
                       'template_ids': [template['source']['id']]}
-        job = self.request(base + '/solve', {'version': 1, 'generation': generation})
+        job = self.request(base + '/solve', {'version': version, 'generation': generation})
         done = self.wait_job(project, job['id'])
         self.assertEqual(done['status'], 'succeeded')
         first = self.request(base + '/solutions')[0]
@@ -160,7 +185,7 @@ class WebTests(unittest.TestCase):
             generation.update(previous_solution_id=parent, revision_prompt=requirement)
             proposal['plan']['title'] = requirement
             self.llm.response = dumps(proposal)
-            job = self.request(base + '/solve', {'version': 1, 'generation': generation})
+            job = self.request(base + '/solve', {'version': version, 'generation': generation})
             self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         plans = self.request(base + '/solutions')
         self.assertEqual(len(plans), 3)
@@ -179,15 +204,42 @@ class WebTests(unittest.TestCase):
                              ({'previous_solution_id': first['id']}, 400),
                              ({'template_ids': ['not-in-project']}, 404)]:
             with self.subTest(config=config), self.assertRaises(HTTPError) as rejected:
-                self.request(base + '/solve', {'version': 1, 'generation': config})
+                self.request(base + '/solve', {'version': version, 'generation': config})
             self.assertEqual(rejected.exception.code, code)
         reading = self.request(base + '/problem')['snapshot']['reading']
-        self.request(base + '/revisions', {'expected_version': 1, 'reading': {
+        self.request(base + '/revisions', {'expected_version': version, 'reading': {
             'title': '新版', 'facts': reading['problem']['facts'], 'rules': [], 'issues': [],
         }})
         with self.assertRaises(HTTPError) as stale:
-            self.request(base + '/solve', {'version': 2, 'generation': generation})
+            self.request(base + '/solve', {'version': version + 1, 'generation': generation})
         self.assertEqual(stale.exception.code, 409)
+
+    def test_append_file_retains_saved_fields_and_only_extracts_new_document(self):
+        project, first = self.setup_problem()
+        base = f'/api/projects/{project}'
+        saved_facts = first['snapshot']['reading']['problem']['facts']
+        content = docx_bytes('<w:p><w:r><w:t>市场开拓费用100元</w:t></w:r></w:p>')
+        job = self.request(base + '/documents', content=content, headers={
+            'Content-Type': 'application/octet-stream', 'X-Filename': 'extra.docx'})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        extra = self.request(base + '/documents')[-1]
+        self.llm.response = dumps({'title': '补充', 'facts': [{
+            'id': 'cost', 'category': 'market', 'entity_id': 'local', 'entity_name': '本地市场',
+            'key': 'opening_cost', 'value': '100', 'value_type': 'number', 'unit': '元',
+            'state': 'known', 'evidence_ids': [extra['evidence'][0]['id']],
+            'conversion': 'identity', 'explanation': ''}], 'rules': [], 'issues': []})
+        calls_before = len(self.llm.calls)
+        job = self.request(base + '/read', {'append': True, 'document_ids': [extra['source']['id']]})
+        self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
+        current = self.request(base + '/problem')['snapshot']
+        self.assertEqual(current['version'], 2)
+        self.assertEqual(current['reading']['problem']['facts'][:len(saved_facts)], saved_facts)
+        self.assertEqual(len(current['document_ids']), 2)
+        self.assertEqual(len(self.llm.calls) - calls_before, 1)
+        self.assertEqual(self.server.workflow.repository.snapshot(project, 1), first['snapshot'])
+        with self.assertRaises(HTTPError) as duplicate:
+            self.request(base + '/read', {'append': True, 'document_ids': [extra['source']['id']]})
+        self.assertEqual(duplicate.exception.code, 400)
 
     def test_delete_uploads_keeps_history_and_cleans_current_inputs(self):
         project, _ = self.setup_problem()
@@ -278,6 +330,7 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         template = self.request(base + '/templates')[0]
+        version = self.read_and_review_template(base, project, template)
         with self.assertRaises(HTTPError) as unplanned:
             self.request(base + '/mappings', {'solution_id': solution['id'], 'template_id': template['source']['id']})
         self.assertEqual(unplanned.exception.code, 409)
@@ -288,7 +341,7 @@ class WebTests(unittest.TestCase):
             'action_indices': [0], 'explanation': '第一期借款',
         }]
         self.llm.response = dumps(proposal)
-        job = self.request(base + '/solve', {'version': 1, 'generation': {'template_ids': [template['source']['id']]}})
+        job = self.request(base + '/solve', {'version': version, 'generation': {'template_ids': [template['source']['id']]}})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         solution = self.request(base + '/solutions')[-1]
         entry = {'sheet': '资金计划', 'cell': 'B2', 'label': '借款',
@@ -482,7 +535,7 @@ class WebTests(unittest.TestCase):
 
     def test_config_does_not_expose_key_and_static(self):
         status = self.request("/api/status")
-        self.assertEqual(status["solver_modes"], ["llm_only", "llm_monte_carlo"])
+        self.assertEqual(status["solver_modes"], ["llm_only"])
         self.assertNotIn("llm_api_key", status)
         code, raw = self.raw_request("/")
         self.assertEqual(code, 200)

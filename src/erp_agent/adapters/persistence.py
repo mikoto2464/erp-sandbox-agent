@@ -116,6 +116,8 @@ class SQLiteRepository:
             self._check_deleted(connection, project_id)
             for document_id in array(payload.get("document_ids", [])):
                 self._check_upload(connection, project_id, "document", str(document_id))
+            for value in array(payload.get("template_readings", [])):
+                self._check_upload(connection, project_id, "template", str(obj(value)["template_id"]))
             row = connection.execute(
                 "SELECT MAX(version) FROM snapshots WHERE project_id=?", (project_id,),
             ).fetchone()
@@ -208,6 +210,10 @@ class SQLiteRepository:
                 histories = connection.execute("SELECT payload FROM records WHERE kind='solution' AND project_id=?", (project_id,)).fetchall()
                 referenced = any(record_id in array(obj(obj(loads(row[0])).get("generation", {})).get("template_ids", []))
                                  for row in histories)
+                snapshots = connection.execute("SELECT payload FROM snapshots WHERE project_id=?",
+                                               (project_id,)).fetchall()
+                referenced = referenced or any(any(obj(t)["template_id"] == record_id
+                    for t in array(obj(loads(row[0])).get("template_readings", []))) for row in snapshots)
                 inputs = None
             if not referenced:
                 connection.execute("DELETE FROM records WHERE project_id=? AND id=? AND kind IN (?,?)",

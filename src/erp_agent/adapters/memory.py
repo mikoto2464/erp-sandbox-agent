@@ -11,7 +11,7 @@ from rank_bm25 import BM25Okapi
 from erp_agent.application.contracts import JSONObject, dumps, obj, to_json
 from erp_agent.application.memory import MemoryContext
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import KnowledgeState, ProblemSnapshot
+from erp_agent.domain.models import KnowledgeState, ProblemSnapshot, SolutionBundle
 
 
 def _tokens(text: str) -> list[str]:
@@ -40,6 +40,10 @@ class SQLiteRoleMemory:
         self.project_id, self.version = project_id, version
         self.fingerprint, self.document_ids = fingerprint, document_ids
 
+    def alignment(self) -> JSONObject:
+        saved = self.service.read(self.project_id, f"knowledge:{self.version}") or {}
+        return obj(saved.get("alignment", {}))
+
     def recall(self, query: str, max_chars: int = 1500) -> MemoryContext:
         saved = self.service.read(self.project_id, f"knowledge:{self.version}")
         entries = saved.get("entries", []) if saved else []
@@ -64,6 +68,9 @@ class SQLiteRoleMemory:
         return MemoryContext(self.project_id, self.version, tuple(selected))
 
     def get(self, key: str) -> JSONObject | None:
+        if key.startswith("solution:"):
+            return self.service.read(self.project_id,
+                f"solution:{self.version}:" + key.split(":", 1)[1])
         return self.service.read(self.project_id, f"run:{self.fingerprint}:{key}")
 
     def put(self, key: str, value: JSONObject) -> None:
@@ -189,10 +196,25 @@ class SQLiteMemoryService:
                         "evidence_ids": list(issue.evidence_ids),
                     }
                 )
+        for template in snapshot.template_readings:
+            for sheet in template.sheets:
+                entries.append({"id": template.template_id + ":" + sheet.name,
+                    "state": "reviewed" if template.reviewed else "unreviewed",
+                    "text": f"空表 {sheet.name}：{sheet.purpose}；期间 {sheet.periods}；"
+                            + dumps(sheet.input_groups) + "；" + template.explanation,
+                    "evidence_ids": [], "template_id": template.template_id,
+                    "sha256": template.sha256})
         self.write(
             snapshot.project_id,
             f"knowledge:{snapshot.version}",
-            {"version": snapshot.version, "entries": entries},
+            {"version": snapshot.version, "entries": entries,
+             "alignment": {"project_id": snapshot.project_id, "problem_version": snapshot.version,
+                           "rule_version": snapshot.reading.rules.version,
+                           "years": snapshot.reading.problem.years,
+                           "periods_per_year": snapshot.reading.problem.periods_per_year,
+                           "templates": [{"id": t.template_id, "sha256": t.sha256,
+                                          "reviewed": t.reviewed}
+                                         for t in snapshot.template_readings]}},
             snapshot.document_ids,
         )
 
@@ -208,3 +230,10 @@ class SQLiteMemoryService:
     def close(self) -> None:
         with self.lock:
             self.connection.close()
+
+    def remember_solution(self, solution: SolutionBundle) -> None:
+        self.write(solution.project_id, f"solution:{solution.problem_version}:{solution.id}", {
+            "solution_id": solution.id, "problem_version": solution.problem_version,
+            "generation": to_json(solution.generation), "plan": to_json(solution.plan),
+            "evaluation": to_json(solution.evaluation), "prompt_version": solution.prompt_version,
+        })

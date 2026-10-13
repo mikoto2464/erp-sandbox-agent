@@ -95,11 +95,11 @@ function duration(task: AgentTask) {
         </p>
       </div>
       <div
-        v-if="job.kind === 'read' && readingProgress(job).total"
+        v-if="['read', 'solve'].includes(job.kind) && readingProgress(job).total"
         class="reading-progress"
       >
         <div class="task-row-heading">
-          <strong>章节 / 表格提取</strong>
+          <strong>{{ job.kind === 'solve' ? '角色协作' : '章节 / 工作表解析' }}</strong>
           <span
             >已处理 {{ readingProgress(job).processed }} / {{ readingProgress(job).total }}</span
           >
@@ -107,7 +107,7 @@ function duration(task: AgentTask) {
         <progress
           :value="readingProgress(job).processed"
           :max="readingProgress(job).total"
-          aria-label="章节与表格提取进度"
+          aria-label="子任务处理进度"
         />
         <div class="task-metrics">
           <span>完成 {{ readingProgress(job).completed }}</span>
@@ -127,7 +127,7 @@ function duration(task: AgentTask) {
           "
           class="muted"
         >
-          提取已结束，{{ stageNames[job.stage] || job.stage }}。
+          子任务已结束，{{ stageNames[job.stage] || job.stage }}。
         </p>
       </div>
       <button
@@ -244,6 +244,12 @@ function duration(task: AgentTask) {
               </details>
             </div>
             <div class="task-metrics">
+              <span v-if="task.input_group_count != null"
+                >{{ task.input_group_count }} 组输入项目</span
+              >
+              <span v-if="task.recommendation_count != null"
+                >{{ task.recommendation_count }} 条协作建议</span
+              >
               <span v-if="task.planned_count != null"
                 >已分配 {{ task.planned_count }} 个子任务</span
               >

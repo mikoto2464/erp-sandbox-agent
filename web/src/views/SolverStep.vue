@@ -3,15 +3,10 @@ import { computed, ref, watch } from 'vue';
 import { useWorkspaceContext } from '../composables/context';
 import AppSelect from '../components/AppSelect.vue';
 import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
-import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 import type { BudgetTemplate, PlanTone } from '../lib/types';
 const {
   snapshot,
   solutions,
-  solverMode,
-  seed,
-  candidates,
-  status,
   inputChanged,
   errors,
   activeSolve,
@@ -23,13 +18,20 @@ const {
   customPrompt,
   templates,
   templateIds,
-  templateParsing,
   generationReady,
-  uploadTemplates,
   currentSolution,
   selectSolution,
-  jobs,
 } = useWorkspaceContext();
+const availableTemplates = computed(() =>
+  templates.value.filter((template) =>
+    snapshot.value?.template_readings?.some(
+      (reading) =>
+        reading.template_id === template.source.id &&
+        reading.reviewed &&
+        reading.sha256 === template.source.sha256,
+    ),
+  ),
+);
 const tones: { value: PlanTone; label: string; description: string }[] = [
   { value: 'conservative', label: '保守', description: '控制投入，优先现金安全' },
   { value: 'balanced', label: '平稳', description: '兼顾周转与经营增长' },
@@ -49,11 +51,7 @@ const note = computed(() =>
     ? '题目输入或说明已修改，请重新读取。'
     : errors.value
       ? '题目有错误，请修正并保存。'
-      : solverMode.value === 'llm_monte_carlo'
-        ? status.value?.simulation_ready
-          ? '在仿真器中搜索并比较候选。'
-          : '经营仿真内核尚未就绪，暂不能使用蒙特卡罗。'
-        : '生成结果为草稿，产能、现金与履约尚未经过经营仿真验证。',
+      : '生成结果为协作规划草稿，产能、现金与履约尚未经过经营仿真验证。',
 );
 const periods = computed(() =>
   [...new Set(currentSolution.value?.plan.actions.map((action) => action.period) || [])].sort(
@@ -66,24 +64,7 @@ const previousLabel = computed(() => {
     ? solutions.value.find((item) => item.id === previousId)?.plan.title || '此前方案'
     : '';
 });
-const templateJobs = computed(() => {
-  const entries = new Map<string, (typeof jobs.value)[number]>();
-  for (const job of jobs.value)
-    if (
-      job.kind === 'template' &&
-      job.metadata.template_id &&
-      !job.metadata.upload_deleted &&
-      !templates.value.some((item) => item.source.id === job.metadata.template_id)
-    )
-      entries.set(job.metadata.template_id, job);
-  return [...entries.values()];
-});
-function upload(event: Event) {
-  const input = event.target as HTMLInputElement,
-    files = [...(input.files || [])];
-  input.value = '';
-  if (files.length) void run('upload-template', () => uploadTemplates(files));
-}
+
 function toggleTemplate(id: string) {
   if (templateIds.value.includes(id))
     templateIds.value = templateIds.value.filter((item) => item !== id);
@@ -108,24 +89,6 @@ async function revise() {
             ? `${snapshot.reading.problem.years} 年 · 每年 ${snapshot.reading.problem.periods_per_year} 季`
             : '请先读取题目'
         }}</span>
-      </div>
-      <div class="strategy-options">
-        <label class="strategy-option"
-          ><input
-            v-model="solverMode"
-            type="radio"
-            value="llm_only"
-            :disabled="activeSolve"
-          /><span><strong>直接生成</strong><small>单 LLM · 方案草稿</small></span></label
-        >
-        <label class="strategy-option"
-          ><input
-            v-model="solverMode"
-            type="radio"
-            value="llm_monte_carlo"
-            :disabled="activeSolve"
-          /><span><strong>搜索更优方案</strong><small>LLM + 蒙特卡罗</small></span></label
-        >
       </div>
       <div class="generation-section">
         <h3>方案基调</h3>
@@ -161,49 +124,15 @@ async function revise() {
           />
         </label>
       </div>
-      <div
-        v-if="solverMode === 'llm_monte_carlo'"
-        class="form-grid"
-      >
-        <label
-          >随机种子<input
-            v-model.number="seed"
-            type="number"
-            min="0"
-            max="4294967295" /></label
-        ><label
-          >候选数量<input
-            v-model.number="candidates"
-            type="number"
-            min="1"
-            max="2000"
-        /></label>
-      </div>
-      <div
-        v-if="solverMode === 'llm_only'"
-        class="generation-section"
-      >
+      <div class="generation-section">
         <div class="section-heading">
           <div>
             <h3>预算空表 <span class="muted">选填</span></h3>
-            <p class="muted">
-              先选空表，再按表中的项目、期间和单位生成方案。更换空表需要重新生成。
-            </p>
+            <p class="muted">这里只显示读题阶段已核对的空表。新增空表请返回第一步读取。</p>
           </div>
-          <label
-            class="review-action template-upload"
-            :class="{ disabled: activeSolve || operations.has('upload-template') }"
-            >上传空表<input
-              type="file"
-              accept=".xlsx,.xls"
-              multiple
-              class="sr-only"
-              :disabled="activeSolve || operations.has('upload-template')"
-              @change="upload"
-          /></label>
         </div>
         <div
-          v-for="template in templates"
+          v-for="template in availableTemplates"
           :key="template.source.id"
           class="budget-template-row"
         >
@@ -226,49 +155,12 @@ async function revise() {
           >
             预览
           </button>
-          <UploadDeleteButton
-            :id="template.source.id"
-            :filename="template.source.filename"
-            kind="template"
-          />
-        </div>
-        <div
-          v-for="job in templateJobs"
-          :key="job.id"
-          class="budget-template-row"
-        >
-          <span class="muted"
-            >{{ job.metadata.filename }} ·
-            {{
-              job.status === 'failed'
-                ? '解析失败，可在任务中重试'
-                : job.status === 'cancelled'
-                  ? '已取消'
-                  : '正在解析…'
-            }}</span
-          ><button
-            v-if="
-              job.metadata.template_id &&
-              templateIds.includes(job.metadata.template_id) &&
-              ['failed', 'cancelled'].includes(job.status)
-            "
-            class="review-action"
-            @click="toggleTemplate(job.metadata.template_id)"
-          >
-            不使用
-          </button>
-          <UploadDeleteButton
-            v-if="job.metadata.template_id"
-            :id="job.metadata.template_id"
-            :filename="job.metadata.filename || '预算空表'"
-            kind="template"
-          />
         </div>
         <p
-          v-if="!templates.length && !templateParsing"
+          v-if="!availableTemplates.length"
           class="muted"
         >
-          支持 XLSX / XLS，最多选择 3 份。不上传则按题目生成。
+          请在第一步上传空表，并在第二步核对后使用；不使用空表也可生成方案。
         </p>
       </div>
       <p class="notice">{{ note }}</p>
@@ -322,7 +214,7 @@ async function revise() {
         />
       </div>
       <p class="muted">
-        {{ currentSolution.mode === 'llm_only' ? '直接生成 · AI 草稿' : '搜索生成 · 候选比较' }} ·
+        协作生成 · AI 草稿 ·
         {{
           tones.find((tone) => tone.value === (currentSolution?.generation?.tone || 'balanced'))
             ?.label
@@ -434,10 +326,7 @@ async function revise() {
           </li>
         </ul>
       </details>
-      <div
-        v-if="solverMode === 'llm_only'"
-        class="generation-section revision-section"
-      >
+      <div class="generation-section revision-section">
         <h3>调整这份方案</h3>
         <p class="muted">填写新的要求，保留当前方案并生成下一版。上方基调与所选预算表同样生效。</p>
         <label

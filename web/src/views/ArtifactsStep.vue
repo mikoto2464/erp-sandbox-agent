@@ -133,7 +133,7 @@ const formulaNames: Record<string, string> = {
           v-if="!plannedTemplates.length"
           class="muted"
         >
-          这份方案未选择预算空表。请返回经营方案，上传并选择空表后重新生成。
+          这份方案未选择预算空表。请先在前两步读取并核对空表，再选择空表生成经营方案。
         </p>
         <article
           v-for="template in plannedTemplates"

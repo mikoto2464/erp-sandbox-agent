@@ -2,7 +2,7 @@ import base64
 import hashlib
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from erp_agent.application.answerer import AnswererService
@@ -41,16 +41,24 @@ from erp_agent.application.ports import (
     TaskContext,
 )
 from erp_agent.application.reader import StructuredReader
-from erp_agent.application.solver import LLMStrategyGenerator, SolverService
+from erp_agent.application.reading.incremental import merge_incremental
+from erp_agent.application.solver import (
+    CollaborativeStrategyGenerator,
+    LLMStrategyGenerator,
+    SolverService,
+)
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
+from erp_agent.application.template_reader import TemplateReader
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     KnowledgeState,
     ParsedDocument,
     PlanningContext,
     ProblemSnapshot,
+    ProblemSpec,
     ReadingInputs,
-    SearchConfig,
+    ReadingResult,
+    RuleSet,
     SolveRequest,
     SolverMode,
     SourceDocument,
@@ -59,7 +67,7 @@ from erp_agent.domain.validation import validate_reading
 
 
 def timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class WorkflowService:
@@ -202,8 +210,11 @@ class WorkflowService:
                 job = obj(value)
                 metadata = obj(job.get("metadata", {}))
                 references = ([metadata.get("document_id")] + array(metadata.get("document_ids", []))
+                              + array(metadata.get("source_document_ids", []))
                               if kind == "document" else
-                              [metadata.get("template_id")] + array(obj(metadata.get("generation", {})).get("template_ids", [])))
+                              [metadata.get("template_id")] + array(metadata.get("template_ids", []))
+                              + array(metadata.get("source_template_ids", []))
+                              + array(obj(metadata.get("generation", {})).get("template_ids", [])))
                 if kind == "document" and job.get("kind") == "solve" and job.get("status") in {"queued", "running"}:
                     snapshot = self.repository.snapshot(project_id, integer(metadata["version"]))
                     references += array(snapshot.get("document_ids", []))
@@ -281,15 +292,44 @@ class WorkflowService:
         inputs = self.inputs(project_id)
         if data and "input_revision" in data and integer(data["input_revision"], 0) != inputs.revision:
             raise ERPError("inputs_conflict", "输入内容已更新，请重新加载后读取。", 409)
+        versions = self.repository.versions(project_id)
+        expected_version = versions[0] if versions else 0
+        append = bool(data and data.get("append") is True and expected_version)
+        previous = self.problem(project_id, expected_version) if append else None
+        if previous:
+            old_annotations = {a.document_id: a.text for a in previous.inputs.annotations}
+            new_annotations = {a.document_id: a.text for a in inputs.annotations}
+            if (inputs.problem_text != previous.inputs.problem_text
+                    or inputs.supplement_text != previous.inputs.supplement_text
+                    or any(new_annotations.get(key) != value for key, value in old_annotations.items())
+                    or any(a.document_id in previous.document_ids
+                           and old_annotations.get(a.document_id) != a.text for a in inputs.annotations)):
+                raise ERPError("append_inputs_changed", "已有文字或说明已修改，请重新读取全部题目。", 409)
+            available = {obj(d)["source"]["id"] for d in self.documents(project_id)}
+            if set(previous.document_ids) - available:
+                raise ERPError("append_source_deleted", "已有来源被删除，请重新读取当前文件。", 409)
+            documents = tuple(d for d in documents if d.source.id not in previous.document_ids)
         extra_sources = input_sources(inputs, documents)
+        if previous:
+            old_extra = {d.source.id for d in previous.additional_sources}
+            extra_sources = tuple(d for d in extra_sources if d.source.id not in old_extra)
+        requested_templates = strings(data.get("template_ids", [])) if data else ()
+        templates = tuple(budget_template(self.repository.get("template", project_id, tid))
+                          for tid in requested_templates)
+        for tid in requested_templates:
+            self._require_upload(project_id, "template", tid)
+        active_templates = {obj(t)["source"]["id"]
+                            for t in self.repository.list("template", project_id)}
+        existing_templates = {t.template_id: t for t in previous.template_readings
+                              if t.template_id in active_templates} if previous else {}
+        new_templates = tuple(t for t in templates if t.source.id not in existing_templates
+                              or existing_templates[t.source.id].sha256 != t.source.sha256)
         for value in self.repository.list("job", project_id):
             job = obj(value)
             if job.get("kind") == "read" and job.get("status") in {"running", "queued"}:
                 raise ERPError("reading_in_progress", "当前项目正在读题，请等待完成。", 409)
-        if not documents and not inputs.problem_text:
-            raise ERPError("no_documents", "请上传文件或填写手动题目后读取。")
-        versions = self.repository.versions(project_id)
-        expected_version = versions[0] if versions else 0
+        if not documents and not extra_sources and not new_templates:
+            raise ERPError("no_new_sources", "没有待读取的新文件或空表。")
         binding = self.model_settings.capture_pool() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
@@ -307,32 +347,67 @@ class WorkflowService:
             fingerprint = hashlib.sha256(dumps({"inputs": inputs, "sources": [d.source for d in sources],
                 "parsers": [d.parser_version for d in sources], "reader": self.reader.limits,
                 "model": binding.metadata() if binding else None, "version": "reader-16"}).encode()).hexdigest()
-            memory = self.memory.scope(project_id, 0, fingerprint,
+            memory = self.memory.scope(project_id, previous.version if previous else 0, fingerprint,
                                        tuple(d.source.id for d in documents)) if self.memory else None
-            result = self.reader.read(sources, control, binding.client if binding else None, memory)
+            client = binding.client if binding else self.reader.llm
+            result = self.reader.read(sources, control, client, memory) if sources else (
+                previous.reading if previous else ReadingResult(
+                    ProblemSpec("题目", ()), RuleSet(()), (), "未读取题目"))
+            all_ids = tuple(dict.fromkeys((previous.document_ids if previous else ())
+                                         + tuple(d.source.id for d in documents)))
+            all_extra = tuple(dict.fromkeys((previous.additional_sources if previous else ())
+                                           + extra_sources + tuple(refreshed)))
+            all_documents = tuple(parsed_document(self.repository.get("document", project_id, tid))
+                                  for tid in all_ids) + all_extra
+            if previous and sources:
+                result = merge_incremental(previous.reading, result, all_documents)
+                groups = {e.id: "existing" for d in all_documents for e in d.evidence}
+                groups.update({e.id: "added" for d in sources for e in d.evidence})
+                findings = self.reader.reviewer.review(result,
+                    tuple(e for d in all_documents for e in d.evidence), client, control,
+                    self.reader.limits.max_request_chars, 0, review_groups=groups)
+                result = validate_reading(replace(result, issues=result.issues + findings),
+                                         tuple(e for d in all_documents for e in d.evidence))
             result = replace(result, rules=replace(result.rules, version=expected_version + 1))
+            template_results = dict(existing_templates)
+            template_client = MemoryLLMClient(client, memory, "空表项目与期间") if memory else client
+            for template in new_templates:
+                self._require_upload(project_id, "template", template.source.id)
+                template_results[template.source.id] = TemplateReader().read(
+                    template, template_client, control, result)
+            if not sources and not previous:
+                result = validate_reading(result, ())
             control.checkpoint("saving_reading")
             snapshot = ProblemSnapshot(project_id, expected_version + 1, timestamp(),
-                                       tuple(d.source.id for d in documents), result,
-                                       inputs=inputs, additional_sources=extra_sources + tuple(refreshed))
+                                       all_ids, result,
+                                       inputs=inputs, additional_sources=all_extra,
+                                       template_readings=tuple(template_results.values()))
             saved = self.repository.save_snapshot(
                 project_id, obj(to_json(snapshot)), expected_version,
             )
             if self.memory:
                 self.memory.remember(problem_snapshot(saved))
             return {"version": saved["version"], "issues": len(result.issues),
-                    "needs_input": any(i.severity == "error" for i in result.issues)}
+                    "needs_input": any(i.severity == "error" for i in result.issues)
+                    or any(not t.reviewed for t in snapshot.template_readings)}
 
         return self.jobs.submit(project_id, "read", operation,
                                 {"document_ids": to_json(tuple(d.source.id for d in documents)),
                                  "expected_version": expected_version,
                                  "input_revision": inputs.revision,
+                                 "append": append, "template_ids": list(requested_templates),
+                                 "source_document_ids": list(previous.document_ids) if previous else [],
+                                 "source_template_ids": list(existing_templates),
                                  "model_preset": binding.metadata() if binding else None})
 
     def revise(self, project_id: str, data: JSONObject) -> JSONObject:
         self.project(project_id)
         expected = integer(data.get("expected_version"))
         old = problem_snapshot(self.repository.snapshot(project_id, expected))
+        active_templates = {obj(t)["source"]["id"]
+                            for t in self.repository.list("template", project_id)}
+        old = replace(old, template_readings=tuple(t for t in old.template_readings
+                                                  if t.template_id in active_templates))
         note = string(data.get("note", "")).strip() or "默认"
         payload = obj(data.get("reading"))
         reading = decode_reading(dumps(payload), old.reading.model)
@@ -346,8 +421,24 @@ class WorkflowService:
         reading = validate_reading(reading, evidence)
         reading = replace(reading, rules=replace(reading.rules, version=expected + 1),
                           raw_response=old.reading.raw_response)
+        template_reviews = old.template_readings
+        if "template_reviews" in data:
+            updates = {string(t["template_id"]): t for value in array(data["template_reviews"])
+                       for t in (obj(value, {"template_id", "reviewed", "explanation"}),)}
+            if set(updates) - {t.template_id for t in template_reviews}:
+                raise ERPError("template_not_read", "空表尚未经过 Reader 解析。", 409)
+            for template in template_reviews:
+                update = updates.get(template.template_id)
+                if (update and update.get("reviewed") is True
+                        and any(i.severity != "info" for i in template.issues)
+                        and not string(update.get("explanation", "")).strip()):
+                    raise ERPError("template_review_answer", "空表存在疑点，请填写处理说明后确认。")
+            template_reviews = tuple(replace(t,
+                reviewed=updates[t.template_id].get("reviewed") is True,
+                explanation=string(updates[t.template_id].get("explanation", "")))
+                if t.template_id in updates else t for t in template_reviews)
         snapshot = ProblemSnapshot(project_id, expected + 1, timestamp(), old.document_ids,
-                                   reading, note, old.inputs, old.additional_sources)
+                                   reading, note, old.inputs, old.additional_sources, template_reviews)
         saved = self.repository.save_snapshot(project_id, obj(to_json(snapshot)), expected)
         if self.memory:
             self.memory.remember(problem_snapshot(saved))
@@ -370,17 +461,12 @@ class WorkflowService:
             raise ERPError("reading_needs_revision", "请先修正读题错误并保存新版本。", 409)
         if not snapshot.reading.problem.years or not snapshot.reading.problem.periods_per_year:
             raise ERPError("reading_horizon_missing", "经营周期存在无效值或冲突，请在题目数据中修正并保存后生成方案。", 409)
-        try:
-            mode = SolverMode(string(data.get("mode", self.default_solver.value)))
-        except ValueError as exc:
-            raise ERPError("invalid_solver_mode", "解题策略无效。") from exc
-        if mode == SolverMode.LLM_MONTE_CARLO and not self.solver.evaluator.supports_scoring:
-            raise ERPError("simulation_not_ready", "蒙特卡罗模式等待经营仿真内核实现。", 409)
+        if data.get("mode", "llm_only") != "llm_only":
+            raise ERPError("solver_mode_removed", "蒙特卡罗已移除，请使用协作生成方案。", 409)
+        mode = SolverMode.LLM_ONLY
         if not self.reader.llm.configured:
             raise ERPError("llm_not_configured", "请在服务端配置模型。", 503)
         config = generation_config(obj(data.get("generation", {})))
-        if mode == SolverMode.LLM_MONTE_CARLO and config.template_ids:
-            raise ERPError("budget_search_unavailable", "预算条目规划当前仅支持单 LLM 模式。", 409)
         previous_plan = None
         requirements = ()
         if config.previous_solution_id:
@@ -397,12 +483,15 @@ class WorkflowService:
                           for template_id in config.template_ids)
         for template_id in config.template_ids:
             self._require_upload(project_id, "template", template_id)
+            interpretation = next((t for t in snapshot.template_readings
+                                   if t.template_id == template_id), None)
+            template = next(t for t in templates if t.source.id == template_id)
+            if (not interpretation or not interpretation.reviewed
+                    or interpretation.sha256 != template.source.sha256):
+                raise ERPError("template_not_reviewed", "空表必须先在前两步读取并核对后才能生成方案。", 409)
         if len(dumps(budget_material(templates))) > 1500000:
             raise ERPError("template_context_limit", "所选预算表内容过多，请精简或减少模板。")
-        request = SolveRequest(snapshot, mode, SearchConfig(
-            integer(data.get("seed", 42), 0, 2**32 - 1),
-            integer(data.get("candidates", 100), 1, 2000),
-        ), PlanningContext(config, templates, previous_plan))
+        request = SolveRequest(snapshot, mode, context=PlanningContext(config, templates, previous_plan))
         binding = self.model_settings.capture_pool() if self.model_settings else None
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
@@ -418,20 +507,17 @@ class WorkflowService:
                         "solver:" + hashlib.sha256(dumps(config).encode()).hexdigest())
                     role_memory.put("requirements", {"generation": to_json(config)})
                     client = MemoryLLMClient(client, role_memory, "经营策略 " + dumps(config))
-                generator = LLMStrategyGenerator(
-                    client,
-                    lambda: control.checkpoint("repairing_strategy"),
-                    search_parameters=mode == SolverMode.LLM_MONTE_CARLO,
-                )
+                generator = CollaborativeStrategyGenerator(client, control)
             result = self.solver.solve(request, control, generator)
             report_task(control, TaskContext("solver", "Solver", "策略生成", snapshot.reading.problem.title),
                         "succeeded" if result.evaluation.feasible else "needs_input")
             self.repository.put("solution", project_id, result.id, result)
+            if self.memory:
+                self.memory.remember_solution(result)
             return {"solution_id": result.id, "verified": result.evaluation.verified,
                     "needs_input": not result.evaluation.feasible}
 
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
-                                 "search": to_json(request.search),
-                                 "generation": to_json(config), "prompt_version": "solver-4",
+                                 "generation": to_json(config), "prompt_version": "solver-5",
                                  "model_preset": binding.metadata() if binding else None})

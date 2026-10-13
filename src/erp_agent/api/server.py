@@ -28,7 +28,6 @@ from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerato
 from erp_agent.application.workflow import WorkflowService
 from erp_agent.config import Settings, load_env_file
 from erp_agent.domain.errors import ERPError
-from erp_agent.domain.models import SolverMode
 
 ID = re.compile(r"^[a-f0-9]{32}$")
 
@@ -157,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"llm_configured": workflow.reader.llm.configured,
                         "simulation_ready": workflow.solver.evaluator.supports_scoring,
                         "default_solver": self.server.settings.default_solver.value,
-                        "solver_modes": [m.value for m in SolverMode],
+                        "solver_modes": ["llm_only"],
                         "max_upload_mb": self.server.settings.max_upload_mb})
             return
         if path == "/api/projects":

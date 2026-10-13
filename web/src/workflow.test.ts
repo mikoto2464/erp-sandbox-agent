@@ -86,6 +86,8 @@ function setup() {
     artifacts: Artifact[] = [];
   let snapshot: Snapshot = {
     version: 1,
+    document_ids: ['doc'],
+    template_readings: [],
     inputs,
     additional_sources: [],
     reading: {
@@ -168,7 +170,19 @@ function setup() {
     return { ok: true, status: 200, json: async () => structuredClone(data) };
   });
   vi.stubGlobal('fetch', fetcher);
-  return { router, jobs, fetcher, solutions, templates, mappings, artifacts, documents };
+  return {
+    router,
+    jobs,
+    fetcher,
+    solutions,
+    templates,
+    mappings,
+    artifacts,
+    documents,
+    setTemplateReadings: (values: NonNullable<Snapshot['template_readings']>) => {
+      snapshot.template_readings = values;
+    },
+  };
 }
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -216,7 +230,7 @@ describe('Vue migration', () => {
     expect(workspace.inputs.value.revision).toBe(2);
     expect(workspace.inputsDirty.value).toBe(true);
     uploaded.unmount();
-    const solver = mount(SolverStep, { global });
+    const solver = mount(UploadStep, { global });
     expect(workspace.templateIds.value).toContain('template');
     await solver.find('[aria-label="删除预算.xlsx"]').trigger('click');
     await flushPromises();
@@ -355,7 +369,7 @@ describe('Vue migration', () => {
     workspace.dispose();
   });
   it('generates with tone and a parsed budget, then revises a selected plan without replacing it', async () => {
-    const { router, fetcher, jobs, solutions, templates } = setup();
+    const { router, fetcher, jobs, solutions, templates, setTemplateReadings } = setup();
     await router.push(`/projects/${projectId}/steps/3`);
     const workspace = useWorkspace(router);
     await workspace.initialize();
@@ -384,7 +398,28 @@ describe('Vue migration', () => {
       warnings: [],
     });
     jobs.at(-1)!.status = 'succeeded';
+    setTemplateReadings([
+      {
+        template_id: 'template',
+        sha256: 'hash',
+        reviewed: true,
+        explanation: '',
+        sheets: [],
+        issues: [],
+      },
+    ]);
+    workspace.snapshot.value!.template_readings = [
+      {
+        template_id: 'template',
+        sha256: 'hash',
+        reviewed: true,
+        explanation: '',
+        sheets: [],
+        issues: [],
+      },
+    ];
     await workspace.refresh();
+    workspace.templateIds.value = ['template'];
     await flushPromises();
     await wrapper
       .findAll('button')

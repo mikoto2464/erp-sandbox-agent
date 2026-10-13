@@ -31,6 +31,7 @@ from erp_agent.application.workbook_mapper import WorkbookMapper
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     ArtifactManifest,
+    BudgetTemplate,
     OutputSource,
     ReportData,
     WorkbookEntry,
@@ -87,7 +88,7 @@ class AnswererService:
     def _analyze(self, project_id: str, data: JSONObject) -> JSONObject:
         report = self.context(project_id, string(data.get('solution_id'), 100))
         template = budget_template(self.repository.get('template', project_id, string(data.get('template_id'), 100)))
-        self._require_planned_template(report, template.source.id)
+        self._require_planned_template(report, template)
         self._check_active(project_id, 'mapping', report.solution.id, template.source.id)
         binding = self.models.capture_pool()
         if not binding.client.configured:
@@ -99,6 +100,7 @@ class AnswererService:
             client = TaskLLMClient(binding.client, control, task)
             if self.memory:
                 self.memory.remember(report.snapshot)
+                self.memory.remember_solution(report.solution)
                 shared = self.memory.scope(project_id, report.snapshot.version,
                                             f"mapper:{report.solution.id}:{template.source.sha256}")
                 shared.put("solution", {"solution_id": report.solution.id,
@@ -121,8 +123,8 @@ class AnswererService:
             if integer(data.get('expected_revision')) != mapping.revision:
                 raise ERPError('mapping_conflict', '映射已经更新，请重新打开后修改。', 409)
             report = self.context(project_id, mapping.solution_id)
-            self._require_planned_template(report, mapping.template_id)
             template = budget_template(self.repository.get('template', project_id, mapping.template_id))
+            self._require_planned_template(report, template)
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板内容已变化，请重新分析。', 409)
             entries = workbook_entries(data.get('entries'))
@@ -152,8 +154,8 @@ class AnswererService:
             mapping = workbook_mapping(self.repository.get('mapping', project_id, string(data['mapping_id'])))
             if mapping.solution_id != report.solution.id or not mapping.confirmed:
                 raise ERPError('mapping_not_confirmed', '请先确认这份方案的预算表映射。', 409)
-            self._require_planned_template(report, mapping.template_id)
             template = budget_template(self.repository.get('template', project_id, mapping.template_id))
+            self._require_planned_template(report, template)
             if template.source.sha256 != mapping.template_sha256:
                 raise ERPError('template_changed', '模板已变更，请重新分析。', 409)
             if any(i.severity == 'error' for i in validate_mapping(template, mapping.entries, report.solution, report.snapshot)):
@@ -192,7 +194,14 @@ class AnswererService:
         })
 
     @staticmethod
-    def _require_planned_template(report: ReportData, template_id: str) -> None:
+    def _require_planned_template(report: ReportData, template: BudgetTemplate) -> None:
+        template_id = template.source.id
+        reading = next((t for t in report.snapshot.template_readings
+                        if t.template_id == template_id), None)
+        if not reading or not reading.reviewed:
+            raise ERPError('template_not_reviewed', '空表须先经过读题解析与核对，再生成方案。', 409)
+        if reading.sha256 != template.source.sha256:
+            raise ERPError('template_changed', '空表与已读版本不一致，请重新读取并生成方案。', 409)
         if template_id not in report.solution.generation.template_ids:
             raise ERPError('template_not_planned', '请在经营方案处选择这份空表并生成方案后再填写。', 409)
         if not any(item.template_id == template_id for item in report.solution.plan.budget_items):

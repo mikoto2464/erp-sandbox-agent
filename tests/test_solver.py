@@ -8,7 +8,7 @@ from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerato
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     BudgetCell, BudgetSheet, BudgetTemplate, GenerationConfig, PlanningContext, PlanTone,
-    SearchConfig, SolveRequest, SolverMode, SourceDocument,
+    SolveRequest, SolverMode, SourceDocument,
 )
 from tests.helpers import Control, FakeLLM, QuadraticEvaluator, proposal_json, snapshot
 
@@ -96,24 +96,13 @@ class SolverTests(unittest.TestCase):
         self.assertFalse(result.evaluation.verified)
         self.assertIsNone(result.evaluation.score)
 
-    def test_monte_carlo_seed_improves_baseline(self):
-        solver = SolverService(LLMStrategyGenerator(FakeLLM(proposal_json())), QuadraticEvaluator())
-        request = SolveRequest(snapshot(), SolverMode.LLM_MONTE_CARLO, SearchConfig(42, 100))
-        result = solver.solve(request, Control())
-        replay = solver.solve(request, Control())
-        self.assertEqual(result.plan.actions[0].amount, 16)
-        self.assertEqual(result.evaluation.score, -1)
-        self.assertEqual(result.baseline_score, -25)
-        self.assertEqual(result.candidate_plans, replay.candidate_plans)
-        self.assertEqual(result.evaluated_candidates, 100)
-        self.assertLess(result.feasible_candidates, 100)
-
-    def test_monte_carlo_requires_scoring_before_llm_call(self):
+    def test_removed_monte_carlo_is_rejected_before_model_call(self):
         llm = FakeLLM(proposal_json())
-        with self.assertRaises(ERPError) as caught:
-            SolverService(LLMStrategyGenerator(llm), DraftPlanEvaluator()).solve(
-                SolveRequest(snapshot(), SolverMode.LLM_MONTE_CARLO), Control())
-        self.assertEqual(caught.exception.code, "simulation_not_ready")
+        for evaluator in (DraftPlanEvaluator(), QuadraticEvaluator()):
+            with self.assertRaises(ERPError) as caught:
+                SolverService(LLMStrategyGenerator(llm), evaluator).solve(
+                    SolveRequest(snapshot(), SolverMode.LLM_MONTE_CARLO), Control())
+            self.assertEqual(caught.exception.code, "solver_mode_removed")
         self.assertFalse(llm.calls)
 
     def test_periods_and_unknown_entities_rejected(self):
@@ -123,17 +112,6 @@ class SolverTests(unittest.TestCase):
         self.assertFalse(evaluation.feasible)
         self.assertEqual({i.code for i in evaluation.issues if i.severity == "error"},
                          {"plan.period_coverage", "plan.entity"})
-
-    def test_mode_switch_preserves_input_and_baseline(self):
-        solver = SolverService(LLMStrategyGenerator(FakeLLM(proposal_json())), QuadraticEvaluator())
-        problem = snapshot()
-        plain = solver.solve(SolveRequest(problem, SolverMode.LLM_ONLY), Control())
-        sampled = solver.solve(SolveRequest(problem, SolverMode.LLM_MONTE_CARLO,
-                                            SearchConfig(1, 1)), Control())
-        self.assertEqual(plain.plan, sampled.plan)
-        self.assertEqual(plain.problem_version, sampled.problem_version)
-        self.assertEqual(plain.mode, SolverMode.LLM_ONLY)
-        self.assertEqual(sampled.mode, SolverMode.LLM_MONTE_CARLO)
 
     def test_fenced_json_is_unwrapped_without_relaxing_contract(self):
         content = '```json\n' + proposal_json() + '\n```'
@@ -154,8 +132,7 @@ class SolverTests(unittest.TestCase):
                 return LLMResponse('invalid' if len(calls) == 1 else proposal_json(), 'same-model')
 
         repairs = []
-        result = LLMStrategyGenerator(Client(), lambda: repairs.append(True),
-                                      search_parameters=False).propose(problem)
+        result = LLMStrategyGenerator(Client(), lambda: repairs.append(True)).propose(problem)
         self.assertEqual(result.model, 'same-model')
         self.assertEqual(len(calls), 2)
         self.assertEqual(repairs, [True])

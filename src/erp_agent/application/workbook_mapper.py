@@ -65,7 +65,7 @@ class WorkbookMapper:
         issues = validate_mapping(template, entries, solution, snapshot)
         return WorkbookMapping(uuid4().hex, solution.project_id, solution.id, solution.problem_version,
                                template.source.id, template.source.sha256, entries, issues,
-                               model=model, prompt_version="mapper-3")
+                               model=model, prompt_version="mapper-4")
 
     def _map_batch(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
                    control: RunControl, snapshot: ProblemSnapshot | None,
@@ -77,6 +77,9 @@ class WorkbookMapper:
                     "sources": output_sources(solution, snapshot), "plan": solution.plan,
                     "problem": snapshot.reading.problem if snapshot else None,
                     "rules": snapshot.reading.rules if snapshot else None,
+                    "template_readings": tuple(
+                        t for t in snapshot.template_readings if t.template_id == template.source.id
+                    ) if snapshot else (),
                     "evaluation": solution.evaluation}
         batch_sheets = {s.name for s in template.sheets}
         planned = tuple((i, item) for i, item in enumerate(solution.plan.budget_items)

@@ -18,7 +18,6 @@ import type {
   ReadingInputs,
   Snapshot,
   Solution,
-  SolverMode,
   Status,
 } from '../lib/types';
 import { useToasts } from './useToasts';
@@ -48,9 +47,6 @@ export function useWorkspace(router: Router) {
     readingDirty = ref(false),
     taskOpen = ref(false),
     pendingNavigation = ref<null | (() => void)>(null);
-  const solverMode = ref<SolverMode>('llm_only'),
-    seed = ref(42),
-    candidates = ref(100);
   const planTone = ref<PlanTone>('balanced'),
     customPrompt = ref(''),
     templateIds = ref<string[]>([]),
@@ -70,13 +66,22 @@ export function useWorkspace(router: Router) {
       canSolve.value &&
       !templateParsing.value &&
       !operations.value.has('upload-template') &&
-      (solverMode.value !== 'llm_only' ||
-        templateIds.value.every((id) =>
-          templates.value.some((template) => template.source.id === id),
-        )) &&
+      templateIds.value.every((id) =>
+        templates.value.some(
+          (template) =>
+            template.source.id === id &&
+            snapshot.value?.template_readings?.some(
+              (reading) =>
+                reading.template_id === id &&
+                reading.reviewed &&
+                reading.sha256 === template.source.sha256,
+            ),
+        ),
+      ) &&
       (planTone.value !== 'custom' || !!customPrompt.value.trim()),
   );
   const selected = ref<string[]>([]),
+    readTemplateIds = ref<string[]>([]),
     operations = ref(new Set<string>()),
     notifications = useToasts();
   let generation = 0,
@@ -131,7 +136,11 @@ export function useWorkspace(router: Router) {
     () =>
       !!project.value &&
       !!status.value?.llm_configured &&
-      !!(selected.value.length || inputs.value.problem_text.trim()) &&
+      !!(
+        selected.value.length ||
+        readTemplateIds.value.length ||
+        inputs.value.problem_text.trim()
+      ) &&
       !activeRead.value &&
       !loading.value,
   );
@@ -143,8 +152,7 @@ export function useWorkspace(router: Router) {
       !errors.value &&
       horizon.value &&
       !activeSolve.value &&
-      !!status.value?.llm_configured &&
-      (solverMode.value !== 'llm_monte_carlo' || !!status.value.simulation_ready),
+      !!status.value?.llm_configured,
   );
   const unsaved = computed(() => inputsDirty.value || readingDirty.value);
   function notify(text: string, kind = 'info') {
@@ -243,6 +251,15 @@ export function useWorkspace(router: Router) {
       expected_version: snapshot.value.version,
       note: '默认',
       reading: cloneJson(editable.value),
+      template_reviews: (snapshot.value.template_readings || [])
+        .filter((reading) =>
+          templates.value.some((template) => template.source.id === reading.template_id),
+        )
+        .map((reading) => ({
+          template_id: reading.template_id,
+          reviewed: reading.reviewed,
+          explanation: reading.explanation,
+        })),
     });
     if (captured !== generation) return;
     if (sequence !== readingSequence) {
@@ -262,13 +279,19 @@ export function useWorkspace(router: Router) {
       notify('请先修正题目中的错误或周期冲突。');
     } else setStep(3);
   }
-  async function startRead() {
+  async function startRead(
+    append = !!snapshot.value,
+    documentIds = selected.value,
+    templateIds = readTemplateIds.value,
+  ) {
     if (readingDirty.value) throw new Error('请先保存读题修改。');
     const captured = generation;
     await saveInputs();
     if (captured !== generation) return;
     await post(base() + '/read', {
-      document_ids: selected.value,
+      document_ids: documentIds,
+      template_ids: templateIds,
+      append,
       input_revision: inputs.value.revision,
     });
     if (captured === generation) {
@@ -303,7 +326,6 @@ export function useWorkspace(router: Router) {
     if (!project.value) return;
     const captured = generation,
       url = base();
-    if (files.length + templateIds.value.length > 3) throw new Error('最多选择 3 份预算空表。');
     for (const file of files) {
       if (!/\.(xlsx|xls)$/i.test(file.name)) throw new Error('预算空表支持 XLSX 或 XLS。');
       if (file.size > (status.value?.max_upload_mb || 20) * 1024 * 1024)
@@ -317,7 +339,7 @@ export function useWorkspace(router: Router) {
         body: file,
       });
       if (captured !== generation) return;
-      if (job.metadata.template_id) templateIds.value.push(job.metadata.template_id);
+      if (job.metadata.template_id) readTemplateIds.value.push(job.metadata.template_id);
     }
     notify('预算表已提交解析。');
     await refresh();
@@ -342,6 +364,7 @@ export function useWorkspace(router: Router) {
     } else {
       templates.value = templates.value.filter((template) => template.source.id !== id);
       templateIds.value = templateIds.value.filter((value) => value !== id);
+      readTemplateIds.value = readTemplateIds.value.filter((value) => value !== id);
     }
     await refresh();
     notify('文件已删除。', 'success');
@@ -364,15 +387,12 @@ export function useWorkspace(router: Router) {
     const config: GenerationConfig = {
       tone: planTone.value,
       custom_prompt: planTone.value === 'custom' ? customPrompt.value.trim() : '',
-      template_ids: solverMode.value === 'llm_only' ? templateIds.value : [],
+      template_ids: templateIds.value,
       previous_solution_id: previousSolutionId,
       revision_prompt: revisionPrompt.trim(),
     };
     await post(url + '/solve', {
       version: snapshot.value?.version,
-      mode: solverMode.value,
-      seed: seed.value,
-      candidates: candidates.value,
       generation: config,
     });
     if (captured !== generation) return;
@@ -428,14 +448,14 @@ export function useWorkspace(router: Router) {
     else if (job.kind === 'read') {
       await saveInputs();
       await post(base() + '/read', {
-        document_ids: selected.value,
+        document_ids: job.metadata.document_ids || selected.value,
+        template_ids: job.metadata.template_ids || readTemplateIds.value,
+        append: job.metadata.append || false,
         input_revision: inputs.value.revision,
       });
     } else
       await post(base() + '/solve', {
         version: job.metadata.version,
-        mode: job.metadata.mode,
-        ...job.metadata.search,
         generation: job.metadata.generation,
       });
     await refresh();
@@ -452,14 +472,13 @@ export function useWorkspace(router: Router) {
       )
         continue;
       const targetId = project.value!.id,
-        targetStep =
-          job.kind === 'parse'
-            ? 1
-            : job.kind === 'read'
-              ? 2
-              : ['mapping', 'artifact'].includes(job.kind)
-                ? 4
-                : 3;
+        targetStep = ['parse', 'template'].includes(job.kind)
+          ? 1
+          : job.kind === 'read'
+            ? 2
+            : ['mapping', 'artifact'].includes(job.kind)
+              ? 4
+              : 3;
       const name =
           job.kind === 'parse'
             ? '文件解析'
@@ -518,6 +537,7 @@ export function useWorkspace(router: Router) {
     const planChanged = newPlan && !solutions.value.some((solution) => solution.id === newPlan.id);
     solutions.value = plans;
     templates.value = budgetTemplates;
+    if (initial) readTemplateIds.value = budgetTemplates.map((template) => template.source.id);
     mappings.value = latestMappings;
     artifacts.value = latestArtifacts;
     if (initial && newPlan) selectSolution(newPlan.id);
@@ -561,6 +581,7 @@ export function useWorkspace(router: Router) {
     jobs.value = [];
     solutions.value = [];
     templates.value = [];
+    readTemplateIds.value = [];
     mappings.value = [];
     artifacts.value = [];
     templateIds.value = [];
@@ -605,7 +626,6 @@ export function useWorkspace(router: Router) {
     authenticated.value = true;
     await loadStatus();
     projects.value = await request<Project[]>('/api/projects');
-    solverMode.value = status.value!.default_solver;
     await syncRoute();
   }
   async function initialize() {
@@ -702,7 +722,6 @@ export function useWorkspace(router: Router) {
     readingDirty,
     taskOpen,
     pendingNavigation,
-    solverMode,
     planTone,
     customPrompt,
     templates,
@@ -716,9 +735,8 @@ export function useWorkspace(router: Router) {
     generationReady,
     currentSolution,
     selectedSolutionId,
-    seed,
-    candidates,
     selected,
+    readTemplateIds,
     operations,
     notifications,
     currentStep,

@@ -110,7 +110,7 @@ class Settings:
             reader_max_request_chars=int(os.getenv("ERP_READER_MAX_REQUEST_CHARS", "100000")),
             reader_max_batch_units=int(os.getenv("ERP_READER_MAX_BATCH_UNITS", "16")),
             reader_concurrency=int(os.getenv("ERP_READER_CONCURRENCY", "4")),
-            default_solver=SolverMode(os.getenv("ERP_DEFAULT_SOLVER", "llm_only")),
+            default_solver=SolverMode.LLM_ONLY,
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
             max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),
         )

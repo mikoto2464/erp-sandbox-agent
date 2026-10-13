@@ -38,6 +38,9 @@ class FakeLLM:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         self.calls.append(request)
+        if request.schema_name == "erp_solver_specialist":
+            return LLMResponse(dumps({"recommendations": [], "dependencies": [], "risks": []}),
+                               "test-model")
         return LLMResponse(self.response, "test-model")
 
 

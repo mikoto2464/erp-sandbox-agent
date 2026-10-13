@@ -112,6 +112,7 @@ class ExtractionRole:
             "focus_evidence_ids": [aliases.get(eid, eid) for eid in batch.focus_ids],
         }
         if memory:
+            payload["shared_alignment"] = memory.alignment()
             payload["memory"] = to_json(memory.recall(dumps(batch.payload())[:2000], 800))
         system_size = len(self.system) + len(self.schema) + 16
         if facts:

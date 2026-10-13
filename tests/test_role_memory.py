@@ -10,8 +10,10 @@ from erp_agent.application.input_sources import text_source
 from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.application.ports import LLMRequest, LLMResponse
 from erp_agent.application.reader import StructuredReader
-from erp_agent.application.reading.roles import ReaderLimits, ExtractionRole
+from erp_agent.application.reading.roles import ExtractionRole, ReaderLimits
+from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator, SolverService
 from erp_agent.domain.errors import ERPError
+from erp_agent.domain.models import SolveRequest, SolverMode, TemplateReading, TemplateSheetReading
 from tests.helpers import Control, FakeLLM, snapshot
 
 
@@ -93,9 +95,30 @@ class MemoryTests(unittest.TestCase):
         self.memory = SQLiteMemoryService(self.path)
         client.fail = False
         reader.read((document,), Control(), memory=self.memory.scope("project", 0, "same-input"))
+
         self.assertEqual(sum(loads(r.user)["role"] == "facts" for r in client.calls), 1)
         reader.read((document,), Control(), memory=self.memory.scope("project", 0, "changed-input"))
         self.assertEqual(sum(loads(r.user)["role"] == "facts" for r in client.calls), 2)
+
+    def test_reader_solver_mapper_share_alignment_and_solution_with_version_isolation(self):
+        problem = replace(snapshot(), template_readings=(TemplateReading('template', 'hash',
+            (TemplateSheetReading('资金预算', '现金输入', '第1期'),), reviewed=True),))
+        self.memory.remember(problem)
+        alignment = self.memory.scope(problem.project_id, 1, 'reader').alignment()
+        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, 'solver').alignment())
+        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, 'mapper').alignment())
+        self.assertEqual(alignment['templates'][0]['sha256'], 'hash')
+        self.assertIn('资金预算', dumps(self.memory.scope(problem.project_id, 1, 'solver')
+                                      .recall('资金预算')))
+        from tests.helpers import proposal_json
+        solution = SolverService(LLMStrategyGenerator(FakeLLM(proposal_json())),
+                                 DraftPlanEvaluator()).solve(
+            SolveRequest(problem, SolverMode.LLM_ONLY), Control())
+        self.memory.remember_solution(solution)
+        saved = self.memory.scope(problem.project_id, 1, 'mapper').get('solution:' + solution.id)
+        self.assertEqual(saved['plan']['actions'][0]['amount'], '10')
+        self.assertNotIn('raw_response', saved)
+        self.assertIsNone(self.memory.scope(problem.project_id, 2, 'mapper').get('solution:' + solution.id))
 
     def test_deleted_upload_and_project_cannot_receive_late_memory(self):
         scope = self.memory.scope("project", 0, "run", ("doc",))

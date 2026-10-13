@@ -1,15 +1,45 @@
 from dataclasses import replace
 
 from erp_agent.application.contracts import (
-    JSONObject, JSONValue, array, decode_plan, decode_reading, decimal, dumps, integer, obj, string, strings,
+    JSONObject,
+    JSONValue,
+    array,
+    decimal,
+    decode_plan,
+    decode_reading,
+    dumps,
+    integer,
+    obj,
+    string,
+    strings,
 )
-from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.errors import ERPError
+from erp_agent.domain.evidence import contextualize_document
 from erp_agent.domain.models import (
-    BudgetCell, BudgetFormulaReference, BudgetSheet, BudgetTemplate, BudgetValidation, Cell,
-    DocumentAnnotation, DocumentBlock, Evaluation, Evidence, GenerationConfig, Issue,
-    ParsedDocument, PlanTone, ProblemSnapshot, ReadingInputs, SolutionBundle, SolverMode,
-    SourceDocument, WorkbookEntry, WorkbookMapping,
+    BudgetCell,
+    BudgetFormulaReference,
+    BudgetSheet,
+    BudgetTemplate,
+    BudgetValidation,
+    Cell,
+    DocumentAnnotation,
+    DocumentBlock,
+    Evaluation,
+    Evidence,
+    GenerationConfig,
+    Issue,
+    ParsedDocument,
+    PlanTone,
+    ProblemSnapshot,
+    ReadingInputs,
+    SolutionBundle,
+    SolverMode,
+    SourceDocument,
+    TemplateInputGroup,
+    TemplateReading,
+    TemplateSheetReading,
+    WorkbookEntry,
+    WorkbookMapping,
 )
 
 
@@ -148,7 +178,26 @@ def problem_snapshot(data: JSONObject) -> ProblemSnapshot:
     return ProblemSnapshot(string(data["project_id"]), integer(data["version"]),
                            string(data["created_at"]), strings(data["document_ids"]), reading,
                            string(data["revision_note"]), reading_inputs(obj(data.get("inputs", {}))),
-                           tuple(parsed_document(obj(d)) for d in array(data.get("additional_sources", []))))
+                           tuple(parsed_document(obj(d)) for d in array(data.get("additional_sources", []))),
+                           tuple(template_reading(obj(t)) for t in array(data.get("template_readings", []))))
+
+
+def template_reading(data: JSONObject) -> TemplateReading:
+    sheets = []
+    for value in array(data["sheets"]):
+        sheet = obj(value)
+        groups = tuple(TemplateInputGroup(string(g["label"]), string(g["range"]),
+                       string(g["unit"]), string(g["description"]))
+                       for value in array(sheet["input_groups"]) for g in (obj(value),))
+        sheets.append(TemplateSheetReading(string(sheet["name"]), string(sheet["purpose"]),
+                                           string(sheet["periods"]), groups))
+    issues = tuple(Issue(string(i["code"]), string(i["severity"]), string(i["target"]),
+                         string(i["message"]), strings(i.get("evidence_ids", [])))
+                   for value in array(data.get("issues", [])) for i in (obj(value),))
+    return TemplateReading(string(data["template_id"]), string(data["sha256"]), tuple(sheets),
+                           issues, data.get("reviewed") is True,
+                           string(data.get("explanation", "")),
+                           string(data.get("prompt_version", "template-reader-1")))
 
 
 def reading_inputs(data: JSONObject) -> ReadingInputs:

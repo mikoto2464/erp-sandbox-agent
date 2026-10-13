@@ -45,6 +45,22 @@ describe('reading progress and review summaries', () => {
     });
   });
 
+  it('includes template reading and solver roles while excluding model dispatch tasks', () => {
+    const task = { agent: 'Reader', parent_id: 'reader', role: '空表理解', status: 'succeeded' };
+    expect(readingProgress({ kind: 'read', tasks: [task] } as Job).total).toBe(1);
+    const roles = ['operations', 'finance', 'synthesis'].map((id, index) => ({
+      id,
+      agent: 'Solver',
+      parent_id: 'solver',
+      role: id,
+      status: index === 0 ? 'succeeded' : 'queued',
+    }));
+    const job = { kind: 'solve', tasks: [...roles, { ...roles[0], agent: '主 Agent' }] } as Job;
+    expect(readingProgress(job).total).toBe(3);
+    expect(readingProgress(job).processed).toBe(1);
+    expect(readingProgress(job).waiting).toBe(2);
+  });
+
   it('shows each specific cause once while preserving separate genuine concerns', () => {
     const issue = (code: string, target: string, message: string): Issue => ({
       code,

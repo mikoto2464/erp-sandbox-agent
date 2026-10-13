@@ -12,6 +12,7 @@ class KnowledgeState(str, Enum):
 
 class SolverMode(str, Enum):
     LLM_ONLY = "llm_only"
+    # 仅解码历史方案；新求解请求拒绝该值。
     LLM_MONTE_CARLO = "llm_monte_carlo"
 
 
@@ -164,6 +165,33 @@ class ReadingInputs:
 
 
 @dataclass(frozen=True)
+class TemplateInputGroup:
+    label: str
+    range: str
+    unit: str
+    description: str
+
+
+@dataclass(frozen=True)
+class TemplateSheetReading:
+    name: str
+    purpose: str
+    periods: str
+    input_groups: tuple[TemplateInputGroup, ...] = ()
+
+
+@dataclass(frozen=True)
+class TemplateReading:
+    template_id: str
+    sha256: str
+    sheets: tuple[TemplateSheetReading, ...]
+    issues: tuple[Issue, ...] = ()
+    reviewed: bool = False
+    explanation: str = ""
+    prompt_version: str = "template-reader-1"
+
+
+@dataclass(frozen=True)
 class ProblemSnapshot:
     project_id: str
     version: int
@@ -173,6 +201,7 @@ class ProblemSnapshot:
     revision_note: str = ""
     inputs: ReadingInputs = field(default_factory=ReadingInputs)
     additional_sources: tuple[ParsedDocument, ...] = ()
+    template_readings: tuple[TemplateReading, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -297,16 +326,9 @@ class Evaluation:
 
 
 @dataclass(frozen=True)
-class SearchConfig:
-    seed: int = 42
-    candidates: int = 100
-
-
-@dataclass(frozen=True)
 class SolveRequest:
     snapshot: ProblemSnapshot
     mode: SolverMode
-    search: SearchConfig = field(default_factory=SearchConfig)
     context: PlanningContext = field(default_factory=PlanningContext)
 
 
@@ -326,7 +348,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-4"
+    prompt_version: str = "solver-5"
 
 
 @dataclass(frozen=True)

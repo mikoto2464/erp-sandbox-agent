@@ -163,6 +163,8 @@ export interface ReadingInputs {
   annotations: { document_id: string; text: string }[];
 }
 export interface Snapshot {
+  document_ids?: string[];
+  template_readings?: TemplateReading[];
   version: number;
   inputs: ReadingInputs;
   additional_sources: ParsedDocument[];
@@ -177,6 +179,19 @@ export interface Snapshot {
     issues: Issue[];
   };
 }
+export interface TemplateReading {
+  template_id: string;
+  sha256: string;
+  reviewed: boolean;
+  explanation: string;
+  sheets: {
+    name: string;
+    purpose: string;
+    periods: string;
+    input_groups: { label: string; range: string; unit: string; description: string }[];
+  }[];
+  issues: Issue[];
+}
 export interface ModelLoad {
   id: string;
   name: string;
@@ -186,6 +201,8 @@ export interface ModelLoad {
   available: number;
 }
 export interface AgentTask {
+  input_group_count?: number;
+  recommendation_count?: number;
   task_kind?: string;
   planned_count?: number;
   batch_count?: number;
@@ -224,6 +241,9 @@ export interface Job {
   status: string;
   stage: string;
   metadata: {
+    document_ids?: string[];
+    template_ids?: string[];
+    append?: boolean;
     document_id?: string;
     template_id?: string;
     filename?: string;

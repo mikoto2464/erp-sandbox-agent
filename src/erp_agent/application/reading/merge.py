@@ -31,6 +31,32 @@ def _signature(fact: Fact) -> tuple[object, ...]:
 
 
 class ReadingMerger:
+    @staticmethod
+    def merge_fact(previous: Fact, current: Fact) -> tuple[Fact, Issue | None]:
+        refs = tuple(dict.fromkeys(previous.evidence_ids + current.evidence_ids))
+        explanations = "；".join(dict.fromkeys(filter(None, (
+            previous.explanation, current.explanation))))
+        if KnowledgeState.CONFLICTED not in {previous.state, current.state}:
+            if previous.value is None and current.value is not None:
+                return replace(current, id=previous.id, entity_id=previous.entity_id,
+                               evidence_ids=refs, explanation=explanations), None
+            if previous.value is not None and current.value is None:
+                return replace(previous, evidence_ids=refs, explanation=explanations), None
+        if _signature(previous) == _signature(current):
+            state = (KnowledgeState.CONFLICTED if KnowledgeState.CONFLICTED in
+                     {previous.state, current.state} else
+                     KnowledgeState.KNOWN if KnowledgeState.KNOWN in
+                     {previous.state, current.state} else previous.state)
+            return replace(previous, evidence_ids=refs, state=state,
+                           explanation=explanations), None
+        message = (f"{current.entity_name} · {current.key} 的不同来源给出"
+                   f"“{previous.value} {previous.unit}”与"
+                   f"“{current.value} {current.unit}”，"
+                   "应采用哪一个值，是否有明确的补充覆盖依据？")
+        merged = replace(previous, evidence_ids=refs, state=KnowledgeState.CONFLICTED,
+                         explanation="；".join(filter(None, (explanations, message))))
+        return merged, Issue("reading.source_conflict", "warning", previous.id, message, refs)
+
     def merge(self, parts: tuple[ReadingPart, ...]) -> ReadingResult:
         facts: dict[tuple[str, str, str], Fact] = {}
         rules: dict[tuple[str, str], Rule] = {}
@@ -75,34 +101,9 @@ class ReadingMerger:
                 if previous is None:
                     facts[key] = current
                     continue
-                refs = tuple(dict.fromkeys(previous.evidence_ids + current.evidence_ids))
-                explanations = "；".join(dict.fromkeys(filter(None, (
-                    previous.explanation, current.explanation))))
-                if (previous.state != KnowledgeState.CONFLICTED
-                        and current.state != KnowledgeState.CONFLICTED):
-                    if previous.value is None and current.value is not None:
-                        facts[key] = replace(current, evidence_ids=refs, explanation=explanations)
-                        continue
-                    if previous.value is not None and current.value is None:
-                        facts[key] = replace(previous, evidence_ids=refs, explanation=explanations)
-                        continue
-                if _signature(previous) == _signature(current):
-                    state = (KnowledgeState.CONFLICTED if KnowledgeState.CONFLICTED in
-                             {previous.state, current.state} else
-                             KnowledgeState.KNOWN if KnowledgeState.KNOWN in
-                             {previous.state, current.state} else previous.state)
-                    facts[key] = replace(previous, evidence_ids=refs, state=state,
-                                         explanation=explanations)
-                else:
-                    message = (f"{current.entity_name} · {current.key} 的不同来源给出"
-                               f"“{previous.value} {previous.unit}”与"
-                               f"“{current.value} {current.unit}”，"
-                               "应采用哪一个值，是否有明确的补充覆盖依据？")
-                    facts[key] = replace(previous, evidence_ids=refs,
-                        state=KnowledgeState.CONFLICTED,
-                        explanation="；".join(filter(None, (explanations, message))))
-                    issues.append(Issue("reading.source_conflict", "warning", fid,
-                                        message, refs))
+                facts[key], issue = self.merge_fact(previous, current)
+                if issue:
+                    issues.append(issue)
             for rule in part.result.rules.rules:
                 key = (normalized_name(rule.name), normalized_name(rule.expression))
                 rid = identifier("rule_", ":".join(key))
