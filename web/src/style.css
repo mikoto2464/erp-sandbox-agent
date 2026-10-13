@@ -482,6 +482,20 @@ main {
 .file-entry .file-row {
   border: 0;
 }
+.file-feedback {
+  margin: 0 4px;
+  overflow-wrap: anywhere;
+}
+.template-reading {
+  margin-top: 28px;
+}
+.template-review-panel {
+  scroll-margin-top: 100px;
+}
+.template-unit {
+  display: block;
+  margin-top: 4px;
+}
 .file-actions {
   display: flex;
   align-items: center;

@@ -39,6 +39,7 @@ import type {
   Solution,
   WorkbookMapping,
   Artifact,
+  TemplateLibraryItem,
 } from './lib/types';
 const projectId = 'a'.repeat(32);
 const preset: ModelPreset = {
@@ -85,6 +86,31 @@ function setup() {
   const solutions: Solution[] = [];
   const documents: ParsedDocument[] = [];
   const templates: BudgetTemplate[] = [];
+  const library: TemplateLibraryItem[] = [
+    {
+      id: 'library',
+      source: {
+        id: 'library',
+        filename: '共享预算.xlsx',
+        sha256: 'hash',
+        size: 2048,
+        format: 'xlsx',
+      },
+      parsed: true,
+      sheet_names: ['第一年'],
+      reading: {
+        template_id: 'library',
+        sha256: 'hash',
+        reviewed: true,
+        explanation: '',
+        sheets: [],
+        issues: [],
+      },
+    },
+  ];
+  const libraryTemplates: BudgetTemplate[] = [
+    { source: library[0].source, sheets: [], warnings: [] },
+  ];
   const mappings: WorkbookMapping[] = [],
     artifacts: Artifact[] = [];
   let snapshot: Snapshot = {
@@ -117,11 +143,32 @@ function setup() {
       };
     else if (url === '/api/projects')
       data = [{ id: projectId, name: '项目', created_at: '2026-10-12' }];
-    else if (url === '/api/template-library')
-      data = [
-        { id: 'library', source: { filename: '共享预算.xlsx' }, reading: { reviewed: true } },
-      ];
-    else if (url === '/api/jobs')
+    else if (url === '/api/template-library') data = structuredClone(library);
+    else if (url.startsWith('/api/template-library/')) {
+      const id = url.split('/')[3];
+      const item = library.find((entry) => entry.id === id)!;
+      if (url.endsWith('/read')) {
+        data = {
+          id: 'library-read',
+          project_id: 'template-library',
+          kind: 'read',
+          status: 'queued',
+          stage: 'reading_template',
+          metadata: { template_id: id, filename: item.source.filename },
+        };
+        jobs.push(data as Job);
+      } else if (url.endsWith('/review')) {
+        Object.assign(item.reading!, JSON.parse(String(options.body)));
+        data = structuredClone(item.reading);
+      } else if (options.method === 'DELETE') {
+        library.splice(library.indexOf(item), 1);
+        data = { deleted: true };
+      } else
+        data = {
+          template: libraryTemplates.find((entry) => entry.source.id === id),
+          reading: item.reading,
+        };
+    } else if (url === '/api/jobs')
       data = jobs.map((job) => ({
         ...job,
         project_id: job.project_id || projectId,
@@ -219,6 +266,8 @@ function setup() {
     mappings,
     artifacts,
     documents,
+    library,
+    libraryTemplates,
     setTemplateReadings: (values: NonNullable<Snapshot['template_readings']>) => {
       snapshot.template_readings = values;
     },
@@ -229,6 +278,143 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('Vue migration', () => {
+  it('shows template parsing, preview and review in the shared file workflow outside projects', async () => {
+    const { router, jobs, fetcher, library, libraryTemplates } = setup();
+    library[0].reading = null;
+    library[0].parsed = false;
+    jobs.push({
+      id: 'library-parse',
+      project_id: 'template-library',
+      kind: 'template',
+      status: 'running',
+      stage: 'parsing',
+      metadata: { template_id: 'library', filename: '共享预算.xlsx' },
+    });
+    await router.push('/templates');
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    const wrapper = mount(TemplateLibraryPage, {
+      global: { provide: { [workspaceKey as symbol]: workspace }, plugins: [router] },
+    });
+    await flushPromises();
+    const action = (text: string) =>
+      wrapper.findAll('button').find((button) => button.text() === text)!;
+    expect(wrapper.find('.drop-zone').text()).toContain('点击选择，或拖入文件');
+    expect(wrapper.find('.file-entry').text()).toContain('正在解析…');
+    expect(action('取消').exists()).toBe(true);
+    library[0].parsed = true;
+    jobs.at(-1)!.status = 'succeeded';
+    await workspace.refreshTasks();
+    await flushPromises();
+    expect(wrapper.find('.file-entry').text()).toContain('已解析');
+    expect(wrapper.find('.file-entry input[type="checkbox"]').element).toHaveProperty(
+      'checked',
+      true,
+    );
+    await action('解读所选空表 →').trigger('click');
+    await flushPromises();
+    expect(fetcher.mock.calls.some(([url]) => url === '/api/template-library/library/read')).toBe(
+      true,
+    );
+    expect(wrapper.find('.file-entry').text()).toContain('正在解读…');
+    await action('取消').trigger('click');
+    await flushPromises();
+    expect(fetcher.mock.calls.some(([url]) => url === '/api/jobs/library-read/cancel')).toBe(true);
+    jobs.at(-1)!.status = 'failed';
+    jobs.at(-1)!.error = { message: '工作表请求超时' };
+    await workspace.refreshTasks();
+    await flushPromises();
+    expect(wrapper.find('.file-entry').text()).toContain('解读失败');
+    expect(action('继续未完成内容').exists()).toBe(true);
+    library[0].reading = {
+      template_id: 'library',
+      sha256: 'hash',
+      reviewed: false,
+      explanation: '',
+      sheets: [
+        {
+          name: '第一年',
+          purpose: '经营预算',
+          periods: '第一年',
+          input_groups: [
+            { label: '材料采购', range: 'B2:D2', unit: '个', description: '计划采购数量' },
+            { label: '融资', range: 'B3:D3', unit: '元', description: '借款金额' },
+          ],
+        },
+      ],
+      issues: [
+        {
+          code: 'period',
+          severity: 'warning',
+          target: 'library',
+          message: '第一年：请确认期间是否为第一年。',
+          evidence_ids: [],
+        },
+      ],
+    };
+    libraryTemplates[0].sheets = [
+      {
+        name: '第一年',
+        rows: 2,
+        columns: 2,
+        merged_ranges: [],
+        hidden: false,
+        protected: false,
+        cells: [
+          {
+            coordinate: 'A1',
+            text: '材料采购',
+            number_format: '',
+            formula: false,
+            writable: false,
+          },
+          {
+            coordinate: 'B2',
+            text: '=SUM(B1)',
+            display_text: '10',
+            number_format: '',
+            formula: true,
+            writable: false,
+          },
+        ],
+      },
+    ];
+    jobs.at(-1)!.status = 'needs_input';
+    delete jobs.at(-1)!.error;
+    await workspace.refreshTasks();
+    await flushPromises();
+    await action('预览').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.budget-preview').text()).toContain('材料采购');
+    expect(wrapper.find('.budget-preview').text()).toContain('10');
+    wrapper.findComponent(BudgetTemplatePreview).vm.$emit('close');
+    await flushPromises();
+    await action('核对解读').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.template-reading .issue-item').text()).toContain(
+      '请确认期间是否为第一年。',
+    );
+    expect(wrapper.find('.template-reading .issue-heading strong').text()).toBe('第一年');
+    expect(action('确认解读').attributes('disabled')).toBeDefined();
+    await wrapper.find('.template-reading textarea').setValue('该表用于第一年的四个季度。');
+    await action('空表数据 2').trigger('click');
+    await wrapper.find('[aria-label="搜索空表数据"]').setValue('材料');
+    expect(wrapper.find('.template-reading tbody').text()).toContain('材料采购');
+    expect(wrapper.find('.template-reading tbody').text()).not.toContain('借款金额');
+    await action('确认解读').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.file-entry').text()).toContain('已确认');
+    expect(library[0].reading.explanation).toBe('该表用于第一年的四个季度。');
+    await wrapper.find('[aria-label="删除共享预算.xlsx"]').trigger('click');
+    await flushPromises();
+    await action('删除文件').trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.file-entry')).toHaveLength(0);
+    expect(wrapper.find('.template-reading').exists()).toBe(false);
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/read'))).toHaveLength(1);
+    wrapper.unmount();
+    workspace.dispose();
+  });
   it('shows application tasks outside projects and cancels the selected scope', async () => {
     const { router, jobs, fetcher } = setup();
     jobs.push({

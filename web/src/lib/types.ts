@@ -198,6 +198,13 @@ export interface TemplateReading {
   }[];
   issues: Issue[];
 }
+export interface TemplateLibraryItem {
+  id: string;
+  source: BudgetTemplate['source'];
+  parsed: boolean;
+  reading: TemplateReading | null;
+  sheet_names?: string[];
+}
 export interface ModelLoad {
   id: string;
   name: string;

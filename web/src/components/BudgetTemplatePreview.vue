@@ -109,6 +109,7 @@ function columnName(index: number): string {
     @close="$emit('close')"
   >
     <template v-if="template">
+      <p class="muted">解析预览 · 工作表</p>
       <AppSelect
         v-model="sheetName"
         label="工作表"

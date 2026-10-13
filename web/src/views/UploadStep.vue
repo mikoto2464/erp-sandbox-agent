@@ -4,6 +4,8 @@ import { useWorkspaceContext } from '../composables/context';
 import type { ParsedDocument } from '../lib/types';
 import DocumentPreview from '../components/DocumentPreview.vue';
 import UploadDeleteButton from '../components/UploadDeleteButton.vue';
+import FileUploadZone from '../components/FileUploadZone.vue';
+import FileEntry from '../components/FileEntry.vue';
 const {
   inputs,
   inputsDirty,
@@ -24,9 +26,7 @@ const {
   snapshot,
 } = useWorkspaceContext();
 defineEmits<{ settings: [] }>();
-const preview = ref<ParsedDocument | null>(null),
-  dragging = ref(false),
-  fileInput = ref<HTMLInputElement>();
+const preview = ref<ParsedDocument | null>(null);
 const pendingFiles = computed(() => {
   const entries = new Map<string, (typeof jobs.value)[number]>();
   for (const job of jobs.value)
@@ -39,10 +39,6 @@ const pendingFiles = computed(() => {
       entries.set(job.metadata.document_id, job);
   return [...entries.values()];
 });
-function files(values: FileList | null) {
-  if (values) void run('upload', () => upload([...values]));
-  if (fileInput.value) fileInput.value.value = '';
-}
 </script>
 <template>
   <section class="card">
@@ -50,67 +46,50 @@ function files(values: FileList | null) {
       <h2>题目文件</h2>
       <span class="muted">单文件最大 {{ status?.max_upload_mb }} MB</span>
     </div>
-    <label
-      class="drop-zone"
-      :class="{ dragover: dragging }"
-      @dragover.prevent="dragging = true"
-      @dragleave.prevent="dragging = false"
-      @drop.prevent="
-        dragging = false;
-        files($event.dataTransfer?.files || null);
-      "
-      ><span class="upload-icon">↑</span
-      ><strong>{{ operations.has('upload') ? '正在上传…' : '点击选择，或拖入文件' }}</strong
-      ><span class="muted">DOCX / DOC / PDF / XLS / XLSX</span
-      ><input
-        ref="fileInput"
-        type="file"
-        accept=".docx,.doc,.pdf,.xls,.xlsx"
-        multiple
-        :disabled="operations.has('upload')"
-        @change="files(($event.target as HTMLInputElement).files)"
-    /></label>
+    <FileUploadZone
+      accept=".docx,.doc,.pdf,.xls,.xlsx"
+      formats="DOCX / DOC / PDF / XLS / XLSX"
+      :disabled="operations.has('upload')"
+      @files="run('upload', () => upload($event))"
+    />
     <div class="file-list">
-      <article
+      <FileEntry
         v-for="doc in documents"
         :key="doc.source.id"
-        class="file-entry"
+        :filename="doc.source.filename"
+        :size="doc.source.size"
+        :metadata="`${doc.evidence.length} 处证据`"
       >
-        <div class="file-row">
+        <template #selection>
           <input
             v-model="selected"
             type="checkbox"
             :value="doc.source.id"
             :aria-label="`选择${doc.source.filename}用于读题`"
-          /><span class="file-info"
-            >{{ doc.source.filename
-            }}<small
-              >{{ Math.ceil(doc.source.size / 1024) }} KB · {{ doc.evidence.length }} 处证据</small
-            ></span
+          />
+        </template>
+        <template #actions>
+          <button
+            v-if="!snapshot?.document_ids?.includes(doc.source.id)"
+            class="review-action"
+            :disabled="activeRead || operations.has('read')"
+            @click="run('read', () => startRead(!!snapshot, [doc.source.id]))"
           >
-          <div class="file-actions">
-            <button
-              v-if="!snapshot?.document_ids?.includes(doc.source.id)"
-              class="review-action"
-              :disabled="activeRead || operations.has('read')"
-              @click="run('read', () => startRead(!!snapshot, [doc.source.id]))"
-            >
-              读取此文件
-            </button>
-            <span class="badge known">已解析</span
-            ><button
-              class="review-action"
-              @click="preview = doc"
-            >
-              预览
-            </button>
-            <UploadDeleteButton
-              :id="doc.source.id"
-              :filename="doc.source.filename"
-              kind="document"
-            />
-          </div>
-        </div>
+            读取此文件
+          </button>
+          <span class="badge known">已解析</span
+          ><button
+            class="review-action"
+            @click="preview = doc"
+          >
+            预览
+          </button>
+          <UploadDeleteButton
+            :id="doc.source.id"
+            :filename="doc.source.filename"
+            kind="document"
+          />
+        </template>
         <label class="file-note"
           ><span>说明</span
           ><textarea
@@ -122,30 +101,23 @@ function files(values: FileList | null) {
             @input="setAnnotation(doc.source.id, ($event.target as HTMLTextAreaElement).value)"
           />
         </label>
-      </article>
-      <article
+      </FileEntry>
+      <FileEntry
         v-for="job in pendingFiles"
         :key="job.metadata.document_id"
-        class="file-entry"
+        :filename="job.metadata.filename || '题目文件'"
+        :metadata="
+          job.status === 'failed' ? '解析失败' : job.status === 'cancelled' ? '已取消' : '正在解析…'
+        "
       >
-        <div class="file-row">
-          <span class="file-info"
-            >{{ job.metadata.filename
-            }}<small>{{
-              job.status === 'failed'
-                ? '解析失败'
-                : job.status === 'cancelled'
-                  ? '已取消'
-                  : '正在解析…'
-            }}</small></span
-          >
+        <template #actions>
           <UploadDeleteButton
             :id="job.metadata.document_id!"
             :filename="job.metadata.filename || '题目文件'"
             kind="document"
           />
-        </div>
-      </article>
+        </template>
+      </FileEntry>
     </div>
     <div class="input-section">
       <label for="problem-text">手动输入题目（选填）</label
