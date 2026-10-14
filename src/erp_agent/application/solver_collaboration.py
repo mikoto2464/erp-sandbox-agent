@@ -124,7 +124,7 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-13", "request": request}).encode()
+                    dumps({"version": "solver-14", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
@@ -237,14 +237,16 @@ class CollaborativeStrategyGenerator:
                             role=role,
                         )
                 self.control.checkpoint("saving_planning_progress")
-                if self.memory and data["status"] != "partial":
+                if self.memory:
                     self.memory.put(key, {"result": data})
                 report_task(
                     self.control,
                     task,
-                    "needs_input" if data["status"] == "partial" else "succeeded",
+                    "succeeded",
                     result_status=data["status"],
-                    unresolved_reason=data["reason"] if data["status"] == "partial" else "",
+                    planning_limit=data["reason"]
+                    if data["status"] in {"partial", "missing_input"}
+                    else "",
                     recommendation_count=len(array(data["recommendations"])),
                 )
                 return {"role": material["role"], **data}
@@ -297,7 +299,7 @@ class CollaborativeStrategyGenerator:
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-13",
+                        "version": "solver-14",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,
@@ -328,18 +330,6 @@ class CollaborativeStrategyGenerator:
             except ERPError as error:
                 report_task(self.control, synthesis_task, "failed", error=error.message)
                 raise
-        unresolved = tuple(
-            f"{finding['role']} 规划缺口：{finding['reason']}"
-            for finding in findings
-            if finding.get("status") == "partial"
-        )
-        if unresolved:
-            proposal = replace(
-                proposal,
-                baseline=replace(
-                    proposal.baseline,
-                    risks=tuple(dict.fromkeys((*proposal.baseline.risks, *unresolved))),
-                ),
-            )
+        # 原分析限制已传统筹；不将原始“请用户确认”文字再追加到正式方案。
         report_task(self.control, synthesis_task, "succeeded", model=proposal.model)
         return proposal

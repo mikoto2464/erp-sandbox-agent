@@ -6,7 +6,6 @@ from uuid import uuid4
 
 from erp_agent.application.contracts import (
     PATCH_SCHEMA,
-    PROPOSAL_SCHEMA,
     JSONObject,
     decode_action,
     decode_proposal,
@@ -32,6 +31,11 @@ from erp_agent.application.solver_context import (
     planning_requirements,
     repair_material,
     role_material,
+)
+from erp_agent.application.solver_period_output import (
+    check_planning_content,
+    flatten_period_proposal,
+    period_proposal_schema,
 )
 from erp_agent.application.solver_plan_repairs import (
     MAX_REPAIR_OBJECTS,
@@ -73,7 +77,15 @@ class LLMStrategyGenerator:
         self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_PLANNING_CONTEXT
     ) -> StrategyProposal:
         prompt = files("erp_agent").joinpath("prompts/solver.txt").read_text(encoding="utf-8")
-        schema = dumps(PROPOSAL_SCHEMA)
+        problem = snapshot.reading.problem
+        horizon = (problem.years or 0) * (problem.periods_per_year or 0)
+        schema = dumps(period_proposal_schema(horizon))
+        prompt += "\nplan 用 period_actions 按真实经营期编号分组，每一期至少一个具体行动；"
+        prompt += "行动不写 period，由 Python 根据分组赋值；不得遗漏中间期或末期。"
+        prompt += (
+            "review 是当期检查，无建设或支付过程；"
+            "completion_period/payment_period 必须为 null。"
+        )
         material = role_material(
             snapshot, "coordinator" if self.collaboration else "operations", self.candidate_actions
         )
@@ -119,7 +131,11 @@ class LLMStrategyGenerator:
                     if self.control
                     else self.llm.generate(request)
                 )
-                normalized = normalize_model_json(response.content)
+                normalized = dumps(
+                    flatten_period_proposal(
+                        obj(loads(normalize_model_json(response.content))), horizon
+                    )
+                )
                 try:
                     proposal = decode_proposal(normalized, response.model, allow_legacy=False)
                 except ERPError as error:
@@ -130,6 +146,7 @@ class LLMStrategyGenerator:
                         )
                     else:
                         raise
+                check_planning_content(proposal.baseline)
                 evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
                 errors = [
                     i
@@ -151,6 +168,7 @@ class LLMStrategyGenerator:
                     )
                 if proposal.baseline.budget_items:
                     raise ERPError("invalid_contract", "行动阶段不能生成预算条目。")
+                check_planning_content(proposal.baseline)
                 return replace(proposal, parameters=(), raw_response=response.content)
             except ERPError as error:
                 if attempted_patch or error.code in {

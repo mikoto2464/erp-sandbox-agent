@@ -313,6 +313,12 @@ function duration(task: AgentTask) {
               {{ task.recovery }}
             </p>
             <p
+              v-if="task.planning_limit"
+              class="notice"
+            >
+              已完成职责分析，统筹将按题目与经营基调自主规划。
+            </p>
+            <p
               v-if="task.unresolved_reason"
               class="notice"
             >

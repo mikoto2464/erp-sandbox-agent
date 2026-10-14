@@ -293,7 +293,10 @@ class SolverRepairFlowTests(unittest.TestCase):
         action = decode_action(timed_candidates()[1])
         for role in ("finance", "coordinator"):
             self.assertIn("order-size", dumps(role_material(problem(), role, (action,))))
-            self.assertNotIn("order-size", dumps(role_material(problem(), role)))
+            if role == "finance":
+                self.assertNotIn("order-size", dumps(role_material(problem(), role)))
+            else:
+                self.assertIn("order-size", dumps(role_material(problem(), role)))
 
     def test_patch_stays_invalid_when_not_all_errors_are_fixed(self):
         data = specialist("operations")

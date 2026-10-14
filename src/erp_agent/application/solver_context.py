@@ -84,14 +84,17 @@ def planning_policy(context: PlanningContext) -> JSONObject:
     }
     return {
         "purpose": "经营行动草稿；制定候选策略，不要求唯一解或已验证经营可行性。",
+        "interaction": "生成阶段不提问、不新增用户确认。"
+        "基于已核对题目、模板参数需求与经营基调自主规划。",
         "tone_instruction": tones[context.config.tone],
         "decision_scope": "竞单目标、产品路线和投入安排由产销角色根据题目与用户偏好提出；"
         "用户未指定目标或订单池没有已签合同，不构成规划输入缺失。",
         "fact_boundary": "拟定数量、投入和期间是候选决策，须引用容量、价格、需求或提前期依据，"
         "不能作为已发生经营事实。合同获得、市场准入、初始存量未知时不得假定已满足或为零。",
         "missing_data": "先用已知事实形成有依据的候选与关联建议；未知值保持 null 和明确原因，"
-        "受影响动作说明执行前核对条件。仍有可用的有引用结论时返回 partial 并定位剩余缺口；"
-        "只有无法形成任何有依据的行动或建议时返回 missing_input。",
+        "自主选定有依据的策略与情景口径，以假设和条件分支覆盖影响。"
+        "不依赖未知的现有资源，按拟新增资源规划，但不把未知存量记成零。"
+        "partial/missing_input 只表示内部分析限制，交由统筹继续决策，不请求用户补充或停止规划。",
     }
 
 
@@ -302,7 +305,27 @@ ROLE_CATEGORIES = {
     },
     "finance": {"initial", "finance", "discount", "carbon", "digital", "budget"},
     "budget": {"initial", "budget"},
-    "coordinator": {"initial", "finance", "discount"},
+    "coordinator": {
+        "initial",
+        "certification",
+        "market",
+        "product",
+        "bom",
+        "material",
+        "production_line",
+        "worker",
+        "training",
+        "incentive",
+        "shift",
+        "demand_forecast",
+        "order_pool",
+        "order_contract",
+        "finance",
+        "discount",
+        "carbon",
+        "digital",
+        "budget",
+    },
     "report": {"initial", "finance", "discount"},
 }
 
@@ -442,7 +465,7 @@ def role_material(
 ) -> JSONObject:
     focused = role_snapshot(snapshot, role, actions, fact_ids=fact_ids, rule_ids=rule_ids)
     material = problem_material(focused)
-    if role != "operations":
+    if role not in {"operations", "coordinator"}:
         material["deferred_order_pool"] = {
             "instruction": "只传当前行动或显式引用的订单事实，其他明细由产销持有；裁剪不代表缺失。",
         }

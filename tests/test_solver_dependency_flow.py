@@ -42,65 +42,36 @@ def specialist(role):
 
 
 class SolverDependencyFlowTests(unittest.TestCase):
-    def test_missing_unique_route_is_reconsidered_once_and_partial_plan_keeps_unknowns(self):
+    def test_missing_specialist_analysis_does_not_ask_user_or_repeat_role(self):
         calls = []
-        partial = specialist("operations")
-        partial.update(status="partial", reason="初始产线存量未知，执行前须核对资源条件。")
-        partial["candidate_actions"] = [structured_action(description="核对资源并评估竞单路线")]
         outer = self
-
         class Client:
             configured = True
-
             def generate(self, request):
                 data = loads(request.user)
                 role = data.get("role", "coordinator")
                 calls.append(role)
-                outer.assertIn("不要求唯一", data["planning_policy"]["purpose"])
-                outer.assertNotIn("initial_inventory", request.user)
-                if role == "operations" and calls.count(role) == 1:
-                    missing = specialist("finance")
-                    missing.update(
-                        status="missing_input", reason="未指定竞单目标，无法生成唯一路线。"
-                    )
-                    return LLMResponse(dumps(missing), "same")
-                if role == "operations":
-                    outer.assertIn("error", data)
-                    return LLMResponse(dumps(partial), "same")
-                if role == "finance":
-                    action = data["candidate_plan"]["actions"][0]
-                    outer.assertIsNone(action[4])  # quantity
-                    outer.assertIsNone(action[6])  # amount
-                    return LLMResponse(dumps(specialist("finance")), "same")
-                outer.assertEqual(data["collaboration"][0]["status"], "partial")
-                result = loads(structured_proposal_json())
-                result["plan"]["actions"][0] = partial["candidate_actions"][0]
-                return LLMResponse(dumps(result), "same")
-
+                outer.assertIn("不提问", data["planning_policy"]["interaction"])
+                if role == "coordinator":
+                    outer.assertEqual(data["collaboration"][0]["status"], "missing_input")
+                    outer.assertIn("cash", request.user)
+                    return LLMResponse(structured_proposal_json(), "same")
+                missing = specialist("finance")
+                missing.update(status="missing_input", reason="当前角色没有唯一资源路线。")
+                return LLMResponse(dumps(missing), "same")
         result = CollaborativeStrategyGenerator(Client(), Control()).propose(snapshot())
-        self.assertEqual(calls, ["operations", "operations", "finance", "coordinator"])
-        self.assertIsNone(result.baseline.actions[0].quantity)
-        self.assertIsNone(result.baseline.actions[0].amount)
-        self.assertIn("初始产线存量未知", result.baseline.risks[-1])
+        self.assertEqual(calls, ["operations", "finance", "coordinator"])
+        self.assertEqual([a.period for a in result.baseline.actions], [1, 2])
+        self.assertNotIn("当前角色没有唯一资源路线", str(result.baseline.risks))
 
-    def test_real_blocking_missing_input_stops_after_one_reconsideration(self):
-        calls = []
-
+    def test_transport_failure_still_stops_and_is_not_treated_as_analysis_limit(self):
         class Client:
             configured = True
-
             def generate(self, request):
-                calls.append(loads(request.user).get("role"))
-                missing = specialist("finance")
-                missing.update(
-                    status="missing_input", reason="资料没有经营规则，无法形成有依据的候选。"
-                )
-                return LLMResponse(dumps(missing), "same")
-
+                raise ERPError("llm_auth", "受控接口拒绝访问。")
         with self.assertRaises(ERPError) as caught:
             CollaborativeStrategyGenerator(Client(), Control()).propose(snapshot())
-        self.assertEqual(calls, ["operations", "operations"])
-        self.assertEqual(caught.exception.code, "solver_missing_input")
+        self.assertEqual(caught.exception.code, "llm_auth")
 
     def test_partial_requires_nonempty_supported_conclusions(self):
         data = specialist("operations")
@@ -119,8 +90,9 @@ class SolverDependencyFlowTests(unittest.TestCase):
             decode_specialist(data, snapshot())
         self.assertEqual(caught.exception.code, "solver_action")
 
-    def test_partial_is_not_success_cached_and_its_risk_survives_cached_synthesis(self):
+    def test_partial_analysis_is_cached_and_its_limits_reach_autonomous_synthesis(self):
         calls = []
+        outer = self
 
         class Client:
             configured = True
@@ -129,7 +101,10 @@ class SolverDependencyFlowTests(unittest.TestCase):
                 role = loads(request.user).get("role", "coordinator")
                 calls.append(role)
                 if role == "coordinator":
-                    return LLMResponse(structured_proposal_json(), "same")
+                    outer.assertEqual(loads(request.user)["collaboration"][0]["status"], "partial")
+                    output = loads(structured_proposal_json())
+                    output["plan"]["risks"] = ["仅规划新增资源，不计入未知初始存量。"]
+                    return LLMResponse(dumps(output), "same")
                 data = specialist(role)
                 if role == "operations":
                     data.update(status="partial", reason="初始资源未知，执行条件仍待核对。")
@@ -146,8 +121,8 @@ class SolverDependencyFlowTests(unittest.TestCase):
                     result = CollaborativeStrategyGenerator(Client(), Control(), scope).propose(
                         problem
                     )
-                    self.assertIn("执行条件仍待核对", result.baseline.risks[-1])
-                self.assertEqual(calls.count("operations"), 2)
+                    self.assertIn("不计入未知初始存量", result.baseline.risks[-1])
+                self.assertEqual(calls.count("operations"), 1)
                 self.assertEqual(calls.count("finance"), 1)
                 self.assertEqual(calls.count("coordinator"), 1)
             finally:
@@ -206,9 +181,9 @@ class SolverDependencyFlowTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "solver_empty")
         data["status"] = "missing_input"
         data["reason"] = "缺少订单交付条件，影响交付行动。"
-        with self.assertRaises(ERPError) as caught:
-            decode_specialist(data, snapshot())
-        self.assertIn("影响交付行动", caught.exception.message)
+        limitation = decode_specialist(data, snapshot())
+        self.assertEqual(limitation["status"], "missing_input")
+        self.assertIn("影响交付行动", limitation["reason"])
 
     def test_source_patch_only_receives_invalid_recommendation(self):
         calls = []

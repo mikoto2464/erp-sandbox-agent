@@ -41,8 +41,10 @@ def decode_specialist(
     reason = string(data["reason"], 1200)
     if status not in {"applicable", "partial", "not_applicable", "missing_input", "failed"}:
         raise ERPError("solver_status", "协作任务状态无效。")
-    if status in {"missing_input", "failed"}:
+    if status == "failed":
         raise ERPError("solver_" + status, reason or "任务未提供可用结果。")
+    if status == "missing_input" and not reason.strip():
+        raise ERPError("solver_status", "分析限制必须说明原因，由总协调自主规划处理。")
     if status == "not_applicable" and not reason.strip():
         raise ERPError("solver_status", "不适用结果必须明确说明原因。")
     if status == "partial" and not reason.strip():

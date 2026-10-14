@@ -1125,6 +1125,16 @@ describe('Vue migration', () => {
           unresolved_reason: '初始存量仍待核对',
         },
         {
+          id: 'planning-analysis',
+          parent_id: 'solver',
+          agent: 'Solver',
+          role: '产销与资源规划',
+          object: '经营规划',
+          status: 'succeeded',
+          result_status: 'partial',
+          planning_limit: '需要用户确认初始存量',
+        },
+        {
           id: 'waiting',
           parent_id: 'reader',
           agent: 'Reader',
@@ -1186,6 +1196,10 @@ describe('Vue migration', () => {
     );
     expect(wrapper.find('.task-detail').text()).toContain('存在合并表头');
     expect(wrapper.find('.task-detail').text()).toContain('等待可用模型：主模型');
+    expect(wrapper.find('.task-detail').text()).toContain(
+      '已完成职责分析，统筹将按题目与经营基调自主规划。',
+    );
+    expect(wrapper.find('.task-detail').text()).not.toContain('需要用户确认初始存量');
     await wrapper.find('.drawer-modal').trigger('pointerdown', { clientX: -1, clientY: -1 });
     await wrapper.find('.drawer-modal').trigger('click', { clientX: -1, clientY: -1 });
     await flushPromises();

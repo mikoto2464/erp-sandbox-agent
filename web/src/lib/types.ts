@@ -245,6 +245,7 @@ export interface AgentTask {
   recommendation_count?: number;
   result_status?: string;
   unresolved_reason?: string;
+  planning_limit?: string;
   task_kind?: string;
   planned_count?: number;
   batch_count?: number;
