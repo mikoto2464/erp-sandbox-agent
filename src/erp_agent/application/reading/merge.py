@@ -78,7 +78,11 @@ class ReadingMerger:
                                for eid in fact.evidence_ids if eid in focused - headers
                                and eid in evidence and evidence[eid].table_context})
                 if rows:
-                    name = (f"{part.batch.document.source.id}:{rows[0][0]}:{rows[0][1]}:"
+                    anchor = next((evidence[eid].table_context for eid in fact.evidence_ids[:1]
+                                   if eid in focused - headers and eid in evidence
+                                   and evidence[eid].table_context), None)
+                    row = (anchor.block_index, anchor.row) if anchor else rows[0]
+                    name = (f"{part.batch.document.source.id}:{row[0]}:{row[1]}:"
                             + normalized_name(fact.entity_name))
                     fact_rows[fact] = name
                     row_entities.setdefault(fact.entity_id, name)
@@ -119,5 +123,5 @@ class ReadingMerger:
         model = ", ".join(dict.fromkeys(p.result.model for p in parts))
         result = ReadingResult(ProblemSpec(title, tuple(facts.values())),
                                RuleSet(tuple(rules.values())), unique_issues, model,
-                               prompt_version="reader-16")
+                               prompt_version="reader-17")
         return replace(result, raw_response=dumps(editable_reading(result)))

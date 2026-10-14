@@ -23,6 +23,7 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl
 from erp_agent.application.reading.batches import ReadingBatch, oversized_batch
 from erp_agent.application.reading.numbers import recover_numbers
+from erp_agent.application.reading.table_mapping import TABLE_MAPPING_SCHEMA, expand_table_mappings
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Fact, ReadingResult, RuleSet
 
@@ -84,6 +85,7 @@ class ExtractionRole:
                             "items": {"type": "array", "items": NULLABLE_TEXT},
                         },
                         "issues": {"type": "array", "items": ISSUE_SCHEMA},
+                        "table_mappings": TABLE_MAPPING_SCHEMA,
                     }
                 )
             )
@@ -98,6 +100,17 @@ class ExtractionRole:
                 + "；value_type 为 number/text/integer，state 为 known/assumed/conflicted/missing；"
                 "conversion 为 identity/percent_to_ratio/wan_to_yuan。"
                 "unit 为规范单位，未知用空字符串。"
+                "\n逐行 BOM/需求/订单表优先用 table_mappings 映射列，无映射时返回空数组。"
+                "每项为 block_index、category、row_start、row_end、columns；"
+                "索引沿用输入的零基索引。"
+                "columns 每项为 column、key、value_type、unit、conversion、header_ids；"
+                "header_ids 引用该列真实表头；完整覆盖当前数据行范围与全部非空数据列。"
+                "Python 从原格展开每行事实；不得在 fact_rows 重复这些格或把整行拼成 detail。"
+                "仅明确逐行记录、同一列语义一致的表使用此映射；多对象参数表及复杂布局仍逐字段提取。"
+                "订单列 key 使用 year/quarter/order_id/market/product/feature/"
+                "reference_price/quantity/"
+                "delivery_period/payment_period/certification，按真实列含义映射，不补未提供列。"
+                "编号、实体代码为 text，年季/数量/期限为 integer，报价为 number；单位只按表头。"
             )
 
     def request(
@@ -220,6 +233,7 @@ class ExtractionRole:
 
     def _decode(self, content: str, model: str, batch: ReadingBatch) -> ReadingResult:
         data = obj(loads(normalize_model_json(content)))
+        table_mappings = data.pop("table_mappings", []) if self.name == "reading" else []
         if self.name == "reading" and set(data) == {"title", "fact_rows", "rule_rows", "issues"}:
             normalized = {"title": data["title"], "issues": data["issues"]}
             columns = {
@@ -265,7 +279,20 @@ class ExtractionRole:
             "rules": data.get("rules", []) if self.name != "facts" else [],
             "issues": data.get("issues", []),
         }
+        explicit_facts = array(data["facts"])
+        mapped_facts = expand_table_mappings(table_mappings, batch)
+        mapped_cells = {(fact["category"], array(fact["evidence_ids"])[0]) for fact in mapped_facts}
         aliases = batch.source_aliases
+        if any(
+            (string(obj(fact).get("category")), aliases.get(string(ref), string(ref)))
+            in mapped_cells
+            for fact in explicit_facts
+            for ref in array(obj(fact).get("evidence_ids"))
+        ):
+            raise ERPError(
+                "invalid_contract", "逐行表映射与逐字段提取重复，不能重复记录同一批数据格。"
+            )
+        data["facts"] = explicit_facts + mapped_facts
         for collection in ("facts", "rules", "issues"):
             for value in array(data[collection]):
                 item = obj(value)

@@ -479,6 +479,43 @@ class WebTests(unittest.TestCase):
         self.assertEqual(current['problem']['facts'][0]['state'], 'conflicted')
         self.assertTrue(any(i['target'] == fact['id'] and i['severity'] == 'warning' for i in current['issues']))
 
+    def test_legacy_joined_table_is_rechecked_without_overriding_user_edits(self):
+        project, result = self.setup_problem()
+        snapshot = result['snapshot']
+        document_id = snapshot['document_ids'][0]
+        content = docx_bytes('<w:tbl><w:tr><w:tc><w:p><w:r><w:t>数量</w:t></w:r></w:p></w:tc>'
+            '<w:tc><w:p><w:r><w:t>价格(元)</w:t></w:r></w:p></w:tc></w:tr>'
+            '<w:tr><w:tc><w:p><w:r><w:t>10</w:t></w:r></w:p></w:tc>'
+            '<w:tc><w:p><w:r><w:t>20</w:t></w:r></w:p></w:tc></w:tr></w:tbl>')
+        document = OOXMLDocumentParser().parse(
+            SourceDocument(document_id, 'orders.docx', '', len(content), 'docx'), content)
+        repository = self.server.workflow.repository
+        repository.put('document', project, document_id, document)
+        facts = []
+        for row, key, value, category in [(0, 'order_pool_field_order', '数量|价格', 'other'),
+                                          (1, 'detail', '10|20', 'order_pool')]:
+            facts.append({'id': key, 'category': category, 'entity_id': key, 'entity_name': key,
+                'key': key, 'value': value, 'value_type': 'text', 'unit': '', 'state': 'known',
+                'evidence_ids': [c.evidence_id for c in document.blocks[0].cells if c.row == row],
+                'conversion': 'identity', 'explanation': ''})
+        snapshot['reading']['raw_response'] = dumps(
+            {'title': '订单', 'facts': facts, 'rules': [], 'issues': []})
+        snapshot['reading']['problem']['facts'] = [{**fact, 'state': 'conflicted'} for fact in facts]
+        snapshot['reading']['issues'] = [{'code': 'validation.unsupported_value', 'severity': 'error',
+            'target': fact['id'], 'message': '旧校验误报', 'evidence_ids': fact['evidence_ids']}
+            for fact in facts]
+        saved = repository.save_snapshot(project, snapshot, 1)
+        reading = self.request(f'/api/projects/{project}/problem')['snapshot']['reading']
+        self.assertTrue(all(f['state'] == 'known' for f in reading['problem']['facts'][:2]))
+        self.assertFalse(any(i['code'] == 'validation.unsupported_value' for i in reading['issues']))
+        self.assertEqual(repository.snapshot(project, 2), saved)
+        snapshot['reading']['problem']['facts'][1]['value'] = '10|200'
+        repository.save_snapshot(project, snapshot, 2)
+        reading = self.request(f'/api/projects/{project}/problem')['snapshot']['reading']
+        self.assertEqual(reading['problem']['facts'][1]['state'], 'conflicted')
+        self.assertTrue(any(i['code'] == 'validation.unsupported_value' and i['target'] == 'detail'
+                            for i in reading['issues']))
+
     def test_parse_retry_uses_stored_original(self):
         project = self.request("/api/projects", {"name": "重试"})["id"]
         base = f"/api/projects/{project}"

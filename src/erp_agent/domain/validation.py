@@ -57,6 +57,35 @@ def _text_supported(value: str, source: str) -> bool:
     return bool(re.search(pattern, source))
 
 
+def _text_sources_supported(
+    value: str, evidence: tuple[Evidence, ...], *, header_sequence: bool = False
+) -> bool:
+    if any(_text_supported(value, source.text) for source in evidence):
+        return True
+    # 历史读题可能逐行拼接单元格；必须逐格、同表同行、按真实列序证明。
+    pieces = value.split("|")
+    cells = tuple({source.id: source for source in evidence}.values())
+    if len(pieces) < 2 or len(pieces) != len(cells) or any(
+        source.table_context is None for source in cells
+    ):
+        return False
+    rows = {(source.document_id, source.table_context.block_index, source.table_context.row)
+            for source in cells if source.table_context}
+    columns = [source.table_context.column for source in cells if source.table_context]
+    if len(rows) != 1 or len(set(columns)) != len(columns):
+        return False
+    ordered = sorted(cells, key=lambda source: source.table_context.column)
+    def cell_text(source: Evidence) -> str:
+        text = source.text
+        if header_sequence:
+            text = re.sub(r"[（(](?:元|万元|件|个|年|季|月|天|%|％)[）)]$", "", text.strip())
+        return normalized_text(text)
+
+    return all(normalized_text(piece) == cell_text(source)
+               or normalized_text(piece) == normalized_text(source.text)
+               for piece, source in zip(pieces, ordered, strict=True))
+
+
 def distinct_issues(issues: tuple[Issue, ...]) -> tuple[Issue, ...]:
     specific_targets = {issue.target for issue in issues if issue.severity != "info"
                         and issue.code not in {"validation.uncertain", "validation.value_missing"}}
@@ -121,7 +150,10 @@ def validate_reading(reading: ReadingResult, evidence: tuple[Evidence, ...]) -> 
             linked = tuple(sources[eid] for eid in current.evidence_ids if eid in sources)
             supported = bool(linked) and (
                 _number_supported(current, linked) if fact.value_type in {"number", "integer"}
-                else any(_text_supported(fact.value, e.text) for e in linked)
+                else _text_sources_supported(
+                    fact.value, linked,
+                    header_sequence=fact.category == "other" and fact.key.endswith("_field_order"),
+                )
             )
             if not supported:
                 current = replace(current, state=KnowledgeState.CONFLICTED)

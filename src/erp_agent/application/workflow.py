@@ -559,7 +559,7 @@ class WorkflowService:
                         "parsers": [d.parser_version for d in sources],
                         "reader": self.reader.limits,
                         "model": binding.metadata() if binding else None,
-                        "version": "reader-16",
+                        "version": "reader-17",
                     }
                 ).encode()
             ).hexdigest()

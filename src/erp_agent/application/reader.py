@@ -409,8 +409,18 @@ class StructuredReader:
                 prepare(batch)
             plan_reading(tuple(requests), batch_control, self.limits.concurrency)
         runner = RunnableLambda(read_batch)
+        # 大章节/整表先开始，避免将最长请求排到最后；合并仍遵循原文顺序。
+        sizes: dict[tuple[str, str], int] = {}
+        for batch in batches:
+            group = (batch.document.source.id, batch.label)
+            sizes[group] = max(sizes.get(group, 0), len(dumps(batch.payload())))
+        execution = sorted(
+            range(len(batches)),
+            key=lambda i: sizes[(batches[i].document.source.id, batches[i].label)],
+            reverse=True,
+        )
         results = runner.batch(
-            list(batches),
+            [batches[i] for i in execution],
             config={"max_concurrency": self.limits.concurrency},
             return_exceptions=True,
         )
@@ -419,7 +429,7 @@ class StructuredReader:
             raise next(
                 (error for error in failures if not isinstance(error, Cancelled)), failures[0]
             )
-        for batch_parts in results:
+        for _, batch_parts in sorted(zip(execution, results, strict=True)):
             if not isinstance(batch_parts, Exception):
                 parts.extend(batch_parts)
         control.checkpoint("reading_linking", len(parts))
@@ -437,6 +447,7 @@ class StructuredReader:
                 max_chars,
                 len(parts),
                 review_groups=review_groups if self.combined_role else None,
+                concurrency=self.limits.concurrency,
             )
             reading = replace(reading, issues=tuple(dict.fromkeys(reading.issues + findings)))
         source_issues = tuple(

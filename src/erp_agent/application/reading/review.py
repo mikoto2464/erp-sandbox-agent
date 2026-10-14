@@ -1,5 +1,7 @@
 from importlib.resources import files
 
+from langchain_core.runnables import RunnableLambda
+
 from erp_agent.application.contracts import (
     ISSUE_SCHEMA,
     JSONObject,
@@ -14,6 +16,7 @@ from erp_agent.application.contracts import (
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
 from erp_agent.application.reading.merge import ROW_CATEGORIES, normalized_name
+from erp_agent.application.task_budget import task_budget
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Evidence, Fact, Issue, KnowledgeState, ReadingResult, Rule
@@ -40,6 +43,7 @@ class LinkReviewRole:
         max_chars: int,
         completed: int,
         review_groups: dict[str, str] | None = None,
+        concurrency: int = 1,
     ) -> tuple[Issue, ...]:
         sources = {e.id: e for e in evidence}
         context_ids = {
@@ -48,10 +52,16 @@ class LinkReviewRole:
             if e.table_context
             for ref in e.table_context.heading_ids + e.table_context.column_header_ids
         }
-        parse_errors = {i.target for i in reading.issues if i.code == "reading.invalid_number"
-                        and i.severity == "error"}
-        parameters = tuple(f for f in reading.problem.facts
-                           if f.category not in ROW_CATEGORIES and f.id not in parse_errors)
+        parse_errors = {
+            i.target
+            for i in reading.issues
+            if i.code == "reading.invalid_number" and i.severity == "error"
+        }
+        parameters = tuple(
+            f
+            for f in reading.problem.facts
+            if f.category not in ROW_CATEGORIES and f.id not in parse_errors
+        )
         units: list[tuple[Fact | Rule, ...]] = []
         disputed = {i.target for i in reading.issues if i.severity != "info"}
 
@@ -70,12 +80,11 @@ class LinkReviewRole:
                 for value in values
             )
 
+        entities: dict[tuple[str, str], list[Fact]] = {}
         for fact in parameters:
-            entity_facts = tuple(
-                f
-                for f in parameters
-                if f.id != fact.id and (f.category, f.entity_id) == (fact.category, fact.entity_id)
-            )
+            entities.setdefault((fact.category, fact.entity_id), []).append(fact)
+        for entity_facts in entities.values():
+            fact = entity_facts[0]
             related = tuple(
                 r
                 for r in reading.rules.rules
@@ -83,7 +92,7 @@ class LinkReviewRole:
                 and normalized_name(fact.entity_name)
                 in normalized_name(r.name + r.expression + r.explanation)
             )
-            values = (fact,) + entity_facts[:12] + related[:4]
+            values = tuple(entity_facts) + related
             if needs_review(values):
                 units.append(values)
         for rule in reading.rules.rules:
@@ -94,12 +103,11 @@ class LinkReviewRole:
                 and normalized_name(f.entity_name)
                 in normalized_name(rule.name + rule.expression + rule.explanation)
             )
-            values = (rule,) + related[:12]
-            if needs_review(values):
+            values = (rule,) + related
+            if needs_review(values) and not any(set(values) <= set(unit) for unit in units):
                 units.append(values)
         if not units:
             return ()
-        issues: list[Issue] = []
 
         def payload(values: tuple[Fact | Rule, ...]) -> JSONObject:
             ids = {eid for item in values for eid in item.evidence_ids}
@@ -108,8 +116,9 @@ class LinkReviewRole:
                 "scope": "关联子集，不代表全题",
                 "facts": to_json(tuple(f for f in values if isinstance(f, Fact))),
                 "rules": to_json(tuple(r for r in values if isinstance(r, Rule))),
-                "existing_issues": to_json(tuple(i for i in reading.issues
-                                                  if i.target in {v.id for v in values})),
+                "existing_issues": to_json(
+                    tuple(i for i in reading.issues if i.target in {v.id for v in values})
+                ),
                 "evidence": [
                     [eid, sources[eid].text, sources[eid].location]
                     for eid in sorted(ids)
@@ -117,19 +126,12 @@ class LinkReviewRole:
                 ],
             }
 
-        def run(values: tuple[Fact | Rule, ...]) -> None:
+        def run(
+            values: tuple[Fact | Rule, ...], parent: TaskContext | None = None
+        ) -> tuple[Issue, ...]:
             material = payload(values)
             allowed_ids = {v.id for v in values}
             allowed_refs = {eid for v in values for eid in v.evidence_ids}
-            if len(self.system) + len(dumps(material)) + 1500 > max_chars:
-                if len(values) > 1:
-                    middle = len(values) // 2
-                    run(values[:middle])
-                    run(values[middle:])
-                    return
-                raise ERPError(
-                    "reading_review_limit", "单条规则及其来源超过关联复核上限，请提高读题输入上限。"
-                )
             task = TaskContext(
                 "review:" + ":".join(sorted(allowed_ids)),
                 "Reader",
@@ -137,8 +139,16 @@ class LinkReviewRole:
                 "、".join(
                     dict.fromkeys(v.entity_name if isinstance(v, Fact) else v.name for v in values)
                 )[:250],
-                "reader",
+                parent.id if parent else "reader",
             )
+            task_budget(control, task)
+            if len(self.system) + len(dumps(material)) + 1500 > max_chars:
+                if len(values) > 1:
+                    middle = len(values) // 2
+                    return run(values[:middle], task) + run(values[middle:], task)
+                raise ERPError(
+                    "reading_review_limit", "单条规则及其来源超过关联复核上限，请提高读题输入上限。"
+                )
             task_client = TaskLLMClient(client, control, task)
             control.checkpoint("reading_review", completed)
             response = None
@@ -175,7 +185,6 @@ class LinkReviewRole:
                         raise ERPError(
                             "reading_review_source", "复核疑点未指向当前条目或引用了范围外来源。"
                         )
-                    issues.extend(decoded.issues)
                     report_task(
                         control,
                         task,
@@ -183,7 +192,7 @@ class LinkReviewRole:
                         issue_count=len(decoded.issues),
                         model=response.model,
                     )
-                    return
+                    return decoded.issues
                 except Cancelled:
                     raise
                 except ERPError as error:
@@ -199,9 +208,7 @@ class LinkReviewRole:
                     ):
                         report_task(control, task, "split", error=error.message)
                         middle = len(values) // 2
-                        run(values[:middle])
-                        run(values[middle:])
-                        return
+                        return run(values[:middle], task) + run(values[middle:], task)
                     if attempt or (response is None and error.code != "llm_structured_response"):
                         if error.code in {
                             "invalid_contract",
@@ -209,19 +216,19 @@ class LinkReviewRole:
                             "reading_review_source",
                             "llm_structured_response",
                         }:
-                            message = (f"关联复核未完成（{error.message}），"
-                                       "请核对这些条目的含义、适用对象与原文关联。")
-                            issues.append(
-                                Issue(
-                                    "reading.review_unresolved",
-                                    "error",
-                                    values[0].id,
-                                    message,
-                                    tuple(sorted(allowed_refs)),
-                                )
+                            message = (
+                                f"关联复核未完成（{error.message}），"
+                                "请核对这些条目的含义、适用对象与原文关联。"
+                            )
+                            finding = Issue(
+                                "reading.review_unresolved",
+                                "error",
+                                values[0].id,
+                                message,
+                                tuple(sorted(allowed_refs)),
                             )
                             report_task(control, task, "needs_input", error=message)
-                            return
+                            return (finding,)
                         report_task(control, task, "failed", error=error.message)
                         raise
                     control.checkpoint("repairing_reading", completed)
@@ -232,6 +239,9 @@ class LinkReviewRole:
                             "reading_review_limit", "关联复核修复请求超过输入上限。"
                         ) from error
 
+            return ()
+
+        batches: list[tuple[Fact | Rule, ...]] = []
         current: tuple[Fact | Rule, ...] = ()
         for unit in units:
             candidate = tuple(dict.fromkeys(current + unit))
@@ -239,9 +249,22 @@ class LinkReviewRole:
                 len(candidate) > 30
                 or len(self.system) + len(dumps(payload(candidate))) + 1500 > max_chars
             ):
-                run(current)
+                batches.append(current)
                 current = ()
             current = tuple(dict.fromkeys(current + unit))
         if current:
-            run(current)
-        return tuple(dict.fromkeys(issues))
+            batches.append(current)
+        runner = RunnableLambda(run)
+        results = runner.batch(
+            batches, config={"max_concurrency": max(1, min(concurrency, 4))}, return_exceptions=True
+        )
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            raise next(
+                (error for error in failures if not isinstance(error, Cancelled)), failures[0]
+            )
+        return tuple(
+            dict.fromkeys(
+                issue for result in results if not isinstance(result, Exception) for issue in result
+            )
+        )
