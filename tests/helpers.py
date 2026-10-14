@@ -38,6 +38,15 @@ class FakeLLM:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         self.calls.append(request)
+        if request.schema_name == "erp_report_outline":
+            from erp_agent.application.contracts import loads
+            payload = loads(request.user)
+            note = {"title": "按当前方案执行", "explanation": "依据已有行动安排经营，保留待验证条件。",
+                    "action_indices": [0], "fact_ids": [], "rule_ids": [], "budget_indices": [],
+                    "period": None, "condition": "执行条件尚未满足", "response": "核对现有安排后执行。"}
+            return LLMResponse(dumps({"strategy": [note] if payload['role'] == 'strategy' else [],
+                                      "milestones": [note] if payload['role'] == 'strategy' else [],
+                                      "risks": [note] if payload['role'] == 'execution' else []}), 'test-model')
         if request.schema_name == "erp_solver_specialist":
             return LLMResponse(dumps({"recommendations": [], "dependencies": [], "risks": []}),
                                "test-model")

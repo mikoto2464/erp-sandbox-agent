@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Protocol
 
 from erp_agent.application.contracts import JSONObject, JSONValue
 from erp_agent.domain.models import (
@@ -18,6 +19,9 @@ from erp_agent.domain.models import (
     StrategyProposal,
     WorkbookMapping,
 )
+from erp_agent.domain.reporting import ReportOutline
+
+DEFAULT_PLANNING_CONTEXT = PlanningContext()
 
 
 @dataclass(frozen=True)
@@ -68,8 +72,12 @@ class ModelBinding:
     client: LLMClient = field(repr=False)
 
     def metadata(self) -> JSONObject:
-        return {"preset_id": self.preset_id, "preset_name": self.preset_name,
-                "preset_revision": self.preset_revision, **self.configuration}
+        return {
+            "preset_id": self.preset_id,
+            "preset_name": self.preset_name,
+            "preset_revision": self.preset_revision,
+            **self.configuration,
+        }
 
 
 class ModelSettings(Protocol):
@@ -94,8 +102,9 @@ class DocumentParser(Protocol):
 
 
 class StrategyGenerator(Protocol):
-    def propose(self, snapshot: ProblemSnapshot,
-                context: PlanningContext = PlanningContext()) -> StrategyProposal: ...
+    def propose(
+        self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_PLANNING_CONTEXT
+    ) -> StrategyProposal: ...
 
 
 class BudgetTemplateParser(Protocol):
@@ -106,14 +115,29 @@ class ReportRenderer(Protocol):
     def render(self, report: ReportData) -> RenderedArtifact: ...
 
 
+class ReportComposer(Protocol):
+    def compose(self, report: ReportData, llm: LLMClient, control: RunControl) -> ReportOutline: ...
+
+
 class WorkbookMappingAnalyzer(Protocol):
-    def analyze(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
-                control: RunControl, snapshot: ProblemSnapshot | None = None) -> WorkbookMapping: ...
+    def analyze(
+        self,
+        solution: SolutionBundle,
+        template: BudgetTemplate,
+        llm: LLMClient,
+        control: RunControl,
+        snapshot: ProblemSnapshot | None = None,
+    ) -> WorkbookMapping: ...
 
 
 class WorkbookRenderer(Protocol):
-    def render(self, report: ReportData, template: BudgetTemplate | None,
-               content: bytes | None, mapping: WorkbookMapping | None) -> RenderedArtifact: ...
+    def render(
+        self,
+        report: ReportData,
+        template: BudgetTemplate | None,
+        content: bytes | None,
+        mapping: WorkbookMapping | None,
+    ) -> RenderedArtifact: ...
 
 
 class SpreadsheetConverter(Protocol):
@@ -140,8 +164,9 @@ class Repository(Protocol):
     def get(self, kind: str, project_id: str, record_id: str) -> JSONObject: ...
     def list(self, kind: str, project_id: str) -> list[JSONValue]: ...
     def list_all(self, kind: str) -> list[JSONObject]: ...
-    def save_snapshot(self, project_id: str, payload: JSONObject,
-                      expected_version: int | None = None) -> JSONObject: ...
+    def save_snapshot(
+        self, project_id: str, payload: JSONObject, expected_version: int | None = None
+    ) -> JSONObject: ...
     def snapshot(self, project_id: str, version: int | None = None) -> JSONObject: ...
     def versions(self, project_id: str) -> list[int]: ...
     def delete_project(self, project_id: str) -> None: ...
@@ -150,9 +175,13 @@ class Repository(Protocol):
 
 
 class JobRunner(Protocol):
-    def submit(self, project_id: str, kind: str,
-               operation: Callable[[RunControl], JSONValue],
-               metadata: JSONObject | None = None) -> JSONObject: ...
+    def submit(
+        self,
+        project_id: str,
+        kind: str,
+        operation: Callable[[RunControl], JSONValue],
+        metadata: JSONObject | None = None,
+    ) -> JSONObject: ...
     def cancel(self, project_id: str, job_id: str) -> JSONObject: ...
     def cancel_project(self, project_id: str) -> None: ...
     def close(self) -> None: ...

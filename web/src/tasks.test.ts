@@ -86,6 +86,20 @@ describe('reading progress and review summaries', () => {
     });
   });
 
+  it('tracks output roles and validation without counting the coordinator twice', () => {
+    const job = {
+      kind: 'artifact',
+      tasks: [
+        { id: 'answerer', agent: 'Answerer', status: 'running' },
+        { id: 'answerer:dispatch', agent: '主 Agent', parent_id: 'answerer', status: 'succeeded' },
+        { id: 'strategy', agent: 'Answerer', parent_id: 'answerer', status: 'cached' },
+        { id: 'risk', agent: 'Answerer', parent_id: 'answerer', status: 'running' },
+        { id: 'verify', agent: 'Validator', parent_id: 'answerer', status: 'queued' },
+      ],
+    } as Job;
+    expect(readingProgress(job)).toMatchObject({ total: 3, completed: 1, active: 1, waiting: 1 });
+  });
+
   it('shows each specific cause once while preserving separate genuine concerns', () => {
     const issue = (code: string, target: string, message: string): Issue => ({
       code,

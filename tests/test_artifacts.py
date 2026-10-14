@@ -2,6 +2,7 @@ import io
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
+from decimal import Decimal
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from docx import Document
@@ -13,6 +14,8 @@ from erp_agent.application.codec import budget_template
 from erp_agent.application.contracts import decode_proposal, dumps, loads, to_json
 from erp_agent.application.workbook_mapper import WorkbookMapper
 from erp_agent.domain.models import BudgetItem, ReportData, SolutionBundle, SolverMode, SourceDocument, WorkbookEntry
+from erp_agent.domain.errors import ERPError
+from erp_agent.domain.reporting import ReportNote, ReportOutline
 from erp_agent.domain.workbook import validate_mapping
 from tests.helpers import snapshot, proposal_json, Control, FakeLLM
 from erp_agent.application.solver import DraftPlanEvaluator
@@ -50,7 +53,7 @@ def template_fixture(transposed=False):
 
 
 class ArtifactTests(unittest.TestCase):
-    def test_formula_driven_inputs_use_agent_even_with_partial_previous_budget(self):
+    def test_formula_driven_inputs_reuse_fixed_budget_without_model_requests(self):
         data = report()
         workbook = Workbook()
         first = workbook.active
@@ -103,7 +106,8 @@ class ArtifactTests(unittest.TestCase):
         llm = MappingLLM('')
         with patch('erp_agent.application.workbook_mapper.MAPPING_BATCH_CHARS', 1):
             mapping = WorkbookMapper().analyze(data.solution, template, llm, Control(), data.snapshot)
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(len(llm.calls), 0)
+        self.assertEqual(mapping.entries[0].source_ids, ('budget:0',))
         self.assertEqual(len(mapping.entries), 3)
         self.assertFalse(any(i.severity == 'error' for i in mapping.issues))
         filled = XlsxWorkbookRenderer().render(data, template, content, replace(mapping, confirmed=True))
@@ -135,6 +139,51 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(len(tables), 16)
         self.assertTrue(all(t.cell(1, 3).text == '10' for t in tables))
         self.assertTrue(any('草稿' in p.text for p in document.paragraphs))
+
+    def test_report_uses_actual_cycle_and_keeps_final_quarter_after_sales_end(self):
+        data = report()
+        problem = replace(data.snapshot.reading.problem, years=2, periods_per_year=3)
+        data = replace(data, snapshot=replace(data.snapshot,
+                       reading=replace(data.snapshot.reading, problem=problem)))
+        document = Document(io.BytesIO(DocxReportRenderer().render(data).content))
+        headings = [p.text for p in document.paragraphs]
+        quarters = [text for text in headings if text.startswith('第 ') and ' · 第 ' in text]
+        self.assertEqual(len(quarters), 6)
+        self.assertIn('第 2 年 · 第 3 季', quarters)
+        self.assertNotIn('第 4 年 · 第 4 季', quarters)
+        self.assertTrue(any('不能视为无需经营或已经收官' in text for text in headings))
+        chapters = [text for text in headings if text.startswith(('一、', '二、', '三、', '四、'))]
+        self.assertEqual(chapters, ['一、题目参数速查', '二、关键时点与前置安排',
+                                    '三、战略路线与取舍', '四、逐季经营操作卡'])
+
+    def test_collaborative_notes_insert_referenced_plan_and_fact_values(self):
+        data = report()
+        action = replace(data.solution.plan.actions[0], amount=Decimal('10.50'), quantity=7)
+        budget = BudgetItem('template', '预算', 'B2', '运营准备金', 1, '元', '10.50', (0,), '沿用行动金额')
+        plan = replace(data.solution.plan, actions=(action, *data.solution.plan.actions[1:]),
+                       budget_items=(budget,))
+        note = ReportNote('先保障资金再执行', '根据当前行动安排付款。', (0,), ('cash',),
+                          budget_indices=(0,), period=1, condition='付款前资金不足',
+                          response='复核当前计划的付款安排')
+        data = replace(data, solution=replace(data.solution, plan=plan),
+                       outline=ReportOutline(strategy=(note,), milestones=(note,), risks=(note,)))
+        document = Document(io.BytesIO(DocxReportRenderer().render(data).content))
+        text = '\n'.join(p.text for p in document.paragraphs)
+        self.assertIn('触发条件：付款前资金不足', text)
+        cells = '\n'.join(cell.text for table in document.tables
+                          for row in table.rows for cell in row.cells)
+        self.assertIn('数量 7；金额 10.50', cells)
+        self.assertIn('公司 · initial_cash：100000 元', cells)
+        self.assertIn('运营准备金：10.50 元', cells)
+
+    def test_report_rejects_notes_from_another_solution_or_problem(self):
+        data = report()
+        for note in (ReportNote('战略', '说明', action_indices=(99,)),
+                     ReportNote('战略', '说明', fact_ids=('other-project-fact',)),
+                     ReportNote('战略', '说明', action_indices=(0,), period=3)):
+            with self.subTest(note=note), self.assertRaises(ERPError) as caught:
+                DocxReportRenderer().render(replace(data, outline=ReportOutline(strategy=(note,))))
+            self.assertEqual(caught.exception.code, 'report_references')
 
     def test_two_template_layouts_reference_sources_without_inventing_values(self):
         data = report()

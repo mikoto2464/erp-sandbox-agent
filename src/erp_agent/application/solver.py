@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 from importlib.resources import files
+from itertools import pairwise
 from uuid import uuid4
 
 from erp_agent.application.contracts import (
@@ -114,13 +115,17 @@ class LLMStrategyGenerator:
                     else self.llm.generate(request)
                 )
                 proposal = decode_proposal(normalize_model_json(response.content), response.model)
+                evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
+                errors = [
+                    i.message
+                    for i in evaluation.issues
+                    if i.severity == "error" and i.code.startswith("plan.")
+                ]
+                if errors:
+                    raise ERPError("strategy_plan_invalid", "；".join(errors[:8]))
                 if self.defer_budget:
                     if proposal.baseline.budget_items:
                         raise ERPError("invalid_contract", "行动统筹阶段不能生成预算条目。")
-                    evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
-                    errors = [i.message for i in evaluation.issues if i.severity == "error"]
-                    if errors:
-                        raise ERPError("strategy_plan_invalid", "；".join(errors[:8]))
                 if (
                     context.templates
                     and not self.defer_budget
@@ -157,7 +162,7 @@ class LLMStrategyGenerator:
                     "previous_output": response.content if response else None,
                     "error": error.message,
                     "instruction": "修正方案 JSON、字段类型及已定位的模板遗漏/输入错误，"
-                    "保持题目依据。"
+                    "修正完整经营周期与行动顺序，保持题目依据。"
                     "只返回一个完整 JSON 对象，不附加 Markdown 或说明。",
                 }
         raise ERPError("strategy_output_invalid", "未生成有效的方案结构。", 502)
@@ -180,7 +185,7 @@ class DraftPlanEvaluator:
             issues.append(Issue("plan.horizon_missing", "warning", "plan", "经营周期未确认。"))
         else:
             missing = set(range(1, horizon + 1)) - {a.period for a in plan.actions}
-            if missing or any(a.period > horizon for a in plan.actions):
+            if missing or any(not 1 <= a.period <= horizon for a in plan.actions):
                 issues.append(
                     Issue(
                         "plan.period_coverage",
@@ -192,6 +197,15 @@ class DraftPlanEvaluator:
         entities = {f.entity_id for f in problem.facts} | {"company"}
         if not plan.actions:
             issues.append(Issue("plan.empty", "error", "plan", "方案没有行动。"))
+        if any(later.period < earlier.period for earlier, later in pairwise(plan.actions)):
+            issues.append(
+                Issue(
+                    "plan.action_order",
+                    "error",
+                    "plan.actions",
+                    "行动须按经营期递增排列，同期保留按题目规则安排的执行次序。",
+                )
+            )
         for index, action in enumerate(plan.actions):
             if action.entity_id not in entities:
                 issues.append(

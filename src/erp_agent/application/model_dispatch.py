@@ -197,7 +197,9 @@ class ModelDispatcher:
         prompt = (
             files("erp_agent")
             .joinpath(
-                "prompts/solver_dispatch.txt"
+                "prompts/output_dispatch.txt"
+                if purpose == "answerer"
+                else "prompts/solver_dispatch.txt"
                 if purpose == "solver"
                 else "prompts/reader_dispatch.txt"
             )
@@ -246,7 +248,11 @@ class ModelDispatcher:
             LLMRequest(
                 prompt,
                 dumps(payload),
-                "erp_solver_dispatch" if purpose == "solver" else "erp_reader_dispatch",
+                "erp_output_dispatch"
+                if purpose == "answerer"
+                else "erp_solver_dispatch"
+                if purpose == "solver"
+                else "erp_reader_dispatch",
                 schema,
                 max_output_tokens=min(16000, max(2000, len(tasks) * 400)),
                 reasoning_reserve_tokens=8192,

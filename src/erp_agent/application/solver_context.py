@@ -88,6 +88,16 @@ def problem_material(snapshot: ProblemSnapshot, *, order_details: bool = True) -
         "title": problem.title,
         "years": problem.years,
         "periods_per_year": problem.periods_per_year,
+        "calendar": {
+            "total_periods": problem.years * problem.periods_per_year,
+            "final_period": problem.years * problem.periods_per_year,
+            "year_ranges": [
+                [year, (year - 1) * problem.periods_per_year + 1, year * problem.periods_per_year]
+                for year in range(1, problem.years + 1)
+            ],
+        }
+        if problem.years and problem.periods_per_year
+        else None,
         "fact_columns": [
             "id",
             "category",

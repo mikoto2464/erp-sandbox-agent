@@ -30,6 +30,15 @@ class MemoryLLMClient:
         if planner:
             planner(tuple(self._prepare(request) for request in requests), control, concurrency)
 
+    def plan_output(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        planner = getattr(self.client, "plan_output", None) or getattr(
+            self.client, "plan_solver", None
+        )
+        if planner:
+            planner(tuple(self._prepare(request) for request in requests), control, concurrency)
+
     def _generate(self, request: LLMRequest, control: RunControl | None = None) -> LLMResponse:
         prepared = self._prepare(request)
         controlled = getattr(self.client, "generate_controlled", None)

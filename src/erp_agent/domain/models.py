@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 
+from erp_agent.domain.reporting import ReportOutline
+
 
 class KnowledgeState(str, Enum):
     KNOWN = "known"
@@ -361,7 +363,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-7"
+    prompt_version: str = "solver-8"
 
 
 @dataclass(frozen=True)
@@ -425,6 +427,7 @@ class ReportData:
     snapshot: ProblemSnapshot
     solution: SolutionBundle
     sources: tuple[Evidence, ...] = ()
+    outline: ReportOutline | None = None
 
 
 @dataclass(frozen=True)

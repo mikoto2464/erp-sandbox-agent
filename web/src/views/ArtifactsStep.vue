@@ -101,7 +101,7 @@ const formulaNames: Record<string, string> = {
       <div class="module-grid">
         <article class="card module-card">
           <h3>经营方案文档</h3>
-          <p class="muted">策略、完整逐季操作、预算条目、风险与题目依据。</p>
+          <p class="muted">参数速查、关键时点、战略路线、逐季操作卡与风险应对。</p>
           <button
             class="primary"
             :disabled="pending || operations.has('export-docx')"
@@ -126,7 +126,7 @@ const formulaNames: Record<string, string> = {
         <div class="section-heading">
           <div>
             <h3>填写预算空表</h3>
-            <p class="muted">使用生成方案时选定的空表，填写值与方案预算保持一致。</p>
+            <p class="muted">直接复用已核对空表和方案预算，只填写空白输入格。</p>
           </div>
         </div>
         <p

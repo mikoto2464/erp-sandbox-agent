@@ -43,3 +43,12 @@ class TaskLLMClient:
         planner = getattr(self.client, "plan_solver", None)
         if planner:
             planner(requests, control, concurrency)
+
+    def plan_output(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        planner = getattr(self.client, "plan_output", None) or getattr(
+            self.client, "plan_solver", None
+        )
+        if planner:
+            planner(requests, control, concurrency)

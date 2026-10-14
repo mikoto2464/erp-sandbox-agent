@@ -101,11 +101,13 @@ function duration(task: AgentTask) {
         </p>
       </div>
       <div
-        v-if="['read', 'solve'].includes(job.kind) && readingProgress(job).total"
+        v-if="
+          ['read', 'solve', 'mapping', 'artifact'].includes(job.kind) && readingProgress(job).total
+        "
         class="reading-progress"
       >
         <div class="task-row-heading">
-          <strong>{{ job.kind === 'solve' ? '角色协作' : '章节 / 工作表解析' }}</strong>
+          <strong>{{ job.kind === 'read' ? '章节 / 工作表解析' : '角色协作' }}</strong>
           <span
             >已处理 {{ readingProgress(job).processed }} / {{ readingProgress(job).total }}</span
           >

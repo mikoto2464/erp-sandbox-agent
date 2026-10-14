@@ -230,6 +230,11 @@ class ScheduledLLMClient:
     ) -> None:
         self.plan_reading(requests, control, concurrency, purpose="solver")
 
+    def plan_output(
+        self, requests: tuple[LLMRequest, ...], control: RunControl, concurrency: int
+    ) -> None:
+        self.plan_reading(requests, control, concurrency, purpose="answerer")
+
     def plan_reading(
         self,
         requests: tuple[LLMRequest, ...],
@@ -243,18 +248,27 @@ class ScheduledLLMClient:
             raise ERPError("dispatch_contract", "统筹请求缺少任务标识。")
         primary = self.models[0]
         solver = purpose == "solver"
+        output = purpose == "answerer"
         task = TaskContext(
             purpose + ":dispatch",
             "主 Agent",
-            "统一分配协作规划" if solver else "统一分配章节与整表",
-            f"{len(requests)} 个{'规划' if solver else '读题'}任务",
+            "统一分配输出协作"
+            if output
+            else "统一分配协作规划"
+            if solver
+            else "统一分配章节与整表",
+            f"{len(requests)} 个{'输出' if output else '规划' if solver else '读题'}任务",
             purpose,
         )
         report_task(
             control,
             task,
             "waiting",
-            stage="dispatching_solver" if solver else "dispatching_reading",
+            stage="dispatching_output"
+            if output
+            else "dispatching_solver"
+            if solver
+            else "dispatching_reading",
         )
         acquired = self._acquire((primary,), control)
         try:
@@ -273,7 +287,7 @@ class ScheduledLLMClient:
                 model_loads=catalog,
             )
             try:
-                options = {"purpose": purpose} if solver else {}
+                options = {"purpose": purpose} if solver or output else {}
                 decisions = self.dispatcher.plan_reading(
                     requests,
                     catalog,
@@ -286,7 +300,7 @@ class ScheduledLLMClient:
                 raise
             except ERPError as error:
                 reason = (
-                    "章节统筹失败，保守回退到可承载输入的最高优先级模型；" + error.message[:200]
+                    "任务统筹失败，保守回退到可承载输入的最高优先级模型；" + error.message[:200]
                 )
                 decisions = {}
                 for request in requests:
@@ -297,7 +311,7 @@ class ScheduledLLMClient:
                     )
                     if model is None:
                         raise ERPError(
-                            "llm_input_limit", "完整读题任务超过所有模型输入上限。", 413
+                            "llm_input_limit", "完整任务超过所有模型输入上限。", 413
                         ) from error
                     decisions[request.task.id] = DispatchDecision(
                         "unassessed",
@@ -319,6 +333,8 @@ class ScheduledLLMClient:
                 planned_count=len(decisions),
                 dispatch_reason=next(iter(decisions.values())).summary
                 if failed
+                else "已统一安排文档与填写任务，子角色直接执行。"
+                if output
                 else "已统一安排协作规划，子任务直接执行。"
                 if solver
                 else "已统一安排章节与整表，子任务直接执行。",
@@ -338,7 +354,11 @@ class ScheduledLLMClient:
                         next(m.preset_name for m in self.models if m.preset_id == a.preset_id)
                         for a in decision.assignments
                     ],
-                    stage="planning_assigned" if solver else "reading_assigned",
+                    stage="output_assigned"
+                    if output
+                    else "planning_assigned"
+                    if solver
+                    else "reading_assigned",
                 )
         finally:
             self.capacity.release(acquired)
@@ -359,6 +379,7 @@ class ScheduledLLMClient:
                 and (
                     child.parent_id.startswith("template-read:")
                     or child.parent_id.startswith("solver:")
+                    or child.parent_id.startswith("mapper:")
                 )
             ):
                 planned = self._reading_plan.get(child.parent_id)
@@ -371,12 +392,17 @@ class ScheduledLLMClient:
                 planned = None
         if planned:
             solver = planned[1].startswith("solver:")
+            output = planned[1].startswith("answerer:")
             dispatch = TaskContext(
                 planned[1],
                 "主 Agent",
-                "统一分配协作规划" if solver else "统一分配章节与整表",
-                "规划统筹" if solver else "读题统筹",
-                "solver" if solver else "reader",
+                "统一分配输出协作"
+                if output
+                else "统一分配协作规划"
+                if solver
+                else "统一分配章节与整表",
+                "输出统筹" if output else "规划统筹" if solver else "读题统筹",
+                "answerer" if output else "solver" if solver else "reader",
             )
         else:
             child, dispatch = self._task(request)

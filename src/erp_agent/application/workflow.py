@@ -572,7 +572,7 @@ class WorkflowService:
                 if self.memory:
                     self.memory.remember(snapshot)
                     role_memory = self.memory.scope(project_id, snapshot.version,
-                        "solver:" + hashlib.sha256(dumps({"config": config, "version": "solver-7",
+                        "solver:" + hashlib.sha256(dumps({"config": config, "version": "solver-8",
                             "model": binding.metadata() if binding else None}).encode()).hexdigest(),
                         snapshot.document_ids)
                     role_memory.put("requirements", {"generation": to_json(config)})
@@ -589,5 +589,5 @@ class WorkflowService:
 
         return self.jobs.submit(project_id, "solve", operation,
                                 {"mode": mode.value, "version": snapshot.version,
-                                 "generation": to_json(config), "prompt_version": "solver-7",
+                                 "generation": to_json(config), "prompt_version": "solver-8",
                                  "model_preset": binding.metadata() if binding else None})

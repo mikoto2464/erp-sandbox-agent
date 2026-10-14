@@ -67,8 +67,18 @@ class CollaborativeStrategyGenerator:
             )
         )
         roles = [
-            ("operations", "产销与资源规划", "协调产品、订单池、产能、材料、人力、研发与认证。"),
-            ("finance", "资金与风险规划", "协调融资、费用、现金时序、商誉、碳及得分条件。"),
+            (
+                "operations",
+                "产销与资源规划",
+                "从可履约订单窗口倒推市场、认证、研发、安装、培训、采购及生产启动；"
+                "明确产能材料人力约束、订单取舍与各年度阶段，区分待竞目标和已签合同。",
+            ),
+            (
+                "finance",
+                "资金与风险规划",
+                "沿经营动作的实际支付顺序安排资金，区分销售、应收与回款；"
+                "核对融资成本及到期、固定费用、商誉、碳和完整末期收官风险。",
+            ),
         ]
         if context.templates:
             roles.append(("budget", "模板预算规划", "按已核对空表识别输入项目与经营动作依赖。"))
@@ -153,7 +163,7 @@ class CollaborativeStrategyGenerator:
                 + hashlib.sha256(
                     dumps(
                         {
-                            "version": "solver-7",
+                            "version": "solver-8",
                             "material": material,
                             "prompt": prompt,
                             "schema": schema,

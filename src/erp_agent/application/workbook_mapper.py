@@ -1,22 +1,18 @@
-from dataclasses import replace
-from importlib.resources import files
 from uuid import uuid4
 
-from erp_agent.application.budget_context import budget_material
-from erp_agent.application.codec import workbook_entries
 from erp_agent.application.contracts import (
     TEXT,
     TEXTS,
-    JSONObject,
     array,
     dumps,
-    loads,
-    obj,
     object_schema,
 )
-from erp_agent.application.model_output import normalize_model_json
-from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
-from erp_agent.application.task_reporting import TaskLLMClient, report_task
+from erp_agent.application.legacy_workbook_mapper import legacy_mapping
+from erp_agent.application.mapping_sources import mapping_material
+from erp_agent.application.memory import RoleMemory
+from erp_agent.application.ports import LLMClient, RunControl, TaskContext
+from erp_agent.application.task_reporting import report_task
+from erp_agent.application.workbook_mapping_tasks import WorkbookMappingTasks
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     BudgetTemplate,
@@ -27,98 +23,173 @@ from erp_agent.domain.models import (
 )
 from erp_agent.domain.workbook import output_sources, validate_mapping, writable_target
 
-MAPPING_SCHEMA = object_schema({"entries": {"type": "array", "items": object_schema({
-    "sheet": TEXT, "cell": TEXT, "label": TEXT, "source_ids": TEXTS,
-    "conversion": {"type": "string", "enum": ["identity", "sum", "yuan_to_wan", "wan_to_yuan", "ratio_to_percent"]},
-    "explanation": TEXT,
-})}})
-MAPPING_BATCH_CHARS = 80000
+MAPPING_SCHEMA = object_schema(
+    {
+        "entries": {
+            "type": "array",
+            "items": object_schema(
+                {
+                    "sheet": TEXT,
+                    "cell": TEXT,
+                    "label": TEXT,
+                    "source_ids": TEXTS,
+                    "conversion": {
+                        "type": "string",
+                        "enum": [
+                            "identity",
+                            "sum",
+                            "yuan_to_wan",
+                            "wan_to_yuan",
+                            "ratio_to_percent",
+                        ],
+                    },
+                    "explanation": TEXT,
+                }
+            ),
+        }
+    }
+)
+MAPPING_BATCH_CHARS = 24000
+MAPPING_VERSION = "mapper-5"
 
 
 class WorkbookMapper:
-    def analyze(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
-                control: RunControl, snapshot: ProblemSnapshot | None = None) -> WorkbookMapping:
-        material = budget_material((template,), include_formula_references=True)[0]
-        batches = (template,)
-        if len(dumps(material)) > MAPPING_BATCH_CHARS:
-            batches = tuple(replace(template, sheets=(sheet,)) for sheet in template.sheets if not sheet.hidden)
-        entries: tuple[WorkbookEntry, ...] = ()
-        model = ""
-        for index, batch in enumerate(batches):
-            control.checkpoint("mapping_template", index)
-            names = {s.name for s in batch.sheets}
-            batch_material: JSONObject = {
-                **material,
-                "sheets": [s for value in array(material["sheets"])
-                           for s in (obj(value),) if s["name"] in names],
-            }
-            task = TaskContext(f"mapper:{index}", "Answerer", "表格条目对应",
-                               template.source.filename + " · " + "、".join(s.name for s in batch.sheets),
-                               "mapper")
-            base_client = llm.client if isinstance(llm, TaskLLMClient) else llm
-            batch_client = TaskLLMClient(base_client, control, task)
-            batch_entries, model = self._map_batch(solution, batch, batch_client, control, snapshot,
-                                                   tuple(s.name for s in template.sheets), batch_material)
-            report_task(control, task, "succeeded", entry_count=len(batch_entries), model=model)
-            entries += batch_entries
+    def __init__(self, memory: RoleMemory | None = None) -> None:
+        self.memory = memory
+
+    def analyze(
+        self,
+        solution: SolutionBundle,
+        template: BudgetTemplate,
+        llm: LLMClient,
+        control: RunControl,
+        snapshot: ProblemSnapshot | None = None,
+    ) -> WorkbookMapping:
+        planned = tuple(
+            (index, item)
+            for index, item in enumerate(solution.plan.budget_items)
+            if item.template_id == template.source.id
+        )
+        if not planned:
+            return legacy_mapping(
+                solution, template, llm, control, snapshot, dumps(MAPPING_SCHEMA), MAPPING_VERSION
+            )
+        if snapshot:
+            reading = next(
+                (t for t in snapshot.template_readings if t.template_id == template.source.id), None
+            )
+            if reading and (not reading.reviewed or reading.sha256 != template.source.sha256):
+                raise ERPError(
+                    "template_not_reviewed", "空表与已核对版本不一致，请先在空表库核对。", 409
+                )
+        sheets = {sheet.name: sheet for sheet in template.sheets}
+        cells = {
+            sheet.name: {cell.coordinate: cell for cell in sheet.cells} for sheet in template.sheets
+        }
+        for _, item in planned:
+            if item.sheet not in sheets or not writable_target(
+                sheets[item.sheet], item.cell, cells[item.sheet]
+            ):
+                raise ERPError(
+                    "mapping_readonly", "方案预算位置不是空白可写格，请返回经营方案修正。", 409
+                )
+        fixed = tuple(
+            WorkbookEntry(
+                item.sheet,
+                item.cell,
+                item.label,
+                (f"budget:{index}",) if item.value is not None else (),
+                explanation=item.explanation,
+            )
+            for index, item in planned
+        )
+        WorkbookMappingTasks.raise_errors(validate_mapping(template, fixed, solution, snapshot))
+        task = TaskContext(
+            "mapper:prepare", "Answerer", "沿用方案预算", template.source.filename, "mapper"
+        )
+        report_task(
+            control,
+            task,
+            "succeeded",
+            entry_count=len(fixed),
+            fixed_count=sum(bool(entry.source_ids) for entry in fixed),
+        )
+        sources = output_sources(solution, snapshot)
+        units = []
+        for sheet in template.sheets:
+            pending = tuple(
+                (index, item)
+                for index, item in planned
+                if item.sheet == sheet.name and item.value is None
+            )
+            if not pending:
+                continue
+            material = mapping_material(solution, template, snapshot, pending, sources)
+            if not array(material["sources"]):
+                report_task(
+                    control,
+                    TaskContext(
+                        f"mapper:{sheet.name}",
+                        "Answerer",
+                        "填写来源核对",
+                        template.source.filename + " · " + sheet.name,
+                        "mapper",
+                    ),
+                    "succeeded",
+                    unresolved_count=len(pending),
+                    detail="暂无可用的已有方案来源，保留空格与原规划说明。",
+                )
+                continue
+            units.append(
+                (
+                    TaskContext(
+                        f"mapper:{sheet.name}",
+                        "Answerer",
+                        "填写来源核对",
+                        template.source.filename + " · " + sheet.name,
+                        "mapper",
+                    ),
+                    material,
+                )
+            )
+        findings, models = WorkbookMappingTasks(self.memory).run(
+            units,
+            solution,
+            template,
+            fixed,
+            llm,
+            control,
+            snapshot,
+            MAPPING_SCHEMA,
+            MAPPING_VERSION,
+            MAPPING_BATCH_CHARS,
+        )
+        by_target = {(entry.sheet, entry.cell): entry for entry in findings}
+        entries = tuple(by_target.get((entry.sheet, entry.cell), entry) for entry in fixed)
         control.checkpoint("validating_mapping")
         issues = validate_mapping(template, entries, solution, snapshot)
-        return WorkbookMapping(uuid4().hex, solution.project_id, solution.id, solution.problem_version,
-                               template.source.id, template.source.sha256, entries, issues,
-                               model=model, prompt_version="mapper-4")
-
-    def _map_batch(self, solution: SolutionBundle, template: BudgetTemplate, llm: LLMClient,
-                   control: RunControl, snapshot: ProblemSnapshot | None,
-                   sheet_names: tuple[str, ...], material: JSONObject) -> tuple[tuple[WorkbookEntry, ...], str]:
-        prompt = files("erp_agent").joinpath("prompts/mapper.txt").read_text(encoding="utf-8")
-        schema = dumps(MAPPING_SCHEMA)
-        original = {"template": material,
-                    "workbook_sheet_names": sheet_names,
-                    "sources": output_sources(solution, snapshot), "plan": solution.plan,
-                    "problem": snapshot.reading.problem if snapshot else None,
-                    "rules": snapshot.reading.rules if snapshot else None,
-                    "template_readings": tuple(
-                        t for t in snapshot.template_readings if t.template_id == template.source.id
-                    ) if snapshot else (),
-                    "evaluation": solution.evaluation}
-        batch_sheets = {s.name for s in template.sheets}
-        planned = tuple((i, item) for i, item in enumerate(solution.plan.budget_items)
-                        if item.template_id == template.source.id
-                        and item.sheet in batch_sheets)
-        original["planned_inputs"] = tuple({"item": item, "source_id": f"budget:{i}"} for i, item in planned)
-        payload = original
-        for attempt in range(2):
-            response = None
-            try:
-                response = llm.generate(LLMRequest(prompt + "\nJSON schema:\n" + schema,
-                                                   dumps(payload), "erp_workbook_mapping", schema))
-                data = obj(loads(normalize_model_json(response.content)), {"entries"})
-                entries = workbook_entries(data["entries"])
-                sheets = {s.name: s for s in template.sheets}
-                cells = {s.name: {c.coordinate: c for c in s.cells} for s in template.sheets}
-                # 公式和已有数据不进入待填写清单；尝试覆盖它们仍须报错。
-                entries = tuple(e for e in entries if e.source_ids or e.sheet not in sheets
-                                or writable_target(sheets[e.sheet], e.cell, cells[e.sheet]))
-                seen = {(e.sheet, e.cell) for e in entries}
-                entries += tuple(WorkbookEntry(item.sheet, item.cell, item.label,
-                                                (f"budget:{i}",) if item.value is not None else (),
-                                                explanation=item.explanation)
-                                 for i, item in planned if (item.sheet, item.cell) not in seen
-                                 and writable_target(sheets[item.sheet], item.cell, cells[item.sheet]))
-                errors = [i for i in validate_mapping(template, entries, solution, snapshot)
-                          if i.severity == "error"]
-                if errors and not attempt:
-                    control.checkpoint("repairing_mapping")
-                    payload = {**original, "previous_output": response.content,
-                               "errors": errors, "instruction": "修正映射位置与来源；只保留输入项，不能创造数值。"}
-                    continue
-                return entries, response.model
-            except ERPError as exc:
-                if response is None and exc.code != "llm_structured_response":
-                    raise
-                if attempt:
-                    raise ERPError("mapping_output_invalid", "模型未返回有效表格映射。" + exc.message, 502) from exc
-                control.checkpoint("repairing_mapping")
-                payload = {**original, "previous_output": response.content if response else None,
-                           "error": exc.message, "instruction": "只修正映射JSON，不能创造来源或数值。"}
-        raise ERPError("mapping_output_invalid", "模型未返回有效表格映射。", 502)
+        report_task(
+            control,
+            TaskContext(
+                "mapper:validation",
+                "Answerer",
+                "核对预算与可写位置",
+                template.source.filename,
+                "mapper",
+            ),
+            "succeeded",
+            entry_count=len(entries),
+            unresolved_count=sum(not e.source_ids for e in entries),
+        )
+        return WorkbookMapping(
+            uuid4().hex,
+            solution.project_id,
+            solution.id,
+            solution.problem_version,
+            template.source.id,
+            template.source.sha256,
+            entries,
+            issues,
+            model="、".join(dict.fromkeys(models)),
+            prompt_version=MAPPING_VERSION,
+        )
