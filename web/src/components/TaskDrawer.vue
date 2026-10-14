@@ -313,6 +313,12 @@ function duration(task: AgentTask) {
               {{ task.recovery }}
             </p>
             <p
+              v-if="task.unresolved_reason"
+              class="notice"
+            >
+              已有部分建议，待补信息：{{ task.unresolved_reason }}
+            </p>
+            <p
               v-if="task.error"
               class="error"
             >

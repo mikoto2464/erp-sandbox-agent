@@ -806,7 +806,7 @@ class WorkflowService:
                             dumps(
                                 {
                                     "config": config,
-                                    "version": "solver-9",
+                                    "version": "solver-10",
                                     "model": binding.metadata() if binding else None,
                                 }
                             ).encode()
@@ -856,7 +856,7 @@ class WorkflowService:
                 "mode": mode.value,
                 "version": snapshot.version,
                 "generation": to_json(config),
-                "prompt_version": "solver-9",
+                "prompt_version": "solver-10",
                 "model_preset": binding.metadata() if binding else None,
             },
         )

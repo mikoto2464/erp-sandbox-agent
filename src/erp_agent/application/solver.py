@@ -27,6 +27,7 @@ from erp_agent.application.solver_collaboration import (
     CollaborativeStrategyGenerator as CollaborativeStrategyGenerator,
 )
 from erp_agent.application.solver_context import (
+    planning_policy,
     role_material,
 )
 from erp_agent.domain.action_validation import validate_actions
@@ -37,7 +38,6 @@ from erp_agent.domain.models import (
     Issue,
     Plan,
     PlanningContext,
-    PlanTone,
     ProblemSnapshot,
     SolutionBundle,
     SolveRequest,
@@ -70,19 +70,13 @@ class LLMStrategyGenerator:
             snapshot, "coordinator" if self.collaboration else "operations", self.candidate_actions
         )
         instruction = "只生成完整经营行动草稿，parameters 必须为空数组，budget_items 必须为空数组。"
-        tones = {
-            PlanTone.CONSERVATIVE: "保守：优先现金安全与履约，控制借款、扩产和前期投入，"
-            "说明收益取舍。",
-            PlanTone.BALANCED: "平稳：兼顾现金周转与增长，分阶段投入，给出适度的风险缓冲。",
-            PlanTone.AGGRESSIVE: "激进：在题目硬约束内争取增长与得分，可提高投入或融资，"
-            "说明压力与退路。",
-            PlanTone.CUSTOM: "自定义：采用 custom_prompt 中的经营偏好，仍遵守题目与已确认规则。",
-        }
+        policy = planning_policy(context)
         payload = {
             "snapshot": material,
             "mode_instruction": instruction,
             "generation": context.config,
-            "tone_instruction": tones[context.config.tone],
+            "tone_instruction": policy["tone_instruction"],
+            "planning_policy": policy,
             "template_requirements": to_json(snapshot.template_readings),
             "previous_plan": context.previous_plan,
             "collaboration": self.collaboration,

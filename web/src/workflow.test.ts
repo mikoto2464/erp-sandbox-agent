@@ -1121,6 +1121,8 @@ describe('Vue migration', () => {
           assignment_reason: '存在合并表头，选择具备表格关联能力的模型。',
           preset_name: '轻量模型',
           evidence_count: 44,
+          result_status: 'partial',
+          unresolved_reason: '初始存量仍待核对',
         },
         {
           id: 'waiting',
@@ -1179,6 +1181,9 @@ describe('Vue migration', () => {
     expect(wrapper.find('.task-detail').text()).toContain('轻量模型 · flash');
     expect(wrapper.find('.task-detail').text()).toContain('本地规则分级：中等');
     expect(wrapper.find('.task-detail').text()).toContain('共享端点额度已占满');
+    expect(wrapper.find('.task-detail').text()).toContain(
+      '已有部分建议，待补信息：初始存量仍待核对',
+    );
     expect(wrapper.find('.task-detail').text()).toContain('存在合并表头');
     expect(wrapper.find('.task-detail').text()).toContain('等待可用模型：主模型');
     await wrapper.find('.drawer-modal').trigger('pointerdown', { clientX: -1, clientY: -1 });

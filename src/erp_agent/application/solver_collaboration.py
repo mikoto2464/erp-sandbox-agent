@@ -24,7 +24,12 @@ from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.memory import RoleMemory
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
-from erp_agent.application.solver_context import action_material, role_material, selected_snapshot
+from erp_agent.application.solver_context import (
+    action_material,
+    planning_policy,
+    role_material,
+    selected_snapshot,
+)
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.action_validation import validate_actions
 from erp_agent.domain.errors import Cancelled, ERPError
@@ -39,12 +44,14 @@ def decode_specialist(
     data = obj(value, set(SPECIALIST_SCHEMA["properties"]))
     status = string(data["status"])
     reason = string(data["reason"], 1200)
-    if status not in {"applicable", "not_applicable", "missing_input", "failed"}:
+    if status not in {"applicable", "partial", "not_applicable", "missing_input", "failed"}:
         raise ERPError("solver_status", "协作任务状态无效。")
     if status in {"missing_input", "failed"}:
         raise ERPError("solver_" + status, reason or "任务未提供可用结果。")
     if status == "not_applicable" and not reason.strip():
         raise ERPError("solver_status", "不适用结果必须明确说明原因。")
+    if status == "partial" and not reason.strip():
+        raise ERPError("solver_status", "部分建议必须说明剩余缺口及受影响范围。")
     proposed_items = []
     for index, value in enumerate(array(data["candidate_actions"])):
         try:
@@ -85,6 +92,8 @@ def decode_specialist(
         raise ERPError("solver_empty", "空结果必须说明不适用、缺少输入或失败，不能标为有效建议。")
     if status == "not_applicable" and (proposed or any(counts.values())):
         raise ERPError("solver_status", "不适用结果不能同时提供行动或结论。")
+    if status == "partial" and not (proposed or counts["recommendations"]):
+        raise ERPError("solver_empty", "部分结果必须提供有依据的行动或建议，不能只有缺失说明。")
     for name in ("recommendations", "dependencies", "risks"):
         expected = set(obj(SPECIALIST_SCHEMA["properties"])[name]["items"]["properties"])
         seen = set()
@@ -133,6 +142,18 @@ def decode_specialist(
                 ):
                     raise ERPError("solver_source", f"{target}.condition 引用无效。")
                 string(entry["response"])
+    if status == "partial":
+        anchored = any(a.fact_ids or a.rule_ids or a.gap_ids for a in proposed) or any(
+            entry.get("fact_ids")
+            or entry.get("rule_ids")
+            or entry.get("gap_ids")
+            or set(strings(entry.get("action_ids", []))).intersection(
+                a.action_id for a in candidate_actions
+            )
+            for entry in (obj(v) for v in array(data["recommendations"]))
+        )
+        if not anchored:
+            raise ERPError("solver_source", "部分结果必须引用已有事实、规则、缺口或上游行动。")
     return data
 
 
@@ -216,6 +237,7 @@ class CollaborativeStrategyGenerator:
                 **role_material(snapshot, role, candidates),
                 "role": role,
                 "generation": to_json(context.config),
+                "planning_policy": planning_policy(context),
             }
             if role == "operations":
                 material["previous_plan"] = to_json(
@@ -245,7 +267,7 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-9", "request": request}).encode()
+                    dumps({"version": "solver-10", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
@@ -269,7 +291,7 @@ class CollaborativeStrategyGenerator:
                     raw = obj(loads(normalize_model_json(response.content)))
                     data = decode_specialist(raw, snapshot, candidate_actions=candidates)
                 except ERPError as error:
-                    if error.code in {"solver_missing_input", "solver_failed"}:
+                    if error.code == "solver_failed":
                         raise
                     raw = locals().get("raw")
                     patch = specialist_patch(raw, error) if raw is not None else None
@@ -316,13 +338,21 @@ class CollaborativeStrategyGenerator:
                         )
                         data = decode_specialist(patched, snapshot, candidate_actions=candidates)
                     else:
-                        if raw is not None and error.code not in {"solver_empty", "solver_status"}:
+                        if raw is not None and error.code not in {
+                            "solver_empty",
+                            "solver_status",
+                            "solver_missing_input",
+                        }:
                             raise
                         repair_payload = {
                             **material,
                             "error": error.message,
                             "instruction": "输出无法完整解析或不符合任务边界，"
-                            "有限重生成符合 schema 的本任务结果。",
+                            "核对 planning_policy 与完整 facts/fact_tables 后有限重生成。"
+                            "不要求唯一经营路线，选竞单目标本身属于候选决策；"
+                            "不要把未赢单或未指定偏好当作全任务失败。"
+                            "真实缺口仍保持未知；有依据的部分行动/建议用 partial，"
+                            "无法形成任何有依据的结论才继续 missing_input。",
                         }
                         repaired = recovery_call(
                             client, replace(request, user=dumps(repair_payload)), self.control
@@ -333,12 +363,14 @@ class CollaborativeStrategyGenerator:
                             candidate_actions=candidates,
                         )
                 self.control.checkpoint("saving_planning_progress")
-                if self.memory:
+                if self.memory and data["status"] != "partial":
                     self.memory.put(key, {"result": data})
                 report_task(
                     self.control,
                     task,
-                    "succeeded",
+                    "needs_input" if data["status"] == "partial" else "succeeded",
+                    result_status=data["status"],
+                    unresolved_reason=data["reason"] if data["status"] == "partial" else "",
                     recommendation_count=len(array(data["recommendations"])),
                 )
                 return {"role": material["role"], **data}
@@ -348,7 +380,7 @@ class CollaborativeStrategyGenerator:
                 report_task(self.control, task, "failed", error=error.message)
                 raise ERPError(
                     error.code,
-                    f"{task.object} · {task.role}：{error.message} 已完成任务已保存。",
+                    f"{task.object} · {task.role}：{error.message} 已有的成功缓存会保留。",
                     error.status,
                 ) from error
 
@@ -390,7 +422,7 @@ class CollaborativeStrategyGenerator:
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-9",
+                        "version": "solver-10",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,
@@ -421,5 +453,18 @@ class CollaborativeStrategyGenerator:
             except ERPError as error:
                 report_task(self.control, synthesis_task, "failed", error=error.message)
                 raise
+        unresolved = tuple(
+            f"{finding['role']} 规划缺口：{finding['reason']}"
+            for finding in findings
+            if finding.get("status") == "partial"
+        )
+        if unresolved:
+            proposal = replace(
+                proposal,
+                baseline=replace(
+                    proposal.baseline,
+                    risks=tuple(dict.fromkeys((*proposal.baseline.risks, *unresolved))),
+                ),
+            )
         report_task(self.control, synthesis_task, "succeeded", model=proposal.model)
         return proposal

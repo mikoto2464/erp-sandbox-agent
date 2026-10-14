@@ -683,7 +683,7 @@ SPECIALIST_SCHEMA = object_schema(
     {
         "status": {
             "type": "string",
-            "enum": ["applicable", "not_applicable", "missing_input", "failed"],
+            "enum": ["applicable", "partial", "not_applicable", "missing_input", "failed"],
         },
         "reason": TEXT,
         "candidate_actions": {"type": "array", "items": ACTION_SCHEMA},

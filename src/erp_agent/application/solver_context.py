@@ -3,7 +3,34 @@ from dataclasses import fields, is_dataclass, replace
 
 from erp_agent.application.contracts import JSONObject, to_json
 from erp_agent.application.template_reader import template_material
-from erp_agent.domain.models import Action, BudgetTemplate, Fact, ProblemSnapshot
+from erp_agent.domain.models import (
+    Action,
+    BudgetTemplate,
+    Fact,
+    PlanningContext,
+    PlanTone,
+    ProblemSnapshot,
+)
+
+
+def planning_policy(context: PlanningContext) -> JSONObject:
+    tones = {
+        PlanTone.CONSERVATIVE: "保守：优先现金安全与履约，控制借款、扩产和前期投入，说明收益取舍。",
+        PlanTone.BALANCED: "平稳：兼顾现金周转与增长，分阶段投入，给出适度的风险缓冲。",
+        PlanTone.AGGRESSIVE: "激进：在题目硬约束内争取增长与得分，说明融资和投入压力及退路。",
+        PlanTone.CUSTOM: "自定义：采用 custom_prompt 中的偏好，仍遵守题目与已确认规则。",
+    }
+    return {
+        "purpose": "经营行动草稿；制定候选策略，不要求唯一解或已验证经营可行性。",
+        "tone_instruction": tones[context.config.tone],
+        "decision_scope": "竞单目标、产品路线和投入安排由产销角色根据题目与用户偏好提出；"
+        "用户未指定目标或订单池没有已签合同，不构成规划输入缺失。",
+        "fact_boundary": "拟定数量、投入和期间是候选决策，须引用容量、价格、需求或提前期依据，"
+        "不能作为已发生经营事实。合同获得、市场准入、初始存量未知时不得假定已满足或为零。",
+        "missing_data": "先用已知事实形成有依据的候选与关联建议；未知值保持 null 和明确原因，"
+        "受影响动作说明执行前核对条件。仍有可用的有引用结论时返回 partial 并定位剩余缺口；"
+        "只有无法形成任何有依据的行动或建议时返回 missing_input。",
+    }
 
 
 def problem_material(snapshot: ProblemSnapshot, *, order_details: bool = True) -> JSONObject:

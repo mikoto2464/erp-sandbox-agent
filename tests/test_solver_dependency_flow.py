@@ -42,6 +42,117 @@ def specialist(role):
 
 
 class SolverDependencyFlowTests(unittest.TestCase):
+    def test_missing_unique_route_is_reconsidered_once_and_partial_plan_keeps_unknowns(self):
+        calls = []
+        partial = specialist("operations")
+        partial.update(status="partial", reason="初始产线存量未知，执行前须核对资源条件。")
+        partial["candidate_actions"] = [structured_action(description="核对资源并评估竞单路线")]
+        outer = self
+
+        class Client:
+            configured = True
+
+            def generate(self, request):
+                data = loads(request.user)
+                role = data.get("role", "coordinator")
+                calls.append(role)
+                outer.assertIn("不要求唯一", data["planning_policy"]["purpose"])
+                outer.assertNotIn("initial_inventory", request.user)
+                if role == "operations" and calls.count(role) == 1:
+                    missing = specialist("finance")
+                    missing.update(
+                        status="missing_input", reason="未指定竞单目标，无法生成唯一路线。"
+                    )
+                    return LLMResponse(dumps(missing), "same")
+                if role == "operations":
+                    outer.assertIn("error", data)
+                    return LLMResponse(dumps(partial), "same")
+                if role == "finance":
+                    action = data["candidate_plan"]["actions"][0]
+                    outer.assertIsNone(action[4])  # quantity
+                    outer.assertIsNone(action[6])  # amount
+                    return LLMResponse(dumps(specialist("finance")), "same")
+                outer.assertEqual(data["collaboration"][0]["status"], "partial")
+                result = loads(structured_proposal_json())
+                result["plan"]["actions"][0] = partial["candidate_actions"][0]
+                return LLMResponse(dumps(result), "same")
+
+        result = CollaborativeStrategyGenerator(Client(), Control()).propose(snapshot())
+        self.assertEqual(calls, ["operations", "operations", "finance", "coordinator"])
+        self.assertIsNone(result.baseline.actions[0].quantity)
+        self.assertIsNone(result.baseline.actions[0].amount)
+        self.assertIn("初始产线存量未知", result.baseline.risks[-1])
+
+    def test_real_blocking_missing_input_stops_after_one_reconsideration(self):
+        calls = []
+
+        class Client:
+            configured = True
+
+            def generate(self, request):
+                calls.append(loads(request.user).get("role"))
+                missing = specialist("finance")
+                missing.update(
+                    status="missing_input", reason="资料没有经营规则，无法形成有依据的候选。"
+                )
+                return LLMResponse(dumps(missing), "same")
+
+        with self.assertRaises(ERPError) as caught:
+            CollaborativeStrategyGenerator(Client(), Control()).propose(snapshot())
+        self.assertEqual(calls, ["operations", "operations"])
+        self.assertEqual(caught.exception.code, "solver_missing_input")
+
+    def test_partial_requires_nonempty_supported_conclusions(self):
+        data = specialist("operations")
+        data.update(status="partial", reason="初始资源待补，影响开产安排。")
+        data["candidate_actions"] = []
+        with self.assertRaises(ERPError) as caught:
+            decode_specialist(data, snapshot())
+        self.assertEqual(caught.exception.code, "solver_empty")
+        data["candidate_actions"] = [structured_action()]
+        data["candidate_actions"][0]["fact_ids"] = []
+        with self.assertRaises(ERPError) as caught:
+            decode_specialist(data, snapshot())
+        self.assertEqual(caught.exception.code, "solver_source")
+        data["candidate_actions"][0]["fact_ids"] = ["invented"]
+        with self.assertRaises(ERPError) as caught:
+            decode_specialist(data, snapshot())
+        self.assertEqual(caught.exception.code, "solver_action")
+
+    def test_partial_is_not_success_cached_and_its_risk_survives_cached_synthesis(self):
+        calls = []
+
+        class Client:
+            configured = True
+
+            def generate(self, request):
+                role = loads(request.user).get("role", "coordinator")
+                calls.append(role)
+                if role == "coordinator":
+                    return LLMResponse(structured_proposal_json(), "same")
+                data = specialist(role)
+                if role == "operations":
+                    data.update(status="partial", reason="初始资源未知，执行条件仍待核对。")
+                return LLMResponse(dumps(data), "same")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.db"
+            SQLiteRepository(path)
+            memory = SQLiteMemoryService(path)
+            try:
+                problem = snapshot()
+                scope = memory.scope(problem.project_id, problem.version, "partial-flow")
+                for _ in range(2):
+                    result = CollaborativeStrategyGenerator(Client(), Control(), scope).propose(
+                        problem
+                    )
+                    self.assertIn("执行条件仍待核对", result.baseline.risks[-1])
+                self.assertEqual(calls.count("operations"), 2)
+                self.assertEqual(calls.count("finance"), 1)
+                self.assertEqual(calls.count("coordinator"), 1)
+            finally:
+                memory.close()
+
     def test_operations_and_template_independent_finance_waits(self):
         barrier = threading.Barrier(2)
         completed = set()
