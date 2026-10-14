@@ -1,5 +1,55 @@
 # ERP 沙盘 Agent 项目约定
 
+## 0. 当前交接：下一步优先解决模型任务分配
+
+本节汇总本次交接状态；第 15 节较早的记录用于历史追溯，不能覆盖当前代码与本节待办。
+
+### 用户最新反馈与未完成工作
+
+- 用户实测几乎所有任务都使用 `6.1-sol`，反馈请求容易超时、整体等待较长。用户已配置 `dsflash`、`5.6 luna`、`5.6 terra` 等轻量模型，希望简单任务优先交给这些模型，复杂任务保留合适的强模型。名称仅用于理解用户现有配置，不得据此硬编码供应商、模型名或预设 ID。
+- **此问题尚未修复。** 本次只整理交接文档，不修改调度代码、模型预设或业务数据；下一位 Agent 应优先实施合理的轻重任务分配，而非将上一轮“取消额外调度请求”误认为已经完成任务分级。
+- 保留普通任务默认本地调度，不恢复每个任务先请求 LLM 选模型，也不要仅靠提高并发、轮流使用模型或修改提示词解决问题。任务适配、优先级、容量与共享额度应共同决定选择；不必强行让每个模型都有任务。
+
+### 已核实的原因与代码入口
+
+所有以下路径均相对于 `src/erp_agent/`，前端路径相对于仓库根目录。
+
+| 位置 | 当前行为与后续检查方向 |
+| --- | --- |
+| `application/model_scheduler.py`：`ScheduledLLMClient._eligible`、`_direct_generate`、`_acquire` | 职责候选仅过滤预设 ID；未配置时使用全池。模型按优先级排列，普通执行选第一个有空闲额度的候选，没有轻重任务适配排序。最高优先级模型有空位时，简单任务仍会集中到它。 |
+| `application/model_dispatch.py`：`task_responsibility` | 已能区分 reader、operations、finance、coordinator、budget、report，但职责不等于难度；尚无默认直接调度的轻量/复杂任务分类。 |
+| `adapters/model_settings.py`：`capture_pool` | 当前启用模型参与协作；其他预设须配置完整且 `scheduling_enabled=true` 才加入。池按用户优先级排序。排查时核对轻量预设是否实际入池、是否通过容量过滤，不把未入池与排序问题混为一谈。 |
+| `config.py`、`.env.example` | 已有 `ERP_MODEL_DISPATCH_STRATEGY=direct` 和 `ERP_MODEL_ROLE_CANDIDATES`；职责候选目前通过环境 JSON 配置，列表只是筛选集合，最终仍按预设优先级排序。 |
+| `web/src/components/ModelSettings.vue`、`web/src/composables/useModelPresets.ts` | 前端已有优先级、最大并行数、参与协作和可选能力说明；没有职责候选或明确轻重任务配置。能力说明虽进入模型目录，默认直接调度不会解析它来选择轻量模型。 |
+| `application/task_reporting.py`、`web/src/components/TaskDrawer.vue` | 已记录候选、执行模型、分配依据、负载与恢复信息；后续应说明实际选择原因及容量排除原因，避免泛化为“按优先级选择”而难以排查。 |
+
+上述排序机制是代码核实结果。用户各预设的实际优先级、参与开关、容量及本次失败请求没有读取核验，不能声称已经确认所有现场原因。
+
+建议下一步：用可配置、确定性的任务属性区分普通格式化、来源映射、报告整理与复杂跨期经营统筹；先按适用性选择候选，再在适用候选内结合用户优先级、实际容量和共享额度。Reader 普通章节/整表整理、预算来源映射等可作为轻量任务入口，但大表、跨来源冲突或复杂依赖仍需合理升级；不按固定行数过度拆分，不猜模型名称代表的能力。配置应方便用户在前端管理，并兼容已有预设；未经明确要求不要自动改写用户已保存预设。
+
+### 已完成的实现边界
+
+最新业务代码提交为 `3617ff7`（署名 `mikoto2464`），上一提交为 `ad13462`。
+
+- 调度默认直接执行，主 Agent 分配为可选 `agent` 策略；同供应商端点别名共享额度，在途请求真正结束后释放。修复沿用原模型，临时故障有限重试及一次候选切换；调度、修复、重试、截断扩容和拆分共享调用/截止时间，默认 8 次、900 秒。
+- Action schema 2 有稳定 `action_id`、有限动作类型、类型专属 details、金额/数量单位及含义、前置依赖、条件、来源与已知完成/支付期。旧快照只经 `application/codec.py`、`contracts.py` 兼容，不从文字推测事实；`domain/action_validation.py` 给出定位诊断，受限补丁后整体校验。
+- Solver 的产销与模板需求可独立并行，资金必须等待本轮候选行动；总协调处理冲突并生成全周期行动。入口为 `application/solver.py`、`solver_collaboration.py`、`solver_context.py`，当前版本 `solver-9`。
+- 行动方案先保存为不可变结果；预算自动作为独立任务继续，Word 报告由输出页单独发起。`application/solution_stages.py`、`workflow.py`、`answerer.py` 与 `adapters/jobs.py`、`persistence.py` 保存独立阶段及成功边界，绑定方案 ID、题目版本、行动/模板哈希和阶段 attempt_id。失败/取消不隐藏行动方案，旧响应不覆盖新阶段。
+- 预算由 `application/solver_budget.py`、`budget_context.py`、`budget_execution.py`、`budget_codec.py` 与 `domain/budget.py` 实现：LLM 返回输入组/范围到业务来源的映射，Python 展开并用 Decimal 计算，缺口合并记录影响格；独立表最多两项并行，显式 `depends_on_sheets` 按 DAG 执行，展示公式不制造依赖。命名计算仅实现 direct/sum 及有限单位转换，未实现关系保持空白。
+- Mapper 复用已核对模板和预算来源，不再解析空表；公式、已有数据、隐藏/保护格和合并续格保护不变。报告版本 `answerer-2`，战略时点与执行风险角色最多两项并行，引用行动 ID，由 Python 插入数值。
+- 记忆继续使用 SQLite/LangGraph 成功缓存、精确 ID/实体查询及 BM25 补充检索；项目、题目版本、方案和任务对象隔离，已传事实去重，进程索引 LRU 上限 24 份/8 MB。不增加向量库或 Embedding 服务。
+- Vue 已显示独立阶段、结构化行动和去重预算缺口，轮询保留历史方案选择及未提交修改文本。静态构建产物随代码提交到 `src/erp_agent/api/static/`。
+- 通用 ERP 经营仿真、任意规则计算、正式方案答疑和跨进程模型额度协调尚未实现。结果保持草稿标记，不宣称资金、履约、财务或最优策略已验证。
+
+### 工作区、验证与继续工作约束
+
+- 本次交接检查时，工作区只有用户原先暂存的 `sample/topic/板栗2.0.xlsx`；保持文件及暂存状态，不纳入本次文档提交或后续无关提交。提交使用现有 Git 署名，仅提交任务文件。
+- 上一轮通过 89 项后端定向检查、10 项 HTTP/恢复检查、19 项前端交互检查，以及 TypeScript 检查、构建和修改前端格式检查。受控检查证明调度/依赖/来源/保存边界，**不证明实际多模型任务分配已经符合本次反馈，也不证明真实接口质量或提速**。本次只改文档，没有重跑这些检查。
+- 调度修改优先使用 `tests/test_direct_scheduling.py`、`test_model_scheduling.py`、`test_output_scheduling.py` 的受控模型，新增必要用例验证简单任务使用适用轻量候选、复杂任务保留强候选、容量不足升级、共享额度、修复粘性与旧配置兼容。依赖、预算、恢复相关回归按需选 `test_solver_dependency_flow.py`、`test_budget_execution.py`、`test_solution_stages.py`，避免无意义全量重复测试。
+- Python 检查使用 `.venv/bin/python -m unittest ...`；前端修改后运行定向 Vitest 和 `npm --prefix web run build`（包含类型检查），同步静态产物。现有仓库仍有历史 Ruff 告警，不能泛称全仓 lint 已通过。
+- 不新增评估集、性能基线、A/B 或基准平台；不进行付费联调，不开启真实任务，不部署，不重启或干扰正在运行的服务。此前云端记录为 `7ab4d73`，本地 `3617ff7` 未部署；云端当前状态本次没有连接核验。
+- 默认数据目录 `.erp-data/` 中的模型预设、数据库和访问密钥不应输出或改写。尤其不要为排查随手实例化指向运行数据库的 `SQLiteRepository`：其初始化会把未完成任务标记为服务重启失败；只用隔离临时数据库做检查。
+
 ## 1. 项目目标与当前阶段
 
 使用 Python 构建通过 Web 交互的 ERP 沙盘辅助决策系统。用户上传 DOCX/DOC/PDF 赛题、XLS/XLSX 订单资料、补充规则，也可手动输入题目与限制，可上传 XLSX 空白预算表；系统提取规则与数据、协作生成经营方案、导出 DOCX 方案和填好的 Excel，并提供围绕方案的对话答疑。
