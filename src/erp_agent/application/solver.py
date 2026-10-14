@@ -8,7 +8,6 @@ from erp_agent.application.contracts import (
     PATCH_SCHEMA,
     PROPOSAL_SCHEMA,
     JSONObject,
-    apply_action_patch,
     decode_action,
     decode_proposal,
     dumps,
@@ -32,6 +31,11 @@ from erp_agent.application.solver_context import (
     planning_policy,
     repair_material,
     role_material,
+)
+from erp_agent.application.solver_plan_repairs import (
+    MAX_REPAIR_OBJECTS,
+    apply_plan_repair,
+    plan_repair_schema,
 )
 from erp_agent.domain.action_validation import validate_actions
 from erp_agent.domain.errors import ERPError
@@ -271,16 +275,27 @@ class LLMStrategyGenerator:
                         {"period", "completion_period", "payment_period"}
                     )
                     changed = True
-        if len(affected) > 24:
-            raise ERPError("solver_repair_limit", "关联补丁超过 24 个行动，本次修复停止。")
-        if not affected:
+        problem = snapshot.reading.problem
+        horizon = (problem.years or 0) * (problem.periods_per_year or 0)
+        missing = sorted(set(range(1, horizon + 1)) - {a.period for a in proposal.baseline.actions})
+        if len(affected) > MAX_REPAIR_OBJECTS or len(missing) > MAX_REPAIR_OBJECTS:
+            raise ERPError(
+                "solver_repair_limit", "本轮修复范围或缺失经营期超过 24 项，本次修复停止。"
+            )
+        allow_additions = bool(horizon and proposal.baseline.actions and (missing or temporal))
+        if not proposal.baseline.actions or not (affected or allow_additions):
             raise ERPError("strategy_plan_invalid", "；".join(i.message for i in errors[:8]))
         if self.on_repair:
             self.on_repair()
         subset = tuple(a for a in proposal.baseline.actions if a.action_id in affected)
         payload = {
             **repair_material(
-                snapshot, proposal.baseline.actions, [obj(to_json(a)) for a in subset]
+                snapshot,
+                proposal.baseline.actions,
+                [
+                    obj(to_json(a))
+                    for a in (proposal.baseline.actions if allow_additions else subset)
+                ],
             ),
             "project_id": snapshot.project_id,
             "problem_version": snapshot.version,
@@ -292,28 +307,60 @@ class LLMStrategyGenerator:
             "只能修改 allowed_fields；保留时间依赖，不能清空已知完成/支付期。"
             "不得修改题目、版本、其它行动、动作顺序或预算。",
         }
-        schema = dumps(PATCH_SCHEMA)
+        if allow_additions:
+            coverage_context = role_material(snapshot, "coordinator", proposal.baseline.actions)
+            payload["problem"] = coverage_context["problem"]
+            payload["rules"] = coverage_context["rules"]
+            payload.update(
+                {
+                    "period_coverage": {
+                        "horizon": horizon,
+                        "covered_periods": sorted({a.period for a in proposal.baseline.actions}),
+                        "missing_periods": missing,
+                        "potentially_vacated_periods": sorted(
+                            {a.period for a in subset if a.action_id in temporal}
+                        ),
+                    },
+                    "plan_context": role_material(
+                        snapshot, "coordinator", proposal.baseline.actions
+                    ),
+                }
+            )
+            payload["instruction"] += (
+                " 本次可用 additions 补充替换后仍缺失的经营期，使用新 action_id；"
+                "针对已有依赖、交付/收付或终局核对提出该期具体行动，不用泛化 review 填满。"
+                "新行动需合法引用，未知值保留 null，不编造数值；"
+                "不得在已覆盖期追加或覆盖已有行动，替换与新增合计最多24项。"
+            )
+        schema = dumps(plan_repair_schema(allow_additions))
+        output_budget = min(16000, max(4000, (len(affected) + len(missing) + len(temporal)) * 600))
         request = LLMRequest(
-            "修复已定位的结构、引用或依赖错误；只返回受限补丁。\nJSON schema:\n" + schema,
+            "修复已定位的结构、引用、依赖或周期遗漏；只返回受限补丁。\nJSON schema:\n" + schema,
             dumps(payload),
             "erp_action_patch",
             schema,
-            max_output_tokens=4000,
+            max_output_tokens=output_budget,
             reasoning_reserve_tokens=8192,
             stream=True,
             retries=0,
             task=getattr(self.llm, "task", None),
         )
+        if len(request.system) + len(request.user) + len(request.schema_json) > getattr(
+            self.llm, "max_input_chars", 100_000
+        ):
+            raise ERPError("solver_input_limit", "周期补丁及相关行动超过当前模型输入容量。", 413)
         response = (
             recovery_call(self.llm, request, self.control)
             if self.control
             else self.llm.generate(request)
         )
-        plan = apply_action_patch(
+        plan = apply_plan_repair(
             proposal.baseline,
             loads(normalize_model_json(response.content)),
             affected,
             allowed_fields,
+            horizon=horizon,
+            allow_additions=allow_additions,
         )
         diagnostics = validate_actions(snapshot, plan)
         remaining = [i for i in diagnostics if i.severity == "error"]
@@ -340,18 +387,7 @@ class DraftPlanEvaluator:
         )
         if horizon is None:
             issues.append(Issue("plan.horizon_missing", "warning", "plan", "经营周期未确认。"))
-        else:
-            missing = set(range(1, horizon + 1)) - {a.period for a in plan.actions}
-            if missing or any(not 1 <= a.period <= horizon for a in plan.actions):
-                issues.append(
-                    Issue(
-                        "plan.period_coverage",
-                        "error",
-                        "plan",
-                        "行动必须覆盖经营周期的每一期且不能越界。",
-                    )
-                )
-        issues.extend(validate_actions(snapshot, plan, coverage=False))
+        issues.extend(validate_actions(snapshot, plan))
         issues.append(
             Issue(
                 "simulation.unavailable",

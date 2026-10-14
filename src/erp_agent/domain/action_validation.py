@@ -66,13 +66,29 @@ def validate_actions(
         issues.append(Issue("plan.empty", "error", "plan.actions", "方案没有行动。"))
     if coverage and horizon:
         missing = sorted(set(range(1, horizon + 1)) - {a.period for a in plan.actions})
-        if missing or any(not 1 <= a.period <= horizon for a in plan.actions):
+        outside = [a for a in plan.actions if not 1 <= a.period <= horizon]
+        if missing or outside:
+            detail = []
+            if missing:
+                detail.append(
+                    "缺失经营期："
+                    + "、".join(
+                        f"{p}（第{(p - 1) // problem.periods_per_year + 1}年"
+                        f"第{(p - 1) % problem.periods_per_year + 1}期）"
+                        for p in missing[:24]
+                    )
+                    + (f"；另有 {len(missing) - 24} 期" if len(missing) > 24 else "")
+                )
+            if outside:
+                detail.append(
+                    "越界行动：" + "、".join(f"{a.action_id}={a.period}" for a in outside[:8])
+                )
             issues.append(
                 Issue(
                     "plan.period_coverage",
                     "error",
                     "plan.actions",
-                    "行动必须覆盖经营周期的每一期且不能越界。",
+                    "行动必须覆盖经营周期的每一期且不能越界。" + "；".join(detail),
                 )
             )
     seen: set[str] = set()

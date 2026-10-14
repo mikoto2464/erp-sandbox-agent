@@ -123,7 +123,7 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-11", "request": request}).encode()
+                    dumps({"version": "solver-12", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
@@ -293,7 +293,7 @@ class CollaborativeStrategyGenerator:
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-11",
+                        "version": "solver-12",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,
