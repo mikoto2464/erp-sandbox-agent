@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
+from uuid import uuid4
 
 from erp_agent.domain.reporting import ReportOutline
 
@@ -125,6 +126,11 @@ class Issue:
     target: str
     message: str
     evidence_ids: tuple[str, ...] = ()
+    field_path: str = ""
+    action_id: str = ""
+    budget_id: str = ""
+    source_ids: tuple[str, ...] = ()
+    impact: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,7 @@ class TemplateInputGroup:
     range: str
     unit: str
     description: str
+    depends_on_sheets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -213,6 +220,92 @@ class ProblemSnapshot:
     template_readings: tuple[TemplateReading, ...] = ()
 
 
+class ActionKind(StrEnum):
+    PURCHASE = "purchase"
+    ARRIVAL = "arrival"
+    START_PRODUCTION = "start_production"
+    COMPLETE_PRODUCTION = "complete_production"
+    BID = "bid"
+    CONTRACT = "contract"
+    DELIVERY = "delivery"
+    RECEIPT = "receipt"
+    BORROW = "borrow"
+    REPAY = "repay"
+    PAYMENT = "payment"
+    RESEARCH = "research"
+    CERTIFY = "certify"
+    MARKET_OPEN = "market_open"
+    INSTALL = "install"
+    RECRUIT = "recruit"
+    TRAIN = "train"
+    DISMISS = "dismiss"
+    REVIEW = "review"
+    EXTENSION = "extension"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ActionCondition:
+    kind: str = "always"
+    reference_id: str | None = None
+    operator: str | None = None
+    value: str | None = None
+    explanation: str = ""
+
+
+@dataclass(frozen=True)
+class ResourceDetails:
+    resource_entity_id: str
+    counterparty_entity_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ProductionDetails:
+    product_entity_id: str
+    line_entity_id: str | None
+    worker_entity_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class OrderDetails:
+    order_entity_id: str
+    product_entity_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FinanceDetails:
+    finance_entity_id: str
+    obligation_action_id: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkforceDetails:
+    worker_entity_id: str
+    program_entity_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ProgressDetails:
+    target_entity_id: str
+
+
+@dataclass(frozen=True)
+class ExtensionDetails:
+    type_name: str
+    reason: str
+
+
+ActionDetails = (
+    ResourceDetails
+    | ProductionDetails
+    | OrderDetails
+    | FinanceDetails
+    | WorkforceDetails
+    | ProgressDetails
+    | ExtensionDetails
+)
+
+
 @dataclass(frozen=True)
 class Action:
     period: int
@@ -221,6 +314,21 @@ class Action:
     amount: Decimal | None
     quantity: int | None
     description: str
+    action_id: str = field(default_factory=lambda: uuid4().hex)
+    quantity_unit: str = ""
+    amount_unit: str = ""
+    amount_meaning: str = "unknown"
+    related_entity_ids: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()
+    fact_ids: tuple[str, ...] = ()
+    rule_ids: tuple[str, ...] = ()
+    gap_ids: tuple[str, ...] = ()
+    completion_period: int | None = None
+    payment_period: int | None = None
+    missing_reason: str = ""
+    condition: ActionCondition = field(default_factory=ActionCondition)
+    details: ActionDetails | None = None
+    schema_version: str = "1"
 
 
 @dataclass(frozen=True)
@@ -285,6 +393,10 @@ class BudgetItem:
     value: str | None
     action_indices: tuple[int, ...]
     explanation: str
+    action_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    conversion: str = "identity"
+    gap_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -363,7 +475,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-8"
+    prompt_version: str = "solver-9"
 
 
 @dataclass(frozen=True)
@@ -400,6 +512,8 @@ class WorkbookMapping:
     confirmed: bool = False
     model: str = ""
     prompt_version: str = "mapper-1"
+    plan_hash: str = ""
+    budget_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -420,6 +534,8 @@ class ArtifactManifest:
     template_id: str | None = None
     mapping_id: str | None = None
     mapping_revision: int | None = None
+    plan_hash: str = ""
+    budget_hash: str = ""
 
 
 @dataclass(frozen=True)

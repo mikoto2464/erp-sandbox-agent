@@ -58,7 +58,7 @@ class OutputSchedulingTests(unittest.TestCase):
             )
             for name, priority in [("main", 100), ("helper", 80)]
         )
-        llm, control = ScheduledLLMClient(models, ModelCapacity()), TaskControl()
+        llm, control = ScheduledLLMClient(models, ModelCapacity(), strategy="agent"), TaskControl()
         request = LLMRequest(
             "填写来源核对",
             "{}",

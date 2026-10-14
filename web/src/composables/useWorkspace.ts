@@ -351,6 +351,7 @@ export function useWorkspace(router: Router) {
   }
   function selectSolution(id: string) {
     selectedSolutionId.value = id;
+    void router.replace({ query: { ...router.currentRoute.value.query, solution: id } });
     const config = solutions.value.find((solution) => solution.id === id)?.generation;
     planTone.value = config?.tone || 'balanced';
     customPrompt.value = config?.custom_prompt || '';
@@ -376,6 +377,12 @@ export function useWorkspace(router: Router) {
       generation: config,
     });
     if (captured !== generation) return;
+    await refresh();
+  }
+  async function retryBudget() {
+    const solution = currentSolution.value;
+    if (!solution) throw new Error('请先生成行动方案。');
+    await post(base() + '/budgets', { solution_id: solution.id });
     await refresh();
   }
   async function cancelJob(job: Job) {
@@ -433,11 +440,13 @@ export function useWorkspace(router: Router) {
         ? '文件解析'
         : job.kind === 'mapping'
           ? '预算表映射'
-          : job.kind === 'artifact'
-            ? '文件生成'
-            : job.kind === 'read'
-              ? '读题'
-              : '方案生成';
+          : job.kind === 'budget'
+            ? '预算处理'
+            : job.kind === 'artifact'
+              ? '文件生成'
+              : job.kind === 'read'
+                ? '读题'
+                : '方案生成';
     const text =
       job.status === 'failed'
         ? `${name}失败：${(job.error?.message || '请查看任务详情。').slice(0, 160)}`
@@ -491,8 +500,10 @@ export function useWorkspace(router: Router) {
     templates.value = budgetTemplates;
     mappings.value = latestMappings;
     artifacts.value = latestArtifacts;
-    if (initial && newPlan) selectSolution(newPlan.id);
-    else if (planChanged) selectSolution(newPlan.id);
+    if (initial && newPlan) {
+      const remembered = String(router.currentRoute.value.query.solution || '');
+      selectSolution(plans.some((plan) => plan.id === remembered) ? remembered : newPlan.id);
+    } else if (planChanged && !selectedSolutionId.value) selectSolution(newPlan.id);
     if (initial && !newPlan)
       templateIds.value = budgetTemplates.slice(-3).map((template) => template.source.id);
     for (const doc of docs)
@@ -680,6 +691,7 @@ export function useWorkspace(router: Router) {
     mappings,
     artifacts,
     analyzeTemplate,
+    retryBudget,
     confirmMapping,
     exportArtifact,
     templateIds,

@@ -102,3 +102,43 @@ class ReportComposerTests(unittest.TestCase):
                 decode_outline(
                     {"strategy": [{**note, **changes}], "milestones": [], "risks": []}, data
                 )
+
+    def test_local_report_patch_repairs_only_invalid_note_and_preserves_plan(self):
+        data = report()
+        original = data.solution.plan
+
+        class Client(FakeLLM):
+            def generate(self, request):
+                if request.schema_name == "erp_report_patch":
+                    self.calls.append(request)
+                    payload = loads(request.user)
+                    target = payload["allowed_targets"][0]
+                    note = {**target["note"], "explanation": "保留现有行动并核对执行条件。"}
+                    return LLMResponse(
+                        dumps(
+                            {
+                                "patches": [
+                                    {
+                                        "section": target["section"],
+                                        "index": target["index"],
+                                        "note": note,
+                                    }
+                                ]
+                            }
+                        ),
+                        "patch-model",
+                    )
+                response = super().generate(request)
+                if loads(request.user)["role"] == "strategy":
+                    output = loads(response.content)
+                    output["strategy"][0]["explanation"] = "追加两台设备"
+                    return LLMResponse(dumps(output), response.model)
+                return response
+
+        client = Client("")
+        result = CollaborativeReportComposer().compose(data, client, Control())
+        self.assertEqual(result.strategy[0].explanation, "保留现有行动并核对执行条件。")
+        self.assertEqual(data.solution.plan, original)
+        patches = [r for r in client.calls if r.schema_name == "erp_report_patch"]
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(len(loads(patches[0].user)["allowed_targets"]), 1)

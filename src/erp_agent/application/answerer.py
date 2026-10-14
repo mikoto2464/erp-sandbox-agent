@@ -36,9 +36,15 @@ from erp_agent.application.ports import (
     WorkbookRenderer,
 )
 from erp_agent.application.report_composer import REPORT_VERSION, CollaborativeReportComposer
+from erp_agent.application.solution_stages import (
+    optional_record,
+    plan_hash,
+    project_solution,
+    stage_record,
+)
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.application.workbook_mapper import WorkbookMapper
-from erp_agent.domain.errors import ERPError
+from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import (
     ArtifactManifest,
     BudgetTemplate,
@@ -72,6 +78,7 @@ class AnswererService:
     def context(self, project_id: str, solution_id: str) -> ReportData:
         self.repository.get("project", project_id, project_id)
         solution = solution_bundle(self.repository.get("solution", project_id, solution_id))
+        solution = project_solution(self.repository, solution)
         snapshot = problem_snapshot(self.repository.snapshot(project_id, solution.problem_version))
         sources = tuple(
             e
@@ -142,6 +149,8 @@ class AnswererService:
                         ).encode()
                     ).hexdigest(),
                     report.snapshot.document_ids,
+                    solution_id=report.solution.id,
+                    object_id=template.source.id,
                 )
                 shared.put(
                     "solution",
@@ -151,7 +160,7 @@ class AnswererService:
                     },
                 )
                 client = MemoryLLMClient(
-                    client, shared, "预算表单位与口径 " + template.source.filename
+                    client, shared, "已有预算来源、单位与期间 " + template.source.filename
                 )
             mapper = self.mapper or WorkbookMapper(shared)
             mapping = mapper.analyze(report.solution, template, client, control, report.snapshot)
@@ -161,6 +170,11 @@ class AnswererService:
                 )
             report_task(control, task, "needs_input", entry_count=len(mapping.entries))
             control.checkpoint("saving_mapping")
+            mapping = replace(
+                mapping,
+                plan_hash=plan_hash(report.solution.plan),
+                budget_hash=self._budget_hash(project_id, report.solution.id),
+            )
             self.repository.put("mapping", project_id, mapping.id, mapping)
             return {"mapping_id": mapping.id, "needs_input": True}
 
@@ -181,6 +195,7 @@ class AnswererService:
             if integer(data.get("expected_revision")) != mapping.revision:
                 raise ERPError("mapping_conflict", "映射已经更新，请重新打开后修改。", 409)
             report = self.context(project_id, mapping.solution_id)
+            self._check_mapping_binding(mapping, report)
             template = budget_template(
                 self.repository.get("template", project_id, mapping.template_id)
             )
@@ -230,6 +245,7 @@ class AnswererService:
             mapping = workbook_mapping(
                 self.repository.get("mapping", project_id, string(data["mapping_id"]))
             )
+            self._check_mapping_binding(mapping, report)
             if mapping.solution_id != report.solution.id or not mapping.confirmed:
                 raise ERPError("mapping_not_confirmed", "请先确认这份方案的预算表映射。", 409)
             template = budget_template(
@@ -258,7 +274,9 @@ class AnswererService:
             suffix + ("_草稿" if not report.solution.evaluation.verified else "") + "." + kind
         )
 
-        def operation(control: RunControl) -> JSONValue:
+        captured_budget_hash = self._budget_hash(project_id, report.solution.id)
+
+        def render_operation(control: RunControl) -> JSONValue:
             output_report = report
             root = TaskContext(
                 "answerer",
@@ -304,6 +322,8 @@ class AnswererService:
                             ).encode()
                         ).hexdigest(),
                         report.snapshot.document_ids,
+                        solution_id=report.solution.id,
+                        object_id="report",
                     )
                     shared.put("solution", {"solution_id": report.solution.id})
                     client = MemoryLLMClient(client, shared, "当前方案战略、时点与执行风险")
@@ -340,6 +360,11 @@ class AnswererService:
                 mapping.id if mapping else None,
                 mapping.revision if mapping else None,
             )
+            manifest = replace(
+                manifest,
+                plan_hash=plan_hash(report.solution.plan),
+                budget_hash=captured_budget_hash,
+            )
             control.checkpoint("saving_artifact")
             self.repository.put(
                 "artifact_file",
@@ -360,6 +385,8 @@ class AnswererService:
                         "solution_id": report.solution.id,
                         "problem_version": report.solution.problem_version,
                         "outline": to_json(output_report.outline),
+                        "plan_hash": plan_hash(report.solution.plan),
+                        "budget_hash": captured_budget_hash,
                         "prompt_version": REPORT_VERSION,
                         "model_preset": binding.metadata() if binding else None,
                     },
@@ -368,22 +395,95 @@ class AnswererService:
             report_task(control, root, "succeeded")
             return {"artifact_id": manifest.id}
 
-        return self.jobs.submit(
-            project_id,
-            "artifact",
-            operation,
-            {
-                "solution_id": report.solution.id,
-                "kind": kind,
-                "mapping_id": mapping.id if mapping else None,
-                "template_id": template.source.id if template else None,
-                "prompt_version": REPORT_VERSION if kind == "docx" else None,
-                "model_preset": binding.metadata() if binding else None,
-            },
+        attempt_id = uuid4().hex
+        hashes = tuple(
+            (t.template_id, t.sha256)
+            for t in report.snapshot.template_readings
+            if t.template_id in report.solution.generation.template_ids
         )
+        if kind == "docx":
+            stage_record(
+                self.repository,
+                project_id,
+                report.solution,
+                "report",
+                "queued",
+                template_hashes=hashes,
+                attempt_id=attempt_id,
+            )
 
-    @staticmethod
-    def _require_planned_template(report: ReportData, template: BudgetTemplate) -> None:
+        def operation(control: RunControl) -> JSONValue:
+            try:
+                if kind == "docx":
+                    stage_record(
+                        self.repository,
+                        project_id,
+                        report.solution,
+                        "report",
+                        "running",
+                        template_hashes=hashes,
+                        attempt_id=attempt_id,
+                    )
+                result = render_operation(control)
+                if kind == "docx":
+                    stage_record(
+                        self.repository,
+                        project_id,
+                        report.solution,
+                        "report",
+                        "succeeded",
+                        result=result,
+                        template_hashes=hashes,
+                        attempt_id=attempt_id,
+                    )
+                return result
+            except Exception as error:
+                if kind == "docx":
+                    stage_record(
+                        self.repository,
+                        project_id,
+                        report.solution,
+                        "report",
+                        "cancelled" if isinstance(error, Cancelled) else "failed",
+                        error={
+                            "code": getattr(error, "code", "internal_error"),
+                            "message": getattr(error, "message", "报告阶段失败。"),
+                        },
+                        template_hashes=hashes,
+                        attempt_id=attempt_id,
+                    )
+                raise
+
+        try:
+            return self.jobs.submit(
+                project_id,
+                "artifact",
+                operation,
+                {
+                    "solution_id": report.solution.id,
+                    "attempt_id": attempt_id,
+                    "kind": kind,
+                    "mapping_id": mapping.id if mapping else None,
+                    "template_id": template.source.id if template else None,
+                    "prompt_version": REPORT_VERSION if kind == "docx" else None,
+                    "model_preset": binding.metadata() if binding else None,
+                },
+            )
+        except ERPError as error:
+            if kind == "docx":
+                stage_record(
+                    self.repository,
+                    project_id,
+                    report.solution,
+                    "report",
+                    "failed",
+                    error={"code": error.code, "message": error.message},
+                    template_hashes=hashes,
+                    attempt_id=attempt_id,
+                )
+            raise
+
+    def _require_planned_template(self, report: ReportData, template: BudgetTemplate) -> None:
         template_id = template.source.id
         reading = next(
             (t for t in report.snapshot.template_readings if t.template_id == template_id), None
@@ -398,6 +498,19 @@ class AnswererService:
             raise ERPError(
                 "template_not_planned", "请在经营方案处选择这份空表并生成方案后再填写。", 409
             )
+        budget = optional_record(
+            self.repository, "budget_result", report.solution.project_id, report.solution.id
+        )
+        if budget:
+            completed = obj(budget.get("result") or {}).get("completed_sheets", [])
+            if any(
+                [template_id, sheet.name] not in completed
+                for sheet in reading.sheets
+                if sheet.input_groups
+            ):
+                raise ERPError(
+                    "template_budget_pending", "此空表预算尚未完整处理，可等待或重试预算阶段。", 409
+                )
         if not any(item.template_id == template_id for item in report.solution.plan.budget_items):
             raise ERPError(
                 "template_plan_missing", "此方案没有这份表的预算安排，请返回经营方案重新生成。", 409
@@ -409,6 +522,18 @@ class AnswererService:
             raise ERPError(
                 "template_plan_invalid", "方案预算存在遗漏或输入错误，请先返回经营方案修正。", 409
             )
+
+    def _budget_hash(self, project_id: str, solution_id: str) -> str:
+        record = optional_record(self.repository, "budget_result", project_id, solution_id)
+        return hashlib.sha256(dumps(record.get("result")).encode()).hexdigest() if record else ""
+
+    def _check_mapping_binding(self, mapping: WorkbookMapping, report: ReportData) -> None:
+        if mapping.plan_hash and mapping.plan_hash != plan_hash(report.solution.plan):
+            raise ERPError("mapping_plan_changed", "映射绑定的行动方案已变化。", 409)
+        if mapping.budget_hash and mapping.budget_hash != self._budget_hash(
+            report.solution.project_id, report.solution.id
+        ):
+            raise ERPError("mapping_budget_changed", "预算阶段已更新，请重新核对填写来源。", 409)
 
     def _check_active(
         self, project_id: str, kind: str, solution_id: str, template_id: str | None = None

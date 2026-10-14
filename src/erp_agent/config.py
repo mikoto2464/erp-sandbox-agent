@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,8 +53,22 @@ class Settings:
     default_solver: SolverMode = SolverMode.LLM_ONLY
     libreoffice: str = "libreoffice"
     max_upload_mb: int = 20
+    model_dispatch_strategy: str = "direct"
+    model_role_candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    task_max_model_calls: int = 8
+    task_deadline_seconds: int = 900
 
     def __post_init__(self) -> None:
+        if self.model_dispatch_strategy not in {"direct", "agent"}:
+            raise ValueError("模型调度策略必须为 direct 或 agent。")
+        roles = {"reader", "operations", "finance", "coordinator", "budget", "report"}
+        if any(
+            role not in roles or not ids or any(not isinstance(i, str) or not i for i in ids)
+            for role, ids in self.model_role_candidates
+        ):
+            raise ValueError("职责候选须为合法职责到预设 ID 列表的映射。")
+        if not 1 <= self.task_max_model_calls <= 32 or not 30 <= self.task_deadline_seconds <= 7200:
+            raise ValueError("任务调用上限须为 1–32，截止时间须为 30–7200 秒。")
         if self.llm_provider not in LLM_BASE_URLS:
             raise ValueError("不支持的模型接口类型。")
         if not 1 <= self.reader_concurrency <= 4:
@@ -82,9 +97,17 @@ class Settings:
             raise ValueError("端口必须在 0 到 65535 之间，0 表示自动分配。")
         if not 0 <= self.llm_retries <= 5:
             raise ValueError("模型重试次数必须在 0 到 5 之间。")
-        if min(self.max_upload_mb, self.llm_timeout, self.llm_max_input_chars,
-               self.llm_max_output_tokens, self.reader_max_request_chars,
-               self.reader_max_batch_units) <= 0:
+        if (
+            min(
+                self.max_upload_mb,
+                self.llm_timeout,
+                self.llm_max_input_chars,
+                self.llm_max_output_tokens,
+                self.reader_max_request_chars,
+                self.reader_max_batch_units,
+            )
+            <= 0
+        ):
             raise ValueError("资源限制必须为正数。")
 
     @classmethod
@@ -113,4 +136,11 @@ class Settings:
             default_solver=SolverMode.LLM_ONLY,
             libreoffice=os.getenv("ERP_LIBREOFFICE", "libreoffice"),
             max_upload_mb=int(os.getenv("ERP_MAX_UPLOAD_MB", "20")),
+            model_dispatch_strategy=os.getenv("ERP_MODEL_DISPATCH_STRATEGY", "direct"),
+            model_role_candidates=tuple(
+                (role, tuple(ids))
+                for role, ids in json.loads(os.getenv("ERP_MODEL_ROLE_CANDIDATES", "{}")).items()
+            ),
+            task_max_model_calls=int(os.getenv("ERP_TASK_MAX_MODEL_CALLS", "8")),
+            task_deadline_seconds=int(os.getenv("ERP_TASK_DEADLINE_SECONDS", "900")),
         )

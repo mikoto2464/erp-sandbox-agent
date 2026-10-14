@@ -86,7 +86,12 @@ class MemoryTests(unittest.TestCase):
                 )
 
         client = Client()
-        reader = StructuredReader(client, limits=ReaderLimits(12000, 4, 1), facts_role=ExtractionRole("facts"), rules_role=ExtractionRole("rules"))
+        reader = StructuredReader(
+            client,
+            limits=ReaderLimits(12000, 4, 1),
+            facts_role=ExtractionRole("facts"),
+            rules_role=ExtractionRole("rules"),
+        )
         scope = self.memory.scope("project", 0, "same-input")
         with self.assertRaises(ERPError):
             reader.read((document,), Control(), memory=scope)
@@ -101,24 +106,37 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(sum(loads(r.user)["role"] == "facts" for r in client.calls), 2)
 
     def test_reader_solver_mapper_share_alignment_and_solution_with_version_isolation(self):
-        problem = replace(snapshot(), template_readings=(TemplateReading('template', 'hash',
-            (TemplateSheetReading('资金预算', '现金输入', '第1期'),), reviewed=True),))
+        problem = replace(
+            snapshot(),
+            template_readings=(
+                TemplateReading(
+                    "template",
+                    "hash",
+                    (TemplateSheetReading("资金预算", "现金输入", "第1期"),),
+                    reviewed=True,
+                ),
+            ),
+        )
         self.memory.remember(problem)
-        alignment = self.memory.scope(problem.project_id, 1, 'reader').alignment()
-        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, 'solver').alignment())
-        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, 'mapper').alignment())
-        self.assertEqual(alignment['templates'][0]['sha256'], 'hash')
-        self.assertIn('资金预算', dumps(self.memory.scope(problem.project_id, 1, 'solver')
-                                      .recall('资金预算')))
+        alignment = self.memory.scope(problem.project_id, 1, "reader").alignment()
+        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, "solver").alignment())
+        self.assertEqual(alignment, self.memory.scope(problem.project_id, 1, "mapper").alignment())
+        self.assertEqual(alignment["templates"][0]["sha256"], "hash")
+        self.assertIn(
+            "资金预算", dumps(self.memory.scope(problem.project_id, 1, "solver").recall("资金预算"))
+        )
         from tests.helpers import proposal_json
-        solution = SolverService(LLMStrategyGenerator(FakeLLM(proposal_json())),
-                                 DraftPlanEvaluator()).solve(
-            SolveRequest(problem, SolverMode.LLM_ONLY), Control())
+
+        solution = SolverService(
+            LLMStrategyGenerator(FakeLLM(proposal_json())), DraftPlanEvaluator()
+        ).solve(SolveRequest(problem, SolverMode.LLM_ONLY), Control())
         self.memory.remember_solution(solution)
-        saved = self.memory.scope(problem.project_id, 1, 'mapper').get('solution:' + solution.id)
-        self.assertEqual(saved['plan']['actions'][0]['amount'], '10')
-        self.assertNotIn('raw_response', saved)
-        self.assertIsNone(self.memory.scope(problem.project_id, 2, 'mapper').get('solution:' + solution.id))
+        saved = self.memory.scope(problem.project_id, 1, "mapper").get("solution:" + solution.id)
+        self.assertEqual(saved["plan"]["actions"][0]["amount"], "10")
+        self.assertNotIn("raw_response", saved)
+        self.assertIsNone(
+            self.memory.scope(problem.project_id, 2, "mapper").get("solution:" + solution.id)
+        )
 
     def test_deleted_upload_and_project_cannot_receive_late_memory(self):
         scope = self.memory.scope("project", 0, "run", ("doc",))
@@ -145,6 +163,69 @@ class MemoryTests(unittest.TestCase):
             outputs.append(loads(client.calls[0].user))
         self.assertEqual(outputs[0]["shared_memory"], outputs[1]["shared_memory"])
         self.assertEqual(outputs[0]["task_memory"], {"preference": "少借款"})
+
+    def test_exact_ids_precede_bm25_index_reuses_and_invalidates(self):
+        problem = snapshot()
+        self.memory.remember(problem)
+        scope = self.memory.scope(problem.project_id, 1, "run")
+        fact = problem.reading.problem.facts[0]
+        first = scope.recall("无关搜索", ids=(fact.id,))
+        self.assertEqual(first.entries[0]["id"], fact.id)
+        cached = next(iter(self.memory._indexes.values()))
+        scope.recall("公司", ids=(fact.id,))
+        self.assertIs(cached, next(iter(self.memory._indexes.values())))
+        self.assertEqual(scope.recall("initial_cash", exclude_ids=(fact.id,)).entries, ())
+        self.memory.remember(replace(problem, version=2))
+        self.assertEqual(len(self.memory._indexes), 0)
+
+    def test_material_does_not_reinject_known_facts_or_requirements(self):
+        problem = snapshot()
+        self.memory.remember(problem)
+        scope = self.memory.scope(problem.project_id, 1, "run")
+        scope.put("requirements", {"requirements": "保守经营"})
+        client = FakeLLM("{}")
+        MemoryLLMClient(client, scope, "公司").generate(
+            LLMRequest(
+                "任务",
+                dumps(
+                    {
+                        "problem": {"facts": [{"id": problem.reading.problem.facts[0].id}]},
+                        "generation": {"requirements": "保守经营"},
+                    }
+                ),
+                "test",
+                "{}",
+            )
+        )
+        payload = loads(client.calls[0].user)
+        self.assertEqual(payload["shared_memory"]["entries"], [])
+        self.assertNotIn("task_memory", payload)
+
+    def test_solution_scope_rejects_other_solution_even_same_version(self):
+        scope = self.memory.scope("project", 1, "run", solution_id="active", object_id="material")
+        self.memory.write("project", "solution:1:other", {"solution_id": "other"})
+        self.assertIsNone(scope.get("solution:other"))
+
+    def test_exact_source_query_and_removed_source_invalidates_context(self):
+        problem = snapshot()
+        document = text_source("补充", "原文资金条件", "manual_")
+        problem = replace(
+            problem, document_ids=(document.source.id,), additional_sources=(document,)
+        )
+        self.memory.remember(problem)
+        scope = self.memory.scope(problem.project_id, problem.version, "run")
+        ref = document.evidence[0]
+        self.assertEqual(scope.evidence((ref.id,))[0]["text"], ref.text)
+        scope.recall("initial_cash")
+        self.assertTrue(self.memory._indexes)
+        with self.repository._connection() as connection:
+            connection.execute(
+                "INSERT INTO deleted_uploads VALUES(?,?,?)",
+                (problem.project_id, "document", document.source.id),
+            )
+        with self.assertRaises(ERPError):
+            scope.recall("initial_cash")
+        self.assertFalse(self.memory._indexes)
 
 
 if __name__ == "__main__":

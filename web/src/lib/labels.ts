@@ -58,6 +58,9 @@ export const statusNames: Record<string, string> = {
   needs_input: '需要复核',
 };
 export const stageNames: Record<string, string> = {
+  saving_action_plan: '保存行动草稿',
+  saving_budget_progress: '保存已完成预算',
+  saving_budget_result: '保存预算结果',
   waiting_model: '等待可用模型',
   dispatching_model: '主 Agent 评估与分配模型',
   dispatching_reading: '主 Agent 统一分配章节与整表',
@@ -116,4 +119,40 @@ export const stageNames: Record<string, string> = {
   saving: '保存结果',
   done: '已完成',
   cancelling: '等待取消',
+};
+
+export const actionKindNames: Record<string, string> = {
+  purchase: '采购',
+  arrival: '到货',
+  start_production: '开产',
+  complete_production: '完工',
+  bid: '竞单',
+  contract: '签约',
+  delivery: '交付',
+  receipt: '收款',
+  borrow: '借款',
+  repay: '还款',
+  payment: '付款',
+  research: '研发',
+  recruit: '招聘',
+  dismiss: '解雇',
+  train: '培训',
+  certify: '认证',
+  market_open: '市场开拓',
+  install: '安装',
+  review: '检查',
+  extension: '扩展动作',
+  unknown: '未确定动作',
+};
+export const amountMeaningNames: Record<string, string> = {
+  payment: '支出',
+  receipt: '收入现金',
+  financing_principal: '融资本金',
+  repayment_principal: '还款本金',
+  cost: '成本',
+  revenue: '销售额',
+  unit_price: '单价',
+  reference: '参考金额',
+  unknown: '含义未确定',
+  none: '无金额',
 };

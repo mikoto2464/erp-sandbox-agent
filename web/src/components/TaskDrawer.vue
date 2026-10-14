@@ -66,11 +66,13 @@ function duration(task: AgentTask) {
                   ? '预算表解析'
                   : job.kind === 'mapping'
                     ? '预算表映射'
-                    : job.kind === 'artifact'
-                      ? '文件生成'
-                      : job.kind === 'read'
-                        ? '读题'
-                        : '方案生成'
+                    : job.kind === 'budget'
+                      ? '预算处理'
+                      : job.kind === 'artifact'
+                        ? '文件生成'
+                        : job.kind === 'read'
+                          ? '读题'
+                          : '方案生成'
           }}</strong
           ><span
             class="task-state"
@@ -102,7 +104,8 @@ function duration(task: AgentTask) {
       </div>
       <div
         v-if="
-          ['read', 'solve', 'mapping', 'artifact'].includes(job.kind) && readingProgress(job).total
+          ['read', 'solve', 'budget', 'mapping', 'artifact'].includes(job.kind) &&
+          readingProgress(job).total
         "
         class="reading-progress"
       >

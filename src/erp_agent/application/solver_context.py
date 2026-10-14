@@ -1,9 +1,9 @@
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 
 from erp_agent.application.contracts import JSONObject, to_json
 from erp_agent.application.template_reader import template_material
-from erp_agent.domain.models import BudgetTemplate, Fact, ProblemSnapshot
+from erp_agent.domain.models import Action, BudgetTemplate, Fact, ProblemSnapshot
 
 
 def problem_material(snapshot: ProblemSnapshot, *, order_details: bool = True) -> JSONObject:
@@ -160,3 +160,178 @@ def selected_snapshot(
         snapshot,
         template_readings=tuple(t for t in snapshot.template_readings if t.template_id in ids),
     )
+
+
+ROLE_CATEGORIES = {
+    "operations": {
+        "initial",
+        "certification",
+        "market",
+        "product",
+        "bom",
+        "material",
+        "production_line",
+        "worker",
+        "training",
+        "incentive",
+        "shift",
+        "demand_forecast",
+        "order_pool",
+        "order_contract",
+    },
+    "finance": {"initial", "finance", "discount", "carbon", "digital", "budget"},
+    "budget": {"initial", "budget"},
+    "coordinator": {"initial", "finance", "discount"},
+    "report": {"initial", "finance", "discount"},
+}
+
+
+def action_material(actions: tuple[Action, ...]) -> JSONObject:
+    return {
+        "action_columns": [
+            "action_id",
+            "period",
+            "kind",
+            "entity_id",
+            "quantity",
+            "quantity_unit",
+            "amount",
+            "amount_unit",
+            "amount_meaning",
+            "related_entity_ids",
+            "depends_on",
+            "completion_period",
+            "payment_period",
+            "condition",
+            "fact_ids",
+            "rule_ids",
+            "gap_ids",
+            "missing_reason",
+            "description",
+            "details",
+        ],
+        "actions": [
+            [
+                getattr(action, key)
+                for key in (
+                    "action_id",
+                    "period",
+                    "kind",
+                    "entity_id",
+                    "quantity",
+                    "quantity_unit",
+                    "amount",
+                    "amount_unit",
+                    "amount_meaning",
+                    "related_entity_ids",
+                    "depends_on",
+                    "completion_period",
+                    "payment_period",
+                    "condition",
+                    "fact_ids",
+                    "rule_ids",
+                    "gap_ids",
+                    "missing_reason",
+                    "description",
+                    "details",
+                )
+            ]
+            for action in actions
+        ],
+    }
+
+
+def role_snapshot(
+    snapshot: ProblemSnapshot,
+    role: str,
+    actions: tuple[Action, ...] = (),
+    *,
+    fact_ids: tuple[str, ...] = (),
+    rule_ids: tuple[str, ...] = (),
+) -> ProblemSnapshot:
+    """用实体关系和显式引用闭包补齐角色事实，裁剪不产生缺值。"""
+    facts = snapshot.reading.problem.facts
+    categories = ROLE_CATEGORIES.get(role, set())
+    selected = set(fact_ids) | {identifier for action in actions for identifier in action.fact_ids}
+    entities = {action.entity_id for action in actions} | {
+        e for a in actions for e in a.related_entity_ids
+    }
+    for action in actions:
+        if is_dataclass(action.details):
+            for field in fields(action.details):
+                if "entity_id" in field.name:
+                    value = getattr(action.details, field.name)
+                    entities.update(
+                        value if isinstance(value, tuple) else (value,) if value else ()
+                    )
+    entities |= {f.entity_id for f in facts if f.id in selected}
+    for fact in facts:
+        if fact.category in categories:
+            selected.add(fact.id)
+    # 未结构化分类的事实保留，避免遗漏税费、结算或新机制约束。
+    if role in {"operations", "finance", "coordinator"}:
+        selected.update(f.id for f in facts if f.category == "other")
+    # 事实中实体 ID 关系（BOM、订单、资格、提前期）可遍历，不按名称关键词猜。
+    changed = True
+    known_entities = {f.entity_id for f in facts}
+    while changed:
+        changed = False
+        for fact in facts:
+            if fact.id in selected or fact.entity_id in entities:
+                if (
+                    role != "operations"
+                    and fact.category == "order_pool"
+                    and fact.id not in selected
+                ):
+                    continue
+                if fact.id not in selected:
+                    selected.add(fact.id)
+                    changed = True
+                if fact.value in known_entities and fact.value not in entities:
+                    entities.add(fact.value)
+                    changed = True
+    rules = set(rule_ids) | {r for a in actions for r in a.rule_ids}
+    evidence = {e for f in facts if f.id in selected for e in f.evidence_ids}
+    included_rules = tuple(
+        r
+        for r in snapshot.reading.rules.rules
+        if role in {"operations", "finance", "coordinator"}
+        or r.id in rules
+        or (evidence & set(r.evidence_ids))
+    )
+    return replace(
+        snapshot,
+        reading=replace(
+            snapshot.reading,
+            problem=replace(
+                snapshot.reading.problem, facts=tuple(f for f in facts if f.id in selected)
+            ),
+            rules=replace(snapshot.reading.rules, rules=included_rules),
+        ),
+    )
+
+
+def role_material(
+    snapshot: ProblemSnapshot,
+    role: str,
+    actions: tuple[Action, ...] = (),
+    *,
+    fact_ids: tuple[str, ...] = (),
+    rule_ids: tuple[str, ...] = (),
+) -> JSONObject:
+    focused = role_snapshot(snapshot, role, actions, fact_ids=fact_ids, rule_ids=rule_ids)
+    return {
+        "project_id": snapshot.project_id,
+        "problem_version": snapshot.version,
+        "rule_version": snapshot.reading.rules.version,
+        "problem": problem_material(focused, order_details=role == "operations"),
+        "rules": to_json(focused.reading.rules),
+        "gaps": [
+            {"gap_id": f"{i.code}:{i.target}", **to_json(i)}
+            for i in snapshot.reading.issues
+            if i.severity != "info"
+        ],
+        "scope_instruction": "这是当前职责的相关事实；"
+        "被裁剪资料仍保存在权威快照中，不能视为题目缺失。"
+        "证据可通过 evidence_ids 还原。数值与期间未知时保留 null 并关联现有缺口。",
+    }

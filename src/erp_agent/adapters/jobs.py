@@ -1,8 +1,8 @@
 import logging
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from erp_agent.adapters.persistence import SQLiteRepository
@@ -12,12 +12,18 @@ from erp_agent.domain.errors import Cancelled, ERPError
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class JobControl:
-    def __init__(self, repository: SQLiteRepository, project_id: str, job_id: str,
-                 event: threading.Event, lock: threading.RLock) -> None:
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        project_id: str,
+        job_id: str,
+        event: threading.Event,
+        lock: threading.RLock,
+    ) -> None:
         self.repository, self.project_id, self.job_id = repository, project_id, job_id
         self.event, self.lock = event, lock
 
@@ -55,8 +61,15 @@ class JobControl:
                 task["finished_at"] = now()
             # 保留在途项，限制历史明细数量，完整处理结果仍在题目快照中。
             if len(tasks) > 1000:
-                terminal = next((i for i, t in enumerate(tasks) if isinstance(t, dict)
-                                and t.get("status") not in {"queued", "waiting", "running"}), None)
+                terminal = next(
+                    (
+                        i
+                        for i, t in enumerate(tasks)
+                        if isinstance(t, dict)
+                        and t.get("status") not in {"queued", "waiting", "running"}
+                    ),
+                    None,
+                )
                 if terminal is not None:
                     tasks.pop(terminal)
                     record["archived_tasks"] = int(record.get("archived_tasks", 0)) + 1
@@ -72,8 +85,13 @@ class ThreadJobRunner:
         self.futures: dict[str, Future[None]] = {}
         self.lock = threading.RLock()
 
-    def submit(self, project_id: str, kind: str, operation: Callable[[RunControl], JSONValue],
-               metadata: JSONObject | None = None) -> JSONObject:
+    def submit(
+        self,
+        project_id: str,
+        kind: str,
+        operation: Callable[[RunControl], JSONValue],
+        metadata: JSONObject | None = None,
+    ) -> JSONObject:
         with self.lock:
             self.futures = {
                 key: future for key, future in self.futures.items() if not future.done()
@@ -82,10 +100,19 @@ class ThreadJobRunner:
             if active >= 10:
                 raise ERPError("queue_full", "任务队列已满，请稍后重试。", 429)
             job_id = uuid4().hex
-            record = {"id": job_id, "project_id": project_id, "kind": kind,
-                      "status": "queued", "stage": "queued", "completed": 0,
-                      "created_at": now(), "updated_at": now(), "metadata": metadata or {},
-                      "result": None, "error": None}
+            record = {
+                "id": job_id,
+                "project_id": project_id,
+                "kind": kind,
+                "status": "queued",
+                "stage": "queued",
+                "completed": 0,
+                "created_at": now(),
+                "updated_at": now(),
+                "metadata": metadata or {},
+                "result": None,
+                "error": None,
+            }
             self.repository.put("job", project_id, job_id, record)
             event = threading.Event()
             self.events[job_id] = event
@@ -100,8 +127,12 @@ class ThreadJobRunner:
             with self.lock:
                 record = self.repository.get("job", control.project_id, control.job_id)
                 needs_input = isinstance(result, dict) and result.get("needs_input") is True
-                record.update(status="needs_input" if needs_input else "succeeded", stage="done",
-                              result=result, updated_at=now())
+                record.update(
+                    status="needs_input" if needs_input else "succeeded",
+                    stage="done",
+                    result=result,
+                    updated_at=now(),
+                )
                 self.repository.put("job", control.project_id, control.job_id, record)
         except Exception as exc:
             with self.lock:
@@ -114,20 +145,58 @@ class ThreadJobRunner:
                 if isinstance(exc, Cancelled):
                     record.update(status="cancelled", updated_at=now())
                 elif isinstance(exc, ERPError):
-                    record.update(status="failed", error={"code": exc.code, "message": exc.message},
-                                  updated_at=now())
+                    record.update(
+                        status="failed",
+                        error={"code": exc.code, "message": exc.message},
+                        updated_at=now(),
+                    )
                 else:
-                    logging.exception("后台任务失败 project=%s job=%s",
-                                      control.project_id, control.job_id)
-                    record.update(status="failed", error={"code": "internal_error",
-                                                          "message": "后台任务失败，请检查服务端日志。"},
-                                  updated_at=now())
+                    logging.exception(
+                        "后台任务失败 project=%s job=%s", control.project_id, control.job_id
+                    )
+                    record.update(
+                        status="failed",
+                        error={
+                            "code": "internal_error",
+                            "message": "后台任务失败，请检查服务端日志。",
+                        },
+                        updated_at=now(),
+                    )
+                metadata = obj(record.get("metadata", {}))
+                stage_kind = (
+                    "budget_result"
+                    if record.get("kind") == "budget"
+                    else "report_result"
+                    if record.get("kind") == "artifact" and metadata.get("kind") == "docx"
+                    else None
+                )
+                if stage_kind and metadata.get("solution_id"):
+                    try:
+                        stage = self.repository.get(
+                            stage_kind, control.project_id, str(metadata["solution_id"])
+                        )
+                        if stage.get("attempt_id") == metadata.get("attempt_id"):
+                            stage.update(
+                                status=record["status"], error=record.get("error"), updated_at=now()
+                            )
+                            self.repository.put(
+                                stage_kind, control.project_id, str(metadata["solution_id"]), stage
+                            )
+                    except ERPError as missing:
+                        if missing.code not in {"not_found", "project_deleted", "upload_deleted"}:
+                            raise
                 tasks = record.get("tasks", [])
                 assert isinstance(tasks, list)
                 for task in tasks:
-                    if isinstance(task, dict) and task.get("status") in {"queued", "waiting", "running"}:
-                        task.update(status="cancelled" if isinstance(exc, Cancelled) else "failed",
-                                    finished_at=now())
+                    if isinstance(task, dict) and task.get("status") in {
+                        "queued",
+                        "waiting",
+                        "running",
+                    }:
+                        task.update(
+                            status="cancelled" if isinstance(exc, Cancelled) else "failed",
+                            finished_at=now(),
+                        )
                 self.repository.put("job", control.project_id, control.job_id, record)
         finally:
             with self.lock:

@@ -14,6 +14,7 @@ from erp_agent.application.reading.coverage import missing_table_rows
 from erp_agent.application.reading.merge import ReadingMerger
 from erp_agent.application.reading.review import LinkReviewRole
 from erp_agent.application.reading.roles import ExtractionRole, ReaderLimits, ReadingPart
+from erp_agent.application.task_budget import task_budget
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import Issue, ParsedDocument, ProblemSpec, ReadingResult, RuleSet
@@ -178,10 +179,16 @@ class StructuredReader:
             )
 
         def run_role(
-            role: ExtractionRole, batch: ReadingBatch, parameters: ReadingPart | None = None
+            role: ExtractionRole,
+            batch: ReadingBatch,
+            parameters: ReadingPart | None = None,
+            parent_task: TaskContext | None = None,
         ) -> tuple[ReadingPart, ...]:
             nonlocal completed
             task = task_for(role, batch)
+            if parent_task:
+                task = replace(task, parent_id=parent_task.id)
+            task_budget(batch_control, task)
             key = task.id
             object_name = task.object
 
@@ -197,14 +204,19 @@ class StructuredReader:
                     batch_control.report_task(task_id, changes)
 
             role_control = RoleControl()
-            role_client = TaskLLMClient(client, role_control, task)
-            report_task(control, task, "queued", evidence_count=len(batch.focus_ids),
-                        task_kind="extraction")
+            role_client = TaskLLMClient(client, batch_control, task)
+            report_task(
+                control, task, "queued", evidence_count=len(batch.focus_ids), task_kind="extraction"
+            )
             batch_control.checkpoint("reading_" + role.name)
             cached = memory.get(key) if memory else None
             if cached and cached.get("split") is True and len(batch.units) > 1:
                 report_task(control, task, "split")
-                return tuple(part for smaller in batch.split() for part in run_role(role, smaller))
+                return tuple(
+                    part
+                    for smaller in batch.split()
+                    for part in run_role(role, smaller, parent_task=task)
+                )
             if cached:
                 result = ReadingPart(
                     role.name, batch, decode_reading(dumps(cached["reading"]), str(cached["model"]))
@@ -229,7 +241,9 @@ class StructuredReader:
                         if memory:
                             memory.put(key, {"split": True})
                         return tuple(
-                            part for smaller in batch.split() for part in run_role(role, smaller)
+                            part
+                            for smaller in batch.split()
+                            for part in run_role(role, smaller, parent_task=task)
                         )
                     if error.code in {"llm_gateway_timeout", "llm_unavailable", "llm_timeout"}:
                         batch_control.checkpoint("reading_retry")
@@ -366,8 +380,13 @@ class StructuredReader:
         report_task(control, parent, "running", batch_count=len(batches))
         for batch in batches:
             role = self.combined_role or self.facts_role
-            report_task(control, task_for(role, batch), "queued",
-                        evidence_count=len(batch.focus_ids), task_kind="extraction")
+            report_task(
+                control,
+                task_for(role, batch),
+                "queued",
+                evidence_count=len(batch.focus_ids),
+                task_kind="extraction",
+            )
         plan_reading = getattr(client, "plan_reading", None)
         if self.combined_role and plan_reading:
             requests: list[LLMRequest] = []
@@ -421,9 +440,7 @@ class StructuredReader:
             )
             reading = replace(reading, issues=tuple(dict.fromkeys(reading.issues + findings)))
         source_issues = tuple(
-            source_notice(doc.source.id, warning)
-            for doc in documents
-            for warning in doc.warnings
+            source_notice(doc.source.id, warning) for doc in documents for warning in doc.warnings
         )
         reading = replace(
             reading, issues=reading.issues + source_issues + missing_table_rows(reading, documents)

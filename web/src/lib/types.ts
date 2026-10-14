@@ -43,6 +43,10 @@ export interface BudgetItem {
   unit: string;
   value: string | null;
   action_indices: number[];
+  action_ids?: string[];
+  source_ids?: string[];
+  conversion?: string;
+  gap_id?: string;
   explanation: string;
 }
 export interface WorkbookEntry {
@@ -150,6 +154,11 @@ export interface Rule {
   explanation: string;
 }
 export interface Issue {
+  field_path?: string;
+  action_id?: string;
+  budget_id?: string;
+  source_ids?: string[];
+  impact?: string[];
   code: string;
   severity: string;
   target: string;
@@ -194,7 +203,13 @@ export interface TemplateReading {
     name: string;
     purpose: string;
     periods: string;
-    input_groups: { label: string; range: string; unit: string; description: string }[];
+    input_groups: {
+      label: string;
+      range: string;
+      unit: string;
+      description: string;
+      depends_on_sheets?: string[];
+    }[];
   }[];
   issues: Issue[];
   issue_reviews?: TemplateIssueReview[];
@@ -289,12 +304,52 @@ export interface Job {
   result?: { version: number };
 }
 export interface Action {
+  action_id?: string;
+  kind?: string;
+  entity_id?: string;
+  quantity_unit?: string;
+  amount_unit?: string;
+  amount_meaning?: string;
+  related_entity_ids?: string[];
+  depends_on?: string[];
+  fact_ids?: string[];
+  rule_ids?: string[];
+  gap_ids?: string[];
+  completion_period?: number | null;
+  payment_period?: number | null;
+  missing_reason?: string;
+  condition?: {
+    kind: string;
+    reference_id: string | null;
+    operator: string | null;
+    value: string | null;
+    explanation: string;
+  };
+  details?: Record<string, unknown>;
   period: number;
   description: string;
   amount: string | null;
   quantity: number | null;
 }
+export interface BudgetGap {
+  id: string;
+  code: string;
+  message: string;
+  targets: { template_id: string; sheet: string; cell: string }[];
+  source_ids: string[];
+}
+export interface SolutionStage {
+  status: string;
+  error?: { code: string; message: string } | null;
+  result?: {
+    gaps?: BudgetGap[];
+    completed_sheets?: [string, string][];
+    failed_sheets?: [string, string, string][];
+  } | null;
+}
 export interface Solution {
+  plan_hash?: string;
+  stages?: { actions: SolutionStage; budget: SolutionStage; report: SolutionStage };
   id: string;
   mode: SolverMode;
   problem_version: number;

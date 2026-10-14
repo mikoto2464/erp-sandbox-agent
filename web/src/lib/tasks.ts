@@ -15,7 +15,7 @@ export function readingProgress(job: Job) {
     (task) =>
       (['artifact', 'mapping'].includes(job.kind)
         ? !!task.parent_id && ['Answerer', 'Validator'].includes(task.agent)
-        : job.kind === 'solve'
+        : ['solve', 'budget'].includes(job.kind)
           ? task.agent === 'Solver' &&
             !!task.parent_id &&
             (task.parent_id === 'solver' || task.parent_id.startsWith('solver:'))

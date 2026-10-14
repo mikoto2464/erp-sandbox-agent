@@ -90,12 +90,14 @@ class ExtractionRole:
             self.system += (
                 "\n为减少重复键，facts 使用 fact_rows，每行依次为 "
                 "[id,category,entity_id,entity_name,key,value,value_type,unit,state,evidence_ids,conversion,explanation]；"
-                "rules 使用 rule_rows，每行依次为 [id,name,expression,state,evidence_ids,explanation]。"
+                "rules 使用 rule_rows，每行依次为 "
+                "[id,name,expression,state,evidence_ids,explanation]。"
                 "evidence_ids 在行内是用 | 分隔的来源 ID 字符串，无来源用空字符串；"
                 "仅 value 可为 null，不省略行或列。category 只能为 "
                 + "/".join(CATEGORIES)
                 + "；value_type 为 number/text/integer，state 为 known/assumed/conflicted/missing；"
-                "conversion 为 identity/percent_to_ratio/wan_to_yuan。unit 为规范单位，未知用空字符串。"
+                "conversion 为 identity/percent_to_ratio/wan_to_yuan。"
+                "unit 为规范单位，未知用空字符串。"
             )
 
     def request(
@@ -113,7 +115,14 @@ class ExtractionRole:
         }
         if memory:
             payload["shared_alignment"] = memory.alignment()
-            payload["memory"] = to_json(memory.recall(dumps(batch.payload())[:2000], 800))
+            payload["memory"] = to_json(
+                memory.recall(
+                    "原文 表头 单位 实体命名 " + batch.document.source.filename,
+                    800,
+                    exclude_ids=batch.focus_ids,
+                    object_id=batch.document.source.id,
+                )
+            )
         system_size = len(self.system) + len(self.schema) + 16
         if facts:
             payload["local_parameters"] = [

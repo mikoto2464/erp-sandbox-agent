@@ -120,7 +120,7 @@ class WorkbookMapper:
             pending = tuple(
                 (index, item)
                 for index, item in planned
-                if item.sheet == sheet.name and item.value is None
+                if item.sheet == sheet.name and item.value is None and not item.gap_id
             )
             if not pending:
                 continue

@@ -18,7 +18,27 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-4"
+DISPATCH_VERSION = "dispatcher-5-direct"
+
+
+def task_responsibility(request: LLMRequest) -> str:
+    task = request.task
+    if task and task.agent == "Reader":
+        return "reader"
+    if task and task.agent in {"Answerer", "Mapper"}:
+        return "report" if task.agent == "Answerer" and "预算" not in task.role else "budget"
+    identity = (task.id + " " + task.role) if task else request.schema_name
+    if any(part in identity for part in ("values", "budget", "预算", "mapper")):
+        return "budget"
+    if any(part in identity for part in ("finance", "资金")):
+        return "finance"
+    if any(part in identity for part in ("synthesis", "coordinator", "统筹")):
+        return "coordinator"
+    if any(part in identity for part in ("operations", "产销")):
+        return "operations"
+    return "coordinator" if task and task.agent == "Solver" else "reader"
+
+
 DISPATCH_SCHEMA = object_schema(
     {
         "difficulty": {"type": "string", "enum": ["simple", "moderate", "complex"]},

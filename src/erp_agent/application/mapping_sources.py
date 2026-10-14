@@ -39,6 +39,8 @@ def target_kind(item: BudgetItem, number_format: str) -> str:
 
 def compatible_conversion(source_unit: str, target_unit: str, conversion: str) -> bool:
     source, target = unit_name(source_unit), unit_name(target_unit)
+    if conversion.startswith("sum_"):
+        conversion = conversion.removeprefix("sum_")
     if conversion in {"identity", "sum"}:
         return source == target and not source.startswith("题目")
     return (source, target, conversion) in {
@@ -73,7 +75,7 @@ def mapping_material(
     items, allowed = [], set()
     resolved = {
         source.id: replace(source, unit=currency)
-        if source.id.endswith(":amount") and currency
+        if source.id.endswith(":amount") and currency and source.unit == "题目金额单位"
         else source
         for source in sources
     }
@@ -87,8 +89,13 @@ def mapping_material(
             if any(marker in item.label for marker in DERIVED_ITEMS):
                 continue
             if source.id.startswith("action:"):
-                _, action_index, source_kind = source.id.split(":")
-                if int(action_index) not in item.action_indices or source.period != item.period:
+                action_id, source_kind = source.id.removeprefix("action:").rsplit(":", 1)
+                allowed_action_ids = set(item.action_ids) or {
+                    solution.plan.actions[i].action_id
+                    for i in item.action_indices
+                    if 0 <= i < len(solution.plan.actions)
+                }
+                if action_id not in allowed_action_ids or source.period != item.period:
                     continue
                 if (
                     source_kind

@@ -226,15 +226,29 @@ class DocxReportRenderer:
                     document.add_paragraph("本方案未登记此类操作。")
                     continue
                 table = self._table(document, ("对象", "操作与前置条件", "数量", "金额"))
-                for index, action in selected:
+                for _index, action in selected:
                     row = table.add_row().cells
                     row[0].text = names.get(action.entity_id, action.entity_id)
-                    row[1].text = f"行动 A{index + 1} · {action.kind}\n{action.description}"
+                    row[1].text = f"行动 {action.action_id} · {action.kind}\n{action.description}"
+                    if action.depends_on:
+                        row[1].text += "\n前置行动：" + "、".join(action.depends_on)
+                    if action.completion_period is not None:
+                        row[1].text += "\n完成：" + period_label(action.completion_period, count)
+                    if action.payment_period is not None:
+                        row[1].text += "\n支付 / 收款：" + period_label(
+                            action.payment_period, count
+                        )
+                    if action.missing_reason:
+                        row[1].text += "\n未确定：" + action.missing_reason
                     row[2].text = (
-                        str(action.quantity) if action.quantity is not None else "未确定 / 不适用"
+                        f"{action.quantity} {action.quantity_unit}".strip()
+                        if action.quantity is not None
+                        else "未确定 / 不适用"
                     )
                     row[3].text = (
-                        str(action.amount) if action.amount is not None else "未确定 / 不适用"
+                        f"{action.amount} {action.amount_unit} {action.amount_meaning}".strip()
+                        if action.amount is not None
+                        else "未确定 / 不适用"
                     )
             if report.outline:
                 notes = tuple(
@@ -269,7 +283,7 @@ class DocxReportRenderer:
             row[0].text = f"预算 B{index + 1} · {item.label}\n{item.sheet} · {item.cell}"
             row[1].text = period_label(item.period, count) if item.period else "汇总 / 未确定"
             row[2].text = "未确定" if item.value is None else f"{item.value} {item.unit}".strip()
-            actions = "、".join(f"A{i + 1}" for i in item.action_indices)
+            actions = "、".join(item.action_ids or tuple(f"A{i + 1}" for i in item.action_indices))
             row[3].text = item.explanation + (f"\n关联行动：{actions}" if actions else "")
 
     def _risks(self, document: WordDocument, report: ReportData, count: int) -> None:
@@ -323,10 +337,17 @@ class DocxReportRenderer:
             if note.response:
                 document.add_paragraph("应对方式：" + note.response)
             table = self._table(document, ("依据", "当前方案 / 题目中的内容"))
-            for index in note.action_indices:
-                action = report.solution.plan.actions[index]
+            identifiers = note.action_ids or tuple(
+                report.solution.plan.actions[i].action_id for i in note.action_indices
+            )
+            for identifier in identifiers:
+                index, action = next(
+                    (i, a)
+                    for i, a in enumerate(report.solution.plan.actions)
+                    if a.action_id == identifier
+                )
                 row = table.add_row().cells
-                row[0].text = f"行动 A{index + 1} · {period_label(action.period, count)}"
+                row[0].text = f"行动 {action.action_id} · {period_label(action.period, count)}"
                 row[
                     1
                 ].text = f"{names.get(action.entity_id, action.entity_id)} · {action.description}"

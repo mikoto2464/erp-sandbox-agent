@@ -19,7 +19,7 @@ from erp_agent.domain.models import SourceDocument
 from erp_agent.application.ports import LLMResponse
 from erp_agent.domain.errors import ERPError
 from unittest.mock import patch
-from tests.helpers import FakeLLM, docx_bytes, proposal_json
+from tests.helpers import FakeLLM, docx_bytes, proposal_json, structured_action
 from openpyxl import Workbook
 from openpyxl import load_workbook
 from docx import Document
@@ -156,6 +156,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(template['sheets'][0]['merged_ranges'], ['A4:C4'])
         self.assertTrue(next(c for c in template['sheets'][0]['cells'] if c['coordinate'] == 'B3')['formula'])
         proposal = loads(proposal_json())
+        proposal['plan']['actions'][0] = {**structured_action(amount='10'), 'kind': 'borrow',
+            'amount_meaning': 'financing_principal', 'payment_period': 1,
+            'details': {'finance_entity_id': 'company', 'obligation_action_id': None}}
         proposal['plan']['budget_items'] = [{
             'template_id': template['source']['id'], 'sheet': '现金预算', 'cell': 'B2',
             'label': '借款', 'period': 1, 'unit': '元', 'value': '10', 'action_indices': [0],
@@ -169,7 +172,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(done['status'], 'succeeded')
         first = self.request(base + '/solutions')[0]
         payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_strategy'))
-        self.assertEqual(payload['budget_templates'][0]['source']['id'], template['source']['id'])
+        self.assertEqual(payload['template_requirements'][0]['template_id'], template['source']['id'])
+        self.assertNotIn('budget_templates', payload)
         self.assertIn('保守', payload['tone_instruction'])
         self.assertIsNone(payload['previous_plan'])
         self.assertEqual(first['generation']['tone'], 'conservative')
@@ -350,6 +354,9 @@ class WebTests(unittest.TestCase):
             self.request(base + '/mappings', {'solution_id': solution['id'], 'template_id': template['source']['id']})
         self.assertEqual(unplanned.exception.code, 409)
         proposal = loads(proposal_json())
+        proposal['plan']['actions'][0] = {**structured_action(amount='10'), 'kind': 'borrow',
+            'amount_meaning': 'financing_principal', 'payment_period': 1,
+            'details': {'finance_entity_id': 'company', 'obligation_action_id': None}}
         proposal['plan']['budget_items'] = [{
             'template_id': template['source']['id'], 'sheet': '资金计划', 'cell': 'B2',
             'label': '借款', 'period': 1, 'unit': '元', 'value': '10',
@@ -359,8 +366,16 @@ class WebTests(unittest.TestCase):
         job = self.request(base + '/solve', {'version': version, 'generation': {'template_ids': [template['source']['id']]}})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
         solution = self.request(base + '/solutions')[-1]
+        for _ in range(100):
+            budget_jobs = [item for item in self.request(base + '/jobs') if item['kind'] == 'budget'
+                           and item['metadata']['solution_id'] == solution['id']]
+            if budget_jobs:
+                self.assertEqual(self.wait_job(project, budget_jobs[-1]['id'])['status'], 'succeeded')
+                break
+            time.sleep(.01)
+        solution = self.request(base + '/solutions')[-1]
         entry = {'sheet': '资金计划', 'cell': 'B2', 'label': '借款',
-                 'source_ids': ['action:0:amount'], 'conversion': 'identity', 'explanation': '第一期操作金额'}
+                 'source_ids': ['budget:0'], 'conversion': 'identity', 'explanation': '第一期操作金额'}
         self.llm.response = dumps({'entries': [entry]})
         job = self.request(base + '/mappings', {'solution_id': solution['id'], 'template_id': template['source']['id']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'needs_input')

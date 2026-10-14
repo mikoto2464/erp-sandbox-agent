@@ -229,6 +229,18 @@ class ModelSettingsService:
 
     def _sync_capacity(self) -> None:
         self._capacity.configure({p.id: p.max_parallel for p in self._presets.values()})
+        self._capacity.register(
+            tuple(
+                ModelBinding(
+                    p.id,
+                    p.name,
+                    p.revision,
+                    {**_configuration(p.settings), "max_parallel": p.max_parallel},
+                    LangChainLLMClient(p.settings),
+                )
+                for p in self._presets.values()
+            )
+        )
 
     def _load_settings(self, saved: JSONObject) -> Settings:
         if set(saved) - MODEL_FIELDS:
@@ -333,7 +345,14 @@ class ModelSettingsService:
                     "model_pool": [m.metadata() for m in models],
                     "dispatcher_version": DISPATCH_VERSION,
                 },
-                client=ScheduledLLMClient(tuple(models), self._capacity),
+                client=ScheduledLLMClient(
+                    tuple(models),
+                    self._capacity,
+                    strategy=self._base.model_dispatch_strategy,
+                    role_candidates=dict(self._base.model_role_candidates),
+                    task_max_calls=self._base.task_max_model_calls,
+                    task_deadline_seconds=self._base.task_deadline_seconds,
+                ),
             )
 
     def _persist(self, presets: dict[str, ModelPreset], active_id: str) -> None:

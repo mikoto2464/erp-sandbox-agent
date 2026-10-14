@@ -82,11 +82,18 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(material['sheets'][0]['formula_references'], [['C2', '第一年', ['B2']]])
         self.assertEqual(material['sheets'][1]['validations'][0]['kind'], 'whole')
         self.assertFalse(next(c for c in template.sheets[1].cells if c.coordinate == 'B3').writable)
-        old = BudgetItem('template', '第一年', 'B2', '借款', 1, '元', '10', (0,), '旧预算')
+        old = BudgetItem(
+            'template', '第一年', 'B2', '借款', 1, '元', '10', (0,), '旧预算',
+            source_ids=(f'action:{data.solution.plan.actions[0].action_id}:amount',),
+        )
         data = replace(data, solution=replace(data.solution, plan=replace(data.solution.plan, budget_items=(
             old,
-            BudgetItem('template', '生产', 'B2', '操作', 1, '', data.solution.plan.actions[0].description, (0,), '方案操作'),
-            BudgetItem('template', '生产', 'C2', '期初资本', None, '元', '100000', (), '题目初始资本'),
+            BudgetItem(
+                'template', '生产', 'B2', '操作', 1, '',
+                data.solution.plan.actions[0].description, (0,), '方案操作',
+                source_ids=(f'action:{data.solution.plan.actions[0].action_id}:description',),
+            ),
+            BudgetItem('template', '生产', 'C2', '期初资本', None, '元', '100000', (), '题目初始资本', source_ids=('fact:cash',)),
         ))))
 
         class MappingLLM(FakeLLM):
@@ -121,8 +128,11 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(str(reopened['生产'].data_validations), str(second.data_validations))
         self.assertTrue(any(i.severity == 'error' for i in validate_mapping(
             template, (WorkbookEntry('生产', 'B3', '内部', ('action:0:amount',)),), data.solution)))
-        changed = tuple(replace(e, source_ids=('action:1:amount',)) if e.cell == 'B2' and e.sheet == '第一年'
-                        else e for e in mapping.entries)
+        changed = tuple(
+            replace(e, source_ids=(f'action:{data.solution.plan.actions[1].action_id}:amount',))
+            if e.cell == 'B2' and e.sheet == '第一年' else e
+            for e in mapping.entries
+        )
         self.assertIn('mapping.plan_mismatch', {i.code for i in validate_mapping(template, changed, data.solution)})
         self.assertIn('mapping.plan_omitted', {i.code for i in validate_mapping(template, mapping.entries[1:], data.solution)})
         reopened.close()
@@ -137,7 +147,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn('第 4 年 · 第 4 季', [p.text for p in document.paragraphs])
         tables = [t for t in document.tables if t.cell(0, 0).text == '对象']
         self.assertEqual(len(tables), 16)
-        self.assertTrue(all(t.cell(1, 3).text == '10' for t in tables))
+        self.assertTrue(all(t.cell(1, 3).text.split()[0] == '10' for t in tables))
         self.assertTrue(any('草稿' in p.text for p in document.paragraphs))
 
     def test_report_uses_actual_cycle_and_keeps_final_quarter_after_sales_end(self):
@@ -159,7 +169,7 @@ class ArtifactTests(unittest.TestCase):
     def test_collaborative_notes_insert_referenced_plan_and_fact_values(self):
         data = report()
         action = replace(data.solution.plan.actions[0], amount=Decimal('10.50'), quantity=7)
-        budget = BudgetItem('template', '预算', 'B2', '运营准备金', 1, '元', '10.50', (0,), '沿用行动金额')
+        budget = BudgetItem('template', '预算', 'B2', '运营准备金', 1, '元', '10.50', (0,), '沿用行动金额', source_ids=(f'action:{action.action_id}:amount',))
         plan = replace(data.solution.plan, actions=(action, *data.solution.plan.actions[1:]),
                        budget_items=(budget,))
         note = ReportNote('先保障资金再执行', '根据当前行动安排付款。', (0,), ('cash',),

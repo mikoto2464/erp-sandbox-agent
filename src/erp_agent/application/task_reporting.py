@@ -2,6 +2,7 @@ from dataclasses import replace
 
 from erp_agent.application.contracts import JSONValue, obj, to_json
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse, RunControl, TaskContext
+from erp_agent.application.task_budget import model_call, task_budget
 
 
 def report_task(control: RunControl, task: TaskContext, status: str, **metadata: JSONValue) -> None:
@@ -33,7 +34,8 @@ class TaskLLMClient:
         if controlled:
             return controlled(request, self.control)
         report_task(self.control, self.task, "running")
-        response = self.client.generate(request)
+        with model_call(task_budget(self.control, request.task or self.task)):
+            response = self.client.generate(request)
         report_task(self.control, self.task, "running", model=response.model)
         return response
 

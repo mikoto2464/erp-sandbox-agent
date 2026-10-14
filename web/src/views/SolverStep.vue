@@ -6,6 +6,7 @@ import BudgetTemplatePreview from '../components/BudgetTemplatePreview.vue';
 import UploadDeleteButton from '../components/UploadDeleteButton.vue';
 import TemplateLibraryPicker from '../components/TemplateLibraryPicker.vue';
 import type { BudgetTemplate, PlanTone } from '../lib/types';
+import { actionKindNames, amountMeaningNames } from '../lib/labels';
 const {
   snapshot,
   solutions,
@@ -23,6 +24,7 @@ const {
   generationReady,
   currentSolution,
   selectSolution,
+  retryBudget,
 } = useWorkspaceContext();
 const availableTemplates = computed(() =>
   templates.value.filter((template) =>
@@ -40,12 +42,14 @@ const tones: { value: PlanTone; label: string; description: string }[] = [
   { value: 'aggressive', label: '激进', description: '提高投入，争取更高收益' },
   { value: 'custom', label: '其他', description: '自行描述经营偏好' },
 ];
+const revisionDrafts = new Map<string, string>();
 const revisionPrompt = ref(''),
   preview = ref<BudgetTemplate | null>(null);
 watch(
   () => currentSolution.value?.id,
-  () => {
-    revisionPrompt.value = '';
+  (id, previous) => {
+    if (previous) revisionDrafts.set(previous, revisionPrompt.value);
+    revisionPrompt.value = id ? revisionDrafts.get(id) || '' : '';
   },
 );
 const note = computed(() =>
@@ -55,6 +59,18 @@ const note = computed(() =>
       ? '题目有错误，请修正并保存。'
       : '生成结果为协作规划草稿，产能、现金与履约尚未经过经营仿真验证。',
 );
+const stageNames: Record<string, string> = {
+  not_started: '尚未生成',
+  not_applicable: '未选空表',
+  queued: '等待处理',
+  running: '处理中',
+  partial: '部分预算可用',
+  succeeded: '已完成',
+  failed: '处理失败',
+  cancelled: '已取消',
+  draft: '行动草稿',
+};
+const budgetStage = computed(() => currentSolution.value?.stages?.budget);
 const periods = computed(() =>
   [...new Set(currentSolution.value?.plan.actions.map((action) => action.period) || [])].sort(
     (a, b) => a - b,
@@ -242,6 +258,51 @@ async function revise() {
         }}
       </p>
       <p>{{ currentSolution.plan.summary }}</p>
+      <div
+        v-if="currentSolution.stages"
+        class="generation-section"
+      >
+        <h3>处理状态</h3>
+        <p class="muted">
+          行动草稿已保存 · 预算：{{
+            stageNames[budgetStage?.status || 'not_started'] || budgetStage?.status
+          }}
+          · 报告：{{
+            stageNames[currentSolution.stages.report.status] || currentSolution.stages.report.status
+          }}
+        </p>
+        <p
+          v-if="budgetStage?.error"
+          class="notice"
+        >
+          {{ budgetStage.error.message }} 已完成的行动与预算仍保留。
+        </p>
+        <button
+          v-if="['failed', 'cancelled'].includes(budgetStage?.status || '')"
+          class="secondary"
+          :disabled="operations.has('retry-budget')"
+          @click="run('retry-budget', retryBudget)"
+        >
+          继续预算处理
+        </button>
+        <details
+          v-if="budgetStage?.result?.gaps?.length"
+          class="plan-notes"
+        >
+          <summary>预算缺口 · {{ budgetStage.result.gaps.length }} 项</summary>
+          <p
+            v-for="gap in budgetStage.result.gaps"
+            :key="gap.id"
+          >
+            {{ gap.message
+            }}<small
+              >影响 {{ gap.targets.length }} 格：{{
+                gap.targets.map((t) => `${t.sheet} · ${t.cell}`).join('、')
+              }}</small
+            >
+          </p>
+        </details>
+      </div>
       <details
         class="period-plan"
         open
@@ -256,16 +317,50 @@ async function revise() {
         >
           <h3>{{ periodLabel(period) }}</h3>
           <div
-            v-for="(action, index) in currentSolution.plan.actions.filter(
+            v-for="action in currentSolution.plan.actions.filter(
               (action) => action.period === period,
             )"
-            :key="index"
+            :key="action.action_id || action.description"
             class="plan-action"
           >
-            <p>{{ action.description }}</p>
+            <p>
+              <small
+                >{{ action.action_id }} ·
+                {{ actionKindNames[action.kind || ''] || action.kind }}</small
+              >{{ action.description }}
+            </p>
+            <p
+              v-if="action.depends_on?.length"
+              class="muted"
+            >
+              前置行动：{{ action.depends_on.join('、') }}
+            </p>
+            <p
+              v-if="action.completion_period || action.payment_period"
+              class="muted"
+            >
+              {{ action.completion_period ? `完成：${periodLabel(action.completion_period)}` : '' }}
+              {{
+                action.payment_period ? `支付 / 收款：${periodLabel(action.payment_period)}` : ''
+              }}
+            </p>
+            <p
+              v-if="action.missing_reason"
+              class="muted"
+            >
+              未确定：{{ action.missing_reason }}
+            </p>
             <span class="action-values"
-              >{{ action.quantity !== null ? `数量 ${action.quantity}` : '' }}
-              {{ action.amount !== null ? `金额 ${action.amount}` : '' }}</span
+              >{{
+                action.quantity !== null
+                  ? `数量 ${action.quantity} ${action.quantity_unit || ''}`
+                  : ''
+              }}
+              {{
+                action.amount !== null
+                  ? `金额 ${action.amount} ${action.amount_unit || ''} · ${action.amount_meaning || ''}`
+                  : ''
+              }}</span
             >
           </div>
         </section>

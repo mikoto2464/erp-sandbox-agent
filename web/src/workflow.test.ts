@@ -853,6 +853,12 @@ describe('Vue migration', () => {
     });
     await workspace.refresh();
     await flushPromises();
+    expect(workspace.currentSolution.value?.id).toBe('first');
+    expect((wrapper.find('.revision-section textarea').element as HTMLTextAreaElement).value).toBe(
+      '第一年不新增产线',
+    );
+    workspace.selectSolution('second');
+    await flushPromises();
     expect(workspace.currentSolution.value?.id).toBe('second');
     expect((wrapper.find('.revision-section textarea').element as HTMLTextAreaElement).value).toBe(
       '',
@@ -864,6 +870,80 @@ describe('Vue migration', () => {
     wrapper.findComponent(BudgetTemplatePreview).vm.$emit('close');
     workspace.selectSolution('first');
     expect(workspace.currentSolution.value?.id).toBe('first');
+    await flushPromises();
+    expect((wrapper.find('.revision-section textarea').element as HTMLTextAreaElement).value).toBe(
+      '第一年不新增产线',
+    );
+    wrapper.unmount();
+    workspace.dispose();
+  });
+  it('shows a saved action draft while budget fails and keeps revision edits during polling', async () => {
+    const { router, solutions } = setup();
+    await router.push(`/projects/${projectId}/steps/3`);
+    const workspace = useWorkspace(router);
+    await workspace.initialize();
+    solutions.push({
+      id: 'draft',
+      mode: 'llm_only',
+      problem_version: 1,
+      plan: {
+        title: '已保存行动',
+        summary: '',
+        actions: [
+          {
+            action_id: 'buy',
+            kind: 'purchase',
+            period: 1,
+            quantity: null,
+            amount: null,
+            description: '采购安排',
+            depends_on: ['fund'],
+            missing_reason: '材料单价待确认',
+          },
+        ],
+        assumptions: [],
+        risks: [],
+      },
+      evaluation: { verified: false, score: null, issues: [] },
+      stages: {
+        actions: { status: 'draft' },
+        budget: { status: 'running' },
+        report: { status: 'not_started' },
+      },
+    });
+    await workspace.refresh();
+    const wrapper = mount(SolverStep, {
+      global: { provide: { [workspaceKey as symbol]: workspace } },
+    });
+    await wrapper.find('.revision-section textarea').setValue('保留现有产线');
+    solutions[0].stages!.budget = {
+      status: 'failed',
+      error: { code: 'upstream', message: '预算请求失败' },
+      result: {
+        gaps: [
+          {
+            id: 'price',
+            code: 'missing',
+            message: '材料单价缺口',
+            source_ids: [],
+            targets: [
+              { template_id: 't', sheet: '预算', cell: 'B2' },
+              { template_id: 't', sheet: '预算', cell: 'C2' },
+            ],
+          },
+        ],
+      },
+    };
+    await workspace.refresh();
+    await flushPromises();
+    expect(wrapper.text()).toContain('已保存行动');
+    expect(wrapper.text()).toContain('预算请求失败');
+    expect(wrapper.text()).toContain('影响 2 格');
+    expect(wrapper.text()).toContain('继续预算处理');
+    expect((wrapper.find('.revision-section textarea').element as HTMLTextAreaElement).value).toBe(
+      '保留现有产线',
+    );
+    expect(workspace.currentSolution.value?.id).toBe('draft');
     wrapper.unmount();
     workspace.dispose();
   });

@@ -1,4 +1,5 @@
 import hashlib
+import re
 from collections import defaultdict
 from dataclasses import replace
 from importlib.resources import files
@@ -22,19 +23,19 @@ from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.memory import RoleMemory
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
-from erp_agent.application.solver_context import problem_material
+from erp_agent.application.solver_context import action_material, role_material
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.domain.errors import Cancelled, ERPError
 from erp_agent.domain.models import ReportData
 from erp_agent.domain.reporting import ReportNote, ReportOutline, validate_report_outline
 
-REPORT_VERSION = "answerer-1"
+REPORT_VERSION = "answerer-2"
 INDICES = {"type": "array", "items": {"type": "integer", "minimum": 0}}
 NOTE_SCHEMA = object_schema(
     {
         "title": TEXT,
         "explanation": TEXT,
-        "action_indices": INDICES,
+        "action_ids": TEXTS,
         "fact_ids": TEXTS,
         "rule_ids": TEXTS,
         "budget_indices": INDICES,
@@ -60,12 +61,21 @@ def decode_outline(data: JSONObject, report: ReportData) -> ReportOutline:
             raise ERPError("report_outline_invalid", "每个报告章节最多保留十二条关键说明。")
         notes = []
         for value in entries:
-            entry = obj(value, set(NOTE_SCHEMA["properties"]))
+            entry = obj(value)
+            if "action_ids" not in entry and "action_indices" in entry:
+                indices = tuple(integer(i, 0) for i in array(entry["action_indices"]))
+                if any(i >= len(report.solution.plan.actions) for i in indices):
+                    raise ERPError("report_outline_invalid", "报告引用了不存在的行动。")
+                entry = {k: v for k, v in entry.items() if k != "action_indices"}
+                entry["action_ids"] = [report.solution.plan.actions[i].action_id for i in indices]
+            if "action_ids" in entry and "action_indices" in entry and not entry["action_indices"]:
+                entry = {k: v for k, v in entry.items() if k != "action_indices"}
+            entry = obj(entry, set(NOTE_SCHEMA["properties"]))
             period = entry["period"]
             note = ReportNote(
                 title=string(entry["title"], 160),
                 explanation=string(entry["explanation"], 1200),
-                action_indices=tuple(integer(i, 0) for i in array(entry["action_indices"])),
+                action_ids=tuple(string(i, 200) for i in array(entry["action_ids"])),
                 fact_ids=tuple(string(i, 200) for i in array(entry["fact_ids"])),
                 rule_ids=tuple(string(i, 200) for i in array(entry["rule_ids"])),
                 budget_indices=tuple(integer(i, 0) for i in array(entry["budget_indices"])),
@@ -95,26 +105,6 @@ class CollaborativeReportComposer:
         prompt = files("erp_agent").joinpath("prompts/answerer.txt").read_text(encoding="utf-8")
         schema = dumps(REPORT_SCHEMA)
         plan = report.solution.plan
-        action_entities = {action.entity_id for action in plan.actions}
-        problem = report.snapshot.reading.problem
-        focused = replace(
-            report.snapshot,
-            reading=replace(
-                report.snapshot.reading,
-                problem=replace(
-                    problem,
-                    facts=tuple(
-                        fact
-                        for fact in problem.facts
-                        if fact.category != "order_pool"
-                        and (
-                            fact.entity_id in action_entities
-                            or fact.category in {"initial", "finance", "discount"}
-                        )
-                    ),
-                ),
-            ),
-        )
         budget_groups: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
         for item in plan.budget_items:
             group = budget_groups[(item.template_id, item.sheet)]
@@ -123,33 +113,12 @@ class CollaborativeReportComposer:
         material: JSONObject = {
             "solution_id": report.solution.id,
             "problem_version": report.solution.problem_version,
-            "problem": problem_material(focused, order_details=False),
-            "rules": to_json(report.snapshot.reading.rules),
+            **role_material(report.snapshot, "report", plan.actions),
             "generation": to_json(report.solution.generation),
             "plan": {
                 "title": plan.title,
                 "summary": plan.summary,
-                "action_columns": [
-                    "index",
-                    "period",
-                    "kind",
-                    "entity_id",
-                    "quantity",
-                    "amount",
-                    "description",
-                ],
-                "actions": [
-                    [
-                        i,
-                        action.period,
-                        action.kind,
-                        action.entity_id,
-                        action.quantity,
-                        None if action.amount is None else str(action.amount),
-                        action.description,
-                    ]
-                    for i, action in enumerate(plan.actions)
-                ],
+                **action_material(plan.actions),
                 "assumptions": list(plan.assumptions),
                 "risks": list(plan.risks),
             },
@@ -248,6 +217,7 @@ class CollaborativeReportComposer:
                 return result
             client = TaskLLMClient(llm, control, task)
             original = obj(loads(request.user))
+            patch_context = None
             for attempt in range(2):
                 response = None
                 try:
@@ -262,7 +232,26 @@ class CollaborativeReportComposer:
                         )
                     report_task(control, task, "running")
                     response = recovery_call(client, request, control)
-                    result = decode(obj(loads(normalize_model_json(response.content))))
+                    parsed = obj(loads(normalize_model_json(response.content)))
+                    if patch_context is not None:
+                        base, targets = patch_context
+                        entries = array(obj(parsed, {"patches"})["patches"])
+                        if len(entries) != len(targets):
+                            raise ERPError(
+                                "report_patch_scope", "补丁必须覆盖指定说明且不能增加条目。"
+                            )
+                        seen = set()
+                        for value in entries:
+                            patch = obj(value, {"section", "index", "note"})
+                            target = (string(patch["section"]), integer(patch["index"], 0))
+                            if target not in targets or target in seen:
+                                raise ERPError(
+                                    "report_patch_scope", "补丁修改了授权范围之外的说明。"
+                                )
+                            seen.add(target)
+                            array(base[target[0]])[target[1]] = patch["note"]
+                        parsed = base
+                    result = decode(parsed)
                     control.checkpoint("saving_report_progress")
                     if self.memory:
                         self.memory.put(key, {"result": obj(to_json(result))})
@@ -283,6 +272,58 @@ class CollaborativeReportComposer:
                     if attempt == 0 and (
                         response is not None or error.code == "llm_structured_response"
                     ):
+                        targets = set(
+                            re.findall(r"(strategy|milestones|risks)\[(\d+)\]", error.message)
+                        )
+                        targets = {(section, int(index)) for section, index in targets}
+                        if targets and response is not None:
+                            base = obj(loads(normalize_model_json(response.content)))
+                            if all(
+                                section in base and index < len(array(base[section]))
+                                for section, index in targets
+                            ):
+                                patch_context = (base, targets)
+                                patch_schema = object_schema(
+                                    {
+                                        "patches": {
+                                            "type": "array",
+                                            "items": object_schema(
+                                                {
+                                                    "section": {
+                                                        "type": "string",
+                                                        "enum": ["strategy", "milestones", "risks"],
+                                                    },
+                                                    "index": {"type": "integer", "minimum": 0},
+                                                    "note": NOTE_SCHEMA,
+                                                }
+                                            ),
+                                        }
+                                    }
+                                )
+                                request = replace(
+                                    request,
+                                    schema_name="erp_report_patch",
+                                    schema_json=dumps(patch_schema),
+                                    system=prompt
+                                    + "\n仅返回指定说明的受限补丁，不修改其他条目。\n"
+                                    + dumps(patch_schema),
+                                    user=dumps(
+                                        {
+                                            "solution_id": report.solution.id,
+                                            "allowed_targets": [
+                                                {
+                                                    "section": section,
+                                                    "index": index,
+                                                    "note": array(base[section])[index],
+                                                }
+                                                for section, index in sorted(targets)
+                                            ],
+                                            "actions": action_material(plan.actions),
+                                            "error": {"code": error.code, "message": error.message},
+                                        }
+                                    ),
+                                )
+                                continue
                         request = replace(
                             request,
                             user=dumps(

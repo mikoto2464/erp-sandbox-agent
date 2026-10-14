@@ -8,6 +8,7 @@ import { useWorkspaceContext } from '../composables/context';
 import type { BudgetTemplate, WorkbookMapping } from '../lib/types';
 const {
   currentSolution,
+  snapshot,
   solutions,
   selectSolution,
   templates,
@@ -21,6 +22,7 @@ const {
   exportArtifact,
   setStep,
   project,
+  retryBudget,
 } = useWorkspaceContext();
 const editing = ref<WorkbookMapping | null>(null),
   preview = ref<BudgetTemplate | null>(null),
@@ -40,6 +42,20 @@ const pending = computed(() =>
       ['queued', 'running'].includes(job.status),
   ),
 );
+function budgetReady(template: BudgetTemplate) {
+  const stage = currentSolution.value?.stages?.budget;
+  if (!stage) return true;
+  const completed = stage.result?.completed_sheets || [];
+  const reading = snapshot.value?.template_readings?.find(
+    (item) => item.template_id === template.source.id,
+  );
+  const required =
+    reading?.sheets.filter((sheet) => sheet.input_groups.length) ||
+    template.sheets.filter((sheet) => !sheet.hidden);
+  return required.every((sheet) =>
+    completed.some(([tid, name]) => tid === template.source.id && name === sheet.name),
+  );
+}
 function mappingFor(id: string) {
   return visibleMappings.value.filter((item) => item.template_id === id).at(-1);
 }
@@ -97,6 +113,21 @@ const formulaNames: Record<string, string> = {
         class="notice"
       >
         导出内容为当前方案草稿。经营可行性与财务数值尚未核算，未确定项目会留空。
+      </p>
+      <p
+        v-if="
+          currentSolution.stages?.report.status === 'running' ||
+          currentSolution.stages?.report.status === 'queued'
+        "
+        class="notice"
+      >
+        报告处理中，行动方案可继续查看。
+      </p>
+      <p
+        v-if="currentSolution.stages?.report.error"
+        class="notice"
+      >
+        {{ currentSolution.stages.report.error.message }} 可以重新生成 Word，行动方案保持保存。
       </p>
       <div class="module-grid">
         <article class="card module-card">
@@ -160,6 +191,23 @@ const formulaNames: Record<string, string> = {
               预览空表
             </button>
           </div>
+          <p
+            v-if="!budgetReady(template)"
+            class="notice"
+          >
+            此表预算尚未完整处理，行动方案已可查看。
+          </p>
+          <button
+            v-if="
+              !budgetReady(template) &&
+              ['failed', 'cancelled'].includes(currentSolution.stages?.budget.status || '')
+            "
+            class="secondary"
+            :disabled="operations.has('retry-budget')"
+            @click="run('retry-budget', retryBudget)"
+          >
+            继续预算处理
+          </button>
           <template v-if="mappingFor(template.source.id)">
             <MappingReview
               :mapping="mappingFor(template.source.id)!"
@@ -169,7 +217,7 @@ const formulaNames: Record<string, string> = {
           <footer class="panel-footer">
             <button
               class="review-action"
-              :disabled="pending || operations.has(template.source.id)"
+              :disabled="pending || !budgetReady(template) || operations.has(template.source.id)"
               @click="run(template.source.id, () => analyzeTemplate(template.source.id))"
             >
               {{ mappingFor(template.source.id) ? '重新核对方案预算' : '准备填写' }}

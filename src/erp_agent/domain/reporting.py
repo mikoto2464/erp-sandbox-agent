@@ -24,6 +24,7 @@ class ReportNote:
     period: int | None = None
     condition: str = ""
     response: str = ""
+    action_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,19 @@ def validate_report_outline(
             target = f"{section}[{index}]"
             if not note.title.strip() or not note.explanation.strip():
                 errors.append(f"{target} 缺少标题或说明。")
-            if not (note.action_indices or note.fact_ids or note.rule_ids or note.budget_indices):
+            if not (
+                note.action_ids
+                or note.action_indices
+                or note.fact_ids
+                or note.rule_ids
+                or note.budget_indices
+            ):
                 errors.append(f"{target} 缺少方案或题目引用。")
+            if any(
+                identifier not in {a.action_id for a in plan.actions}
+                for identifier in note.action_ids
+            ):
+                errors.append(f"{target} 引用了当前方案以外的行动。")
             if any(
                 type(i) is not int or not 0 <= i < len(plan.actions) for i in note.action_indices
             ):
@@ -72,6 +84,7 @@ def validate_report_outline(
                 for i in note.action_indices
                 if type(i) is int and 0 <= i < len(plan.actions)
             }
+            entities |= {a.entity_id for a in plan.actions if a.action_id in note.action_ids}
             names = {
                 fact.entity_name
                 for fact in problem.facts

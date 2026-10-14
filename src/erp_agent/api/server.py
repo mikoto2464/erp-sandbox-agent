@@ -76,7 +76,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": {"code": exc.code, "message": exc.message}}, exc.status)
         except (ValueError, UnicodeError) as exc:
             self.close_connection = True
-            self._json({"error": {"code": "invalid_request", "message": "请求内容或参数无效。"}}, 400)
+            self._json(
+                {"error": {"code": "invalid_request", "message": "请求内容或参数无效。"}}, 400
+            )
             logging.debug("请求校验失败: %s", type(exc).__name__)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
@@ -92,22 +94,29 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path in {"/", "/app.js", "/style.css"}:
             name = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}[path]
             content_type = {
-                "/": "text/html", "/app.js": "text/javascript", "/style.css": "text/css",
+                "/": "text/html",
+                "/app.js": "text/javascript",
+                "/style.css": "text/css",
             }[path]
             body = files("erp_agent").joinpath(f"api/static/{name}").read_bytes()
             self._respond(body, content_type + "; charset=utf-8")
             return
         if path == "/api/auth/session" and method == "GET":
-            self._json({"authenticated": self.server.access.authenticated(self._session_token()),
-                        "configured": self.server.access.configured})
+            self._json(
+                {
+                    "authenticated": self.server.access.authenticated(self._session_token()),
+                    "configured": self.server.access.configured,
+                }
+            )
             return
         if path == "/api/auth/login" and method == "POST":
             data = self._body_json()
             remember = data.get("remember", True)
             if not isinstance(remember, bool):
                 raise ERPError("invalid_remember", "记住登录选项无效。")
-            session = self.server.access.login(string(data.get("key"), maximum=2048), remember,
-                                                self.client_address[0])
+            session = self.server.access.login(
+                string(data.get("key"), maximum=2048), remember, self.client_address[0]
+            )
             self._set_session_cookie(session.token, session.max_age)
             self._json({"authenticated": True})
             return
@@ -155,11 +164,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ERPError("method_not_allowed", "不支持该操作。", 405)
             return
         if method == "GET" and path == "/api/status":
-            self._json({"llm_configured": workflow.reader.llm.configured,
-                        "simulation_ready": workflow.solver.evaluator.supports_scoring,
-                        "default_solver": self.server.settings.default_solver.value,
-                        "solver_modes": ["llm_only"],
-                        "max_upload_mb": self.server.settings.max_upload_mb})
+            self._json(
+                {
+                    "llm_configured": workflow.reader.llm.configured,
+                    "simulation_ready": workflow.solver.evaluator.supports_scoring,
+                    "default_solver": self.server.settings.default_solver.value,
+                    "solver_modes": ["llm_only"],
+                    "max_upload_mb": self.server.settings.max_upload_mb,
+                }
+            )
             return
         if path == "/api/projects":
             if method == "GET":
@@ -192,11 +205,18 @@ class Handler(BaseHTTPRequestHandler):
                 workflow.migrate_legacy_templates()
                 self._json(library.items())
             elif len(parts) == 2 and method == "POST":
-                self._json(library.upload(unquote(self.headers.get("X-Filename", "")),
-                    self._body(self.server.settings.max_upload_mb * 1024 * 1024)), 202)
+                self._json(
+                    library.upload(
+                        unquote(self.headers.get("X-Filename", "")),
+                        self._body(self.server.settings.max_upload_mb * 1024 * 1024),
+                    ),
+                    202,
+                )
             elif len(parts) == 3 and parts[2] == "jobs" and method == "GET":
                 self._json(workflow.repository.list("job", LIBRARY_SCOPE))
-            elif len(parts) == 5 and parts[2] == "jobs" and parts[4] == "cancel" and method == "POST":
+            elif (
+                len(parts) == 5 and parts[2] == "jobs" and parts[4] == "cancel" and method == "POST"
+            ):
                 self._body_json()
                 self._json(workflow.jobs.cancel(LIBRARY_SCOPE, parts[3]))
             elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "GET":
@@ -214,8 +234,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise ERPError("not_found", "接口不存在。", 404)
             return
-        if (len(parts) == 3 and parts[:2] == ["api", "projects"]
-                and ID.fullmatch(parts[2]) and method == "DELETE"):
+        if (
+            len(parts) == 3
+            and parts[:2] == ["api", "projects"]
+            and ID.fullmatch(parts[2])
+            and method == "DELETE"
+        ):
             workflow.delete_project(parts[2])
             self._json({"deleted": True})
             return
@@ -223,7 +247,12 @@ class Handler(BaseHTTPRequestHandler):
             raise ERPError("not_found", "接口不存在。", 404)
         project_id, resource = parts[2:4]
         workflow.project(project_id)
-        if resource == "templates" and len(parts) == 5 and parts[4] == "import" and method == "POST":
+        if (
+            resource == "templates"
+            and len(parts) == 5
+            and parts[4] == "import"
+            and method == "POST"
+        ):
             self._json(workflow.import_library_template(project_id, self._body_json()))
             return
         if len(parts) == 4:
@@ -232,14 +261,26 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(workflow.documents(project_id))
                 elif method == "POST":
                     name = unquote(self.headers.get("X-Filename", ""))
-                    self._json(workflow.upload(project_id, name, self._body(
-                        self.server.settings.max_upload_mb * 1024 * 1024)), 202)
+                    self._json(
+                        workflow.upload(
+                            project_id,
+                            name,
+                            self._body(self.server.settings.max_upload_mb * 1024 * 1024),
+                        ),
+                        202,
+                    )
                 else:
                     raise ERPError("method_not_allowed", "不支持该操作。", 405)
             elif resource == "templates" and method == "POST":
                 name = unquote(self.headers.get("X-Filename", ""))
-                self._json(workflow.upload_template(project_id, name, self._body(
-                    self.server.settings.max_upload_mb * 1024 * 1024)), 202)
+                self._json(
+                    workflow.upload_template(
+                        project_id,
+                        name,
+                        self._body(self.server.settings.max_upload_mb * 1024 * 1024),
+                    ),
+                    202,
+                )
             elif resource == "templates" and method == "GET":
                 self._json(workflow.repository.list("template", project_id))
             elif resource == "mappings" and method == "GET":
@@ -260,13 +301,21 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 version = int(query["version"][0]) if "version" in query else None
                 snapshot = to_json(workflow.problem(project_id, version))
-                self._json({"snapshot": snapshot,
-                            "versions": workflow.repository.versions(project_id)})
+                self._json(
+                    {"snapshot": snapshot, "versions": workflow.repository.versions(project_id)}
+                )
             elif resource == "revisions" and method == "POST":
                 self._json(workflow.revise(project_id, self._body_json()), 201)
             elif resource == "solve" and method == "POST":
                 self._json(workflow.solve(project_id, self._body_json()), 202)
-            elif resource in {"jobs", "solutions"} and method == "GET":
+            elif resource == "budgets" and method == "POST":
+                self._json(
+                    workflow.start_budget(project_id, string(self._body_json().get("solution_id"))),
+                    202,
+                )
+            elif resource == "solutions" and method == "GET":
+                self._json(workflow.solutions(project_id))
+            elif resource == "jobs" and method == "GET":
                 self._json(workflow.repository.list(resource.rstrip("s"), project_id))
             else:
                 raise ERPError("not_found", "接口不存在。", 404)
@@ -279,25 +328,51 @@ class Handler(BaseHTTPRequestHandler):
                 self._body_json()
                 self._json(workflow.jobs.cancel(project_id, parts[4]))
                 return
-        if resource == "mappings" and len(parts) == 5 and ID.fullmatch(parts[4]) and method == "POST":
+        if (
+            resource == "mappings"
+            and len(parts) == 5
+            and ID.fullmatch(parts[4])
+            and method == "POST"
+        ):
             self._json(workflow.answerer.confirm(project_id, parts[4], self._body_json()))
             return
-        if resource in {"documents", "templates"} and len(parts) == 5 and ID.fullmatch(parts[4]) and method == "DELETE":
+        if (
+            resource in {"documents", "templates"}
+            and len(parts) == 5
+            and ID.fullmatch(parts[4])
+            and method == "DELETE"
+        ):
             kind = "document" if resource == "documents" else "template"
             self._json(workflow.delete_upload(project_id, kind, parts[4]))
             return
-        if resource == "artifacts" and len(parts) == 6 and ID.fullmatch(parts[4]) and parts[5] == "download" and method == "GET":
+        if (
+            resource == "artifacts"
+            and len(parts) == 6
+            and ID.fullmatch(parts[4])
+            and parts[5] == "download"
+            and method == "GET"
+        ):
             manifest, content = workflow.answerer.download(project_id, parts[4])
-            self._download_name = string(manifest['filename'])
-            self._respond(content, string(manifest['media_type']))
+            self._download_name = string(manifest["filename"])
+            self._respond(content, string(manifest["media_type"]))
             return
-        if (resource == "documents" and len(parts) == 6 and ID.fullmatch(parts[4])
-                and parts[5] == "retry" and method == "POST"):
+        if (
+            resource == "documents"
+            and len(parts) == 6
+            and ID.fullmatch(parts[4])
+            and parts[5] == "retry"
+            and method == "POST"
+        ):
             self._body_json()
             self._json(workflow.retry_parse(project_id, parts[4]), 202)
             return
-        if (resource == "templates" and len(parts) == 6 and ID.fullmatch(parts[4])
-                and parts[5] == "retry" and method == "POST"):
+        if (
+            resource == "templates"
+            and len(parts) == 6
+            and ID.fullmatch(parts[4])
+            and parts[5] == "retry"
+            and method == "POST"
+        ):
             self._body_json()
             self._json(workflow.retry_template(project_id, parts[4]), 202)
             return
@@ -329,13 +404,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        if hasattr(self, '_download_name'):
-            self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(self._download_name))
+        if hasattr(self, "_download_name"):
+            self.send_header(
+                "Content-Disposition", "attachment; filename*=UTF-8''" + quote(self._download_name)
+            )
         if hasattr(self, "_cookie_header"):
             self.send_header("Set-Cookie", self._cookie_header)
-        self.send_header("Content-Security-Policy",
-                         "default-src 'self'; script-src 'self'; style-src 'self'; "
-                         "object-src 'none'; frame-ancestors 'none'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "object-src 'none'; frame-ancestors 'none'",
+        )
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
@@ -364,32 +443,57 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_access(settings: Settings) -> AccessService:
-    return AccessService(settings.access_key,
-                         SQLiteSessionStore(settings.data_dir / "access.sqlite3"))
+    return AccessService(
+        settings.access_key, SQLiteSessionStore(settings.data_dir / "access.sqlite3")
+    )
 
 
-def create_workflow(settings: Settings, llm: LLMClient | None = None,
-                    evaluator: PlanEvaluator | None = None) -> WorkflowService:
+def create_workflow(
+    settings: Settings, llm: LLMClient | None = None, evaluator: PlanEvaluator | None = None
+) -> WorkflowService:
     repository = SQLiteRepository(settings.data_dir / "erp.sqlite3")
     memory = SQLiteMemoryService(repository.path)
     jobs = ThreadJobRunner(repository)
     models = ModelSettingsService(settings, llm)
     client = models.client
     parser = MultiFormatDocumentParser(LibreOfficeConverter(settings.libreoffice))
-    solver = SolverService(LLMStrategyGenerator(client),
-                           evaluator if evaluator is not None else DraftPlanEvaluator())
-    answerer = AnswererService(repository, jobs, models, DocxReportRenderer(),
-                               XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice)),
-                               memory=memory)
-    reader = StructuredReader(client, client.current,
-                              ReaderLimits(settings.reader_max_request_chars,
-                                           settings.reader_max_batch_units, settings.reader_concurrency))
-    return WorkflowService(repository, jobs, parser, reader, solver,
-                           settings.default_solver, models, SpreadsheetBudgetParser(), answerer, memory)
+    solver = SolverService(
+        LLMStrategyGenerator(client), evaluator if evaluator is not None else DraftPlanEvaluator()
+    )
+    answerer = AnswererService(
+        repository,
+        jobs,
+        models,
+        DocxReportRenderer(),
+        XlsxWorkbookRenderer(LibreOfficeSpreadsheetConverter(settings.libreoffice)),
+        memory=memory,
+    )
+    reader = StructuredReader(
+        client,
+        client.current,
+        ReaderLimits(
+            settings.reader_max_request_chars,
+            settings.reader_max_batch_units,
+            settings.reader_concurrency,
+        ),
+    )
+    return WorkflowService(
+        repository,
+        jobs,
+        parser,
+        reader,
+        solver,
+        settings.default_solver,
+        models,
+        SpreadsheetBudgetParser(),
+        answerer,
+        memory,
+    )
 
 
-def create_server(settings: Settings, llm: LLMClient | None = None,
-                  evaluator: PlanEvaluator | None = None) -> AppHTTPServer:
+def create_server(
+    settings: Settings, llm: LLMClient | None = None, evaluator: PlanEvaluator | None = None
+) -> AppHTTPServer:
     workflow = create_workflow(settings, llm, evaluator)
     try:
         return AppHTTPServer(settings, workflow)

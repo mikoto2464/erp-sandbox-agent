@@ -57,7 +57,7 @@ class MappingLLM(FakeLLM):
                     "sheet": item["sheet"],
                     "cell": item["cell"],
                     "label": item["label"],
-                    "source_ids": [f"action:{item['action_indices'][0]}:amount"],
+                    "source_ids": pending["candidate_source_ids"][:1],
                     "conversion": "identity",
                     "explanation": "按对应期间操作金额填写。",
                 }
@@ -115,13 +115,16 @@ class WorkbookMapperTests(unittest.TestCase):
             self.assertNotIn("rules", payload)
             self.assertEqual(
                 {source["id"] for source in payload["sources"]},
-                {"action:0:amount"},
+                {f"action:{data.solution.plan.actions[0].action_id}:amount"},
             )
             self.assertTrue(payload["template_readings"][0]["reviewed"])
             self.assertEqual(len(payload["template_readings"][0]["sheets"]), 1)
             self.assertTrue(request.stream)
             self.assertEqual(request.reasoning_reserve_tokens, 8192)
-        self.assertEqual({entry.source_ids for entry in mapping.entries}, {("action:0:amount",)})
+        self.assertEqual(
+            {entry.source_ids for entry in mapping.entries},
+            {(f"action:{data.solution.plan.actions[0].action_id}:amount",)},
+        )
         self.assertFalse(any(issue.severity == "error" for issue in mapping.issues))
         self.assertTrue(any(task_id == "mapper:validation" for task_id, _ in control.tasks))
 
@@ -166,7 +169,7 @@ class WorkbookMapperTests(unittest.TestCase):
                     "sheet": template.sheets[0].name,
                     "cell": "B2",
                     "label": "借款",
-                    "source_ids": ["action:0:amount"],
+                    "source_ids": [f"action:{data.solution.plan.actions[0].action_id}:amount"],
                     "conversion": "identity",
                     "explanation": "对应方案",
                     **bad,
@@ -246,7 +249,7 @@ class WorkbookMapperTests(unittest.TestCase):
             "sheet": template.sheets[0].name,
             "cell": "B2",
             "label": "借款",
-            "source_ids": ["action:0:amount"],
+            "source_ids": [f"action:{data.solution.plan.actions[0].action_id}:amount"],
             "conversion": "ratio_to_percent",
             "explanation": "错误转换",
         }

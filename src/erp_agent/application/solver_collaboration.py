@@ -1,38 +1,182 @@
 import hashlib
+import re
 from dataclasses import replace
-from difflib import get_close_matches
 from importlib.resources import files
 
 from langchain_core.runnables import RunnableLambda
 
 from erp_agent.application.contracts import (
-    TEXT,
+    SPECIALIST_SCHEMA,
     JSONObject,
     array,
+    decode_action,
     decode_proposal,
     dumps,
+    integer,
     loads,
     obj,
     object_schema,
     string,
+    strings,
     to_json,
 )
-from erp_agent.application.llm_recovery import TRANSIENT_ERRORS, recovery_call
+from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.memory import RoleMemory
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
-from erp_agent.application.solver_budget import PlanBudgetPlanner
-from erp_agent.application.solver_context import (
-    planning_templates,
-    problem_material,
-    selected_snapshot,
-)
+from erp_agent.application.solver_context import action_material, role_material, selected_snapshot
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
-from erp_agent.application.template_reader import row_material
+from erp_agent.domain.action_validation import validate_actions
 from erp_agent.domain.errors import Cancelled, ERPError
-from erp_agent.domain.models import PlanningContext, ProblemSnapshot, StrategyProposal
+from erp_agent.domain.models import Action, Plan, PlanningContext, ProblemSnapshot, StrategyProposal
 
 DEFAULT_PLANNING_CONTEXT = PlanningContext()
+
+
+def decode_specialist(
+    value: JSONObject, snapshot: ProblemSnapshot, *, candidate_actions: tuple[Action, ...] = ()
+) -> JSONObject:
+    data = obj(value, set(SPECIALIST_SCHEMA["properties"]))
+    status = string(data["status"])
+    reason = string(data["reason"], 1200)
+    if status not in {"applicable", "not_applicable", "missing_input", "failed"}:
+        raise ERPError("solver_status", "协作任务状态无效。")
+    if status in {"missing_input", "failed"}:
+        raise ERPError("solver_" + status, reason or "任务未提供可用结果。")
+    if status == "not_applicable" and not reason.strip():
+        raise ERPError("solver_status", "不适用结果必须明确说明原因。")
+    proposed_items = []
+    for index, value in enumerate(array(data["candidate_actions"])):
+        try:
+            proposed_items.append(decode_action(value))
+        except ERPError as error:
+            raise ERPError(
+                error.code, f"candidate_actions.{index}：{error.message}", error.status
+            ) from error
+    proposed = tuple(proposed_items)
+    all_actions = candidate_actions + proposed
+    plan = Plan("协作候选", "", all_actions, (), ())
+    diagnostics = (
+        validate_actions(snapshot, plan, coverage=False, ordering=False) if all_actions else ()
+    )
+    if diagnostics:
+        rendered = []
+        for issue in diagnostics[:8]:
+            parts = issue.target.split(".")
+            target = issue.target
+            if len(parts) > 1 and parts[0] == "actions" and parts[1].isdigit():
+                local_index = int(parts[1]) - len(candidate_actions)
+                if local_index >= 0:
+                    target = ".".join(["candidate_actions", str(local_index), *parts[2:]])
+            rendered.append({**to_json(issue), "target": target})
+        raise ERPError("solver_action", dumps(rendered))
+    facts = {f.id for f in snapshot.reading.problem.facts}
+    rules = {r.id for r in snapshot.reading.rules.rules}
+    entities = {f.entity_id for f in snapshot.reading.problem.facts} | {"company"}
+    gaps = {f"{i.code}:{i.target}" for i in snapshot.reading.issues}
+    identifiers = {a.action_id for a in all_actions}
+    horizon = (snapshot.reading.problem.years or 4) * (
+        snapshot.reading.problem.periods_per_year or 4
+    )
+    counts = {name: len(array(data[name])) for name in ("recommendations", "dependencies", "risks")}
+    if counts["recommendations"] > 24 or counts["dependencies"] > 16 or counts["risks"] > 16:
+        raise ERPError("solver_limit", "协作结果超过当前职责的结论数量上限。")
+    if status == "applicable" and not (proposed or any(counts.values())):
+        raise ERPError("solver_empty", "空结果必须说明不适用、缺少输入或失败，不能标为有效建议。")
+    if status == "not_applicable" and (proposed or any(counts.values())):
+        raise ERPError("solver_status", "不适用结果不能同时提供行动或结论。")
+    for name in ("recommendations", "dependencies", "risks"):
+        expected = set(obj(SPECIALIST_SCHEMA["properties"])[name]["items"]["properties"])
+        seen = set()
+        for index, item in enumerate(array(data[name])):
+            entry = obj(item, expected)
+            target = f"{name}.{index}"
+            for key, allowed in (
+                ("fact_ids", facts),
+                ("rule_ids", rules),
+                ("gap_ids", gaps),
+                ("action_ids", identifiers),
+            ):
+                for identifier in strings(entry.get(key, [])):
+                    if identifier not in allowed:
+                        raise ERPError(
+                            "solver_source", f"{target}.{key} 引用未知 ID {identifier}。"
+                        )
+            if "entity_id" in entry and string(entry["entity_id"]) not in entities:
+                raise ERPError("solver_source", f"{target}.entity_id 引用未知实体。")
+            for period in array(entry.get("periods", [])):
+                integer(period, 1, horizon)
+            if "id" in entry:
+                identifier = string(entry["id"])
+                if not identifier.strip() or identifier in seen:
+                    raise ERPError("solver_source", f"{target}.id 为空或重复。")
+                seen.add(identifier)
+            if name == "dependencies":
+                dependent = string(entry["action_id"])
+                required = string(entry["requires_action_id"])
+                if (
+                    dependent not in identifiers
+                    or required not in identifiers
+                    or dependent == required
+                ):
+                    raise ERPError("solver_source", f"{target} 的行动依赖无效。")
+                if entry["required_period"] is not None:
+                    integer(entry["required_period"], 1, horizon)
+            if name == "recommendations" and not string(entry["explanation"]).strip():
+                raise ERPError("solver_source", f"{target}.explanation 为空。")
+            if name == "risks":
+                condition = obj(entry["condition"])
+                allowed = {"fact": facts, "rule": rules, "action": identifiers, "gap": gaps}
+                kind = string(condition.get("kind"))
+                if kind != "always" and (
+                    kind not in allowed or condition.get("reference_id") not in allowed[kind]
+                ):
+                    raise ERPError("solver_source", f"{target}.condition 引用无效。")
+                string(entry["response"])
+    return data
+
+
+def specialist_patch(
+    raw: JSONObject, error: ERPError
+) -> tuple[JSONObject, JSONObject, str, int] | None:
+    match = re.search(r"(recommendations|dependencies|risks)\.(\d+)", error.message)
+    if match:
+        collection, index = match.group(1), int(match.group(2))
+    else:
+        match = re.search(r"candidate_actions\.(\d+)", error.message)
+        if not match:
+            return None
+        collection, index = "candidate_actions", int(match.group(1))
+    entries = array(raw.get(collection, []))
+    if index >= len(entries):
+        return None
+    entry = obj(entries[index])
+    properties = obj(SPECIALIST_SCHEMA["properties"])
+    entry_schema = obj(properties[collection])["items"]
+    schema = object_schema(
+        {
+            "collection": {"type": "string", "const": collection},
+            "index": {"type": "integer", "const": index},
+            "replacement": entry_schema,
+        }
+    )
+    return {"collection": collection, "index": index, "object": entry}, schema, collection, index
+
+
+def apply_specialist_patch(
+    raw: JSONObject, value: JSONObject, collection: str, index: int
+) -> JSONObject:
+    entry = obj(value, {"collection", "index", "replacement"})
+    if entry["collection"] != collection or entry["index"] != index:
+        raise ERPError("patch_scope", "协作补丁不能修改其它对象。")
+    original = obj(array(raw[collection])[index])
+    replacement = obj(entry["replacement"])
+    identity = "action_id" if collection in {"candidate_actions", "dependencies"} else "id"
+    if replacement.get(identity) != original.get(identity):
+        raise ERPError("patch_scope", "协作补丁不能改写对象 ID。")
+    updated = list(array(raw[collection]))
+    updated[index] = replacement
+    return {**raw, collection: updated}
 
 
 class CollaborativeStrategyGenerator:
@@ -44,49 +188,11 @@ class CollaborativeStrategyGenerator:
     def propose(
         self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_PLANNING_CONTEXT
     ) -> StrategyProposal:
-        from erp_agent.application.solver import DraftPlanEvaluator, LLMStrategyGenerator
+        from erp_agent.application.solver import LLMStrategyGenerator
 
-        schema = dumps(
-            object_schema(
-                {
-                    "recommendations": {
-                        "type": "array",
-                        "items": object_schema(
-                            {
-                                "entity_id": TEXT,
-                                "periods": TEXT,
-                                "recommendation": TEXT,
-                                "fact_ids": {"type": "array", "items": TEXT},
-                                "rule_ids": {"type": "array", "items": TEXT},
-                            }
-                        ),
-                    },
-                    "dependencies": {"type": "array", "items": TEXT},
-                    "risks": {"type": "array", "items": TEXT},
-                }
-            )
-        )
-        roles = [
-            (
-                "operations",
-                "产销与资源规划",
-                "从可履约订单窗口倒推市场、认证、研发、安装、培训、采购及生产启动；"
-                "明确产能材料人力约束、订单取舍与各年度阶段，区分待竞目标和已签合同。",
-            ),
-            (
-                "finance",
-                "资金与风险规划",
-                "沿经营动作的实际支付顺序安排资金，区分销售、应收与回款；"
-                "核对融资成本及到期、固定费用、商誉、碳和完整末期收官风险。",
-            ),
-        ]
-        if context.templates:
-            roles.append(("budget", "模板预算规划", "按已核对空表识别输入项目与经营动作依赖。"))
-        entities = {f.entity_id for f in snapshot.reading.problem.facts} | {"company"}
-        fact_ids = {f.id for f in snapshot.reading.problem.facts}
-        rule_ids = {r.id for r in snapshot.reading.rules.rules}
+        snapshot = selected_snapshot(snapshot, context.templates)
         prompt = files("erp_agent").joinpath("prompts/solver_specialist.txt").read_text()
-
+        schema = dumps(SPECIALIST_SCHEMA)
         synthesis_task = TaskContext(
             "solver:synthesis",
             "Solver",
@@ -94,220 +200,139 @@ class CollaborativeStrategyGenerator:
             snapshot.reading.problem.title,
             "solver",
         )
+        operations_task = TaskContext(
+            "solver:operations",
+            "Solver",
+            "产销与资源规划",
+            snapshot.reading.problem.title,
+            "solver",
+        )
+        finance_task = TaskContext(
+            "solver:finance", "Solver", "资金与风险核对", snapshot.reading.problem.title, "solver"
+        )
 
-        def task_for(role: tuple[str, str, str]) -> TaskContext:
-            return TaskContext(
-                "solver:" + role[0], "Solver", role[1], snapshot.reading.problem.title, "solver"
-            )
-
-        snapshot = selected_snapshot(snapshot, context.templates)
-        budget_roots = planning_templates(context.templates)
-        units: list[tuple[TaskContext, JSONObject]] = []
-        for key, name, responsibility in roles:
-            base: JSONObject = {
-                "role": key,
-                "responsibility": responsibility,
-                "problem_version": snapshot.version,
-                "problem": problem_material(snapshot, order_details=key != "budget"),
-                "rules": to_json(snapshot.reading.rules),
-                "issues": to_json(snapshot.reading.issues),
+        def material_for(role: str, candidates: tuple[Action, ...] = ()) -> JSONObject:
+            material = {
+                **role_material(snapshot, role, candidates),
+                "role": role,
                 "generation": to_json(context.config),
-                "previous_plan": to_json(
+            }
+            if role == "operations":
+                material["previous_plan"] = to_json(
                     replace(context.previous_plan, budget_items=())
                     if context.previous_plan
                     else None
-                ),
-            }
-            if key == "budget":
-                for index, template in enumerate(budget_roots):
-                    tid = obj(template["source"])["id"]
-                    material = {
-                        **base,
-                        "budget_templates": [template],
-                        "template_readings": to_json(
-                            tuple(t for t in snapshot.template_readings if t.template_id == tid)
-                        ),
-                    }
-                    units.append(
-                        (
-                            TaskContext(
-                                f"solver:budget:{index}",
-                                "Solver",
-                                name,
-                                str(obj(template["source"])["filename"]),
-                                "solver:budget",
-                            ),
-                            material,
-                        )
-                    )
-            else:
-                units.append((task_for((key, name, responsibility)), base))
-        report_task(self.control, synthesis_task, "queued")
+                )
+            if role == "finance":
+                material["candidate_plan"] = to_json(action_material(candidates))
+            if role == "budget":
+                material["template_requirements"] = to_json(snapshot.template_readings)
+            return material
 
-        def request_for(task: TaskContext, material: JSONObject) -> LLMRequest:
-            return LLMRequest(
+        def run(unit: tuple[TaskContext, JSONObject, tuple[Action, ...]]) -> JSONObject:
+            task, material, candidates = unit
+            request = LLMRequest(
                 prompt + "\nJSON schema:\n" + schema,
                 dumps(material),
                 "erp_solver_specialist",
                 schema,
-                max_output_tokens=4000,
+                max_output_tokens=6000,
                 reasoning_reserve_tokens=8192,
                 stream=True,
                 retries=0,
                 task=task,
             )
-
-        def unit_key(material: JSONObject) -> str:
-            return (
+            key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps(
-                        {
-                            "version": "solver-8",
-                            "material": material,
-                            "prompt": prompt,
-                            "schema": schema,
-                        }
-                    ).encode()
+                    dumps({"version": "solver-9", "request": request}).encode()
                 ).hexdigest()
             )
-
-        def decode(value: JSONObject) -> JSONObject:
-            data = obj(value, {"recommendations", "dependencies", "risks"})
-            for value in array(data["recommendations"]):
-                entry = obj(
-                    value, {"entity_id", "periods", "recommendation", "fact_ids", "rule_ids"}
-                )
-                for label, used, allowed in (
-                    ("实体", {string(entry["entity_id"])}, entities),
-                    ("字段", {string(v) for v in array(entry["fact_ids"])}, fact_ids),
-                    ("规则", {string(v) for v in array(entry["rule_ids"])}, rule_ids),
-                ):
-                    unknown = sorted(used - allowed)
-                    if unknown:
-                        hints = [
-                            f"{value}（相近合法ID："
-                            f"{', '.join(get_close_matches(value, sorted(allowed), n=2))}）"
-                            for value in unknown[:3]
-                        ]
-                        raise ERPError(
-                            "solver_source",
-                            f"协作建议引用未知{label}："
-                            + "；".join(hints)
-                            + "。请核对输入，只用原ID或删除无依据引用。",
-                        )
-                string(entry["periods"])
-                string(entry["recommendation"])
-            for value in array(data["dependencies"]) + array(data["risks"]):
-                string(value)
-            return data
-
-        def split_budget(material: JSONObject) -> tuple[JSONObject, ...]:
-            templates = array(material.get("budget_templates", []))
-            if len(templates) != 1:
-                return ()
-            template = obj(templates[0])
-            sheets = array(template["sheets"])
-            if len(sheets) > 1:
-                parts = [[sheet] for sheet in sheets]
-            elif sheets:
-                sheet = obj(sheets[0])
-                lo, hi = array(material.get("row_window", [1, sheet["rows"]]))
-                lo, hi = int(lo), int(hi)
-                if hi - lo < 8 or len(array(sheet["input_ranges"])) < 2:
-                    return ()
-                middle = (lo + hi) // 2
-                parts = []
-                for first, last in ((lo, middle), (middle + 1, hi)):
-                    sliced = row_material({"sheet": sheet}, first, last)
-                    if array(obj(sliced["sheet"])["input_ranges"]):
-                        parts.append([sliced["sheet"]])
-                if len(parts) < 2:
-                    return ()
-                return tuple(
-                    {
-                        **material,
-                        "budget_templates": [{**template, "sheets": part}],
-                        "row_window": [first, last],
-                    }
-                    for part, (first, last) in zip(
-                        parts, ((lo, middle), (middle + 1, hi)), strict=True
-                    )
-                )
-            else:
-                return ()
-            results = []
-            for part in parts:
-                names = {obj(sheet)["name"] for sheet in part}
-                readings = [
-                    {
-                        **obj(reading),
-                        "sheets": [
-                            sheet
-                            for sheet in array(obj(reading)["sheets"])
-                            if obj(sheet)["name"] in names
-                        ],
-                    }
-                    for reading in array(material.get("template_readings", []))
-                ]
-                results.append(
-                    {
-                        **material,
-                        "budget_templates": [{**template, "sheets": part}],
-                        "template_readings": readings,
-                    }
-                )
-            return tuple(results)
-
-        def run(unit: tuple[TaskContext, JSONObject], depth: int = 0) -> JSONObject:
-            self.control.checkpoint("planning_collaboration")
-            task, material = unit
-            request = request_for(task, material)
-            key = unit_key(material)
             saved = self.memory.get(key) if self.memory else None
             if saved and "result" in saved:
-                data = decode(obj(saved["result"]))
-                report_task(
-                    self.control,
-                    task,
-                    "cached",
-                    recommendation_count=len(array(data["recommendations"])),
+                data = decode_specialist(
+                    obj(saved["result"]), snapshot, candidate_actions=candidates
                 )
-                return {"role": task.role, "object": task.object, **data}
-            children = split_budget(material) if depth < 4 else ()
-
-            def split() -> JSONObject:
-                if self.memory:
-                    self.memory.put(key, {"split": True})
-                report_task(
-                    self.control,
-                    task,
-                    "split",
-                    stage="splitting_strategy",
-                    child_count=len(children),
-                )
-                findings = []
-                for index, child in enumerate(children):
-                    child_task = TaskContext(
-                        f"{task.id}:{index}",
-                        "Solver",
-                        task.role,
-                        task.object
-                        + " · "
-                        + " / ".join(
-                            str(obj(s)["name"])
-                            for t in array(child["budget_templates"])
-                            for s in array(obj(t)["sheets"])
-                        )
-                        + (f" · 行 {child['row_window']}" if "row_window" in child else ""),
-                        task.id,
+                report_task(self.control, task, "cached")
+                return {"role": material["role"], **data}
+            client = TaskLLMClient(self.llm, self.control, task)
+            report_task(self.control, task, "running")
+            try:
+                if len(request.system) + len(request.user) + len(request.schema_json) > getattr(
+                    self.llm, "max_input_chars", 100_000
+                ):
+                    raise ERPError(
+                        "llm_input_limit", "协作任务输入超过模型容量，请缩小当前任务范围。", 413
                     )
-                    report_task(self.control, child_task, "queued")
-                    findings.append(run((child_task, child), depth + 1))
-                data = {
-                    name: [value for finding in findings for value in array(finding[name])]
-                    for name in ("recommendations", "dependencies", "risks")
-                }
+                response = recovery_call(client, request, self.control)
+                try:
+                    raw = obj(loads(normalize_model_json(response.content)))
+                    data = decode_specialist(raw, snapshot, candidate_actions=candidates)
+                except ERPError as error:
+                    if error.code in {"solver_missing_input", "solver_failed"}:
+                        raise
+                    raw = locals().get("raw")
+                    patch = specialist_patch(raw, error) if raw is not None else None
+                    if patch:
+                        scoped, patch_schema, collection, index = patch
+                        focused = {
+                            key: material[key]
+                            for key in ("project_id", "problem_version", "rule_version", "role")
+                        }
+                        focused.update(
+                            {
+                                "error": error.message,
+                                "object": scoped,
+                                "reference_catalog": {
+                                    "fact_ids": [f.id for f in snapshot.reading.problem.facts],
+                                    "entity_ids": list(
+                                        {f.entity_id for f in snapshot.reading.problem.facts}
+                                        | {"company"}
+                                    ),
+                                    "rule_ids": [r.id for r in snapshot.reading.rules.rules],
+                                    "action_ids": [a.action_id for a in candidates]
+                                    + [
+                                        obj(a)["action_id"] for a in array(raw["candidate_actions"])
+                                    ],
+                                },
+                                "instruction": "仅修复当前对象，"
+                                "不修改其它结论、事实、版本或行动 ID。",
+                            }
+                        )
+                        repair_request = replace(
+                            request,
+                            user=dumps(focused),
+                            schema_name="erp_specialist_patch",
+                            schema_json=dumps(patch_schema),
+                            system="只返回当前对象的受限修正。\nJSON schema:\n"
+                            + dumps(patch_schema),
+                        )
+                        repaired = recovery_call(client, repair_request, self.control)
+                        patched = apply_specialist_patch(
+                            raw,
+                            obj(loads(normalize_model_json(repaired.content))),
+                            collection,
+                            index,
+                        )
+                        data = decode_specialist(patched, snapshot, candidate_actions=candidates)
+                    else:
+                        if raw is not None and error.code not in {"solver_empty", "solver_status"}:
+                            raise
+                        repair_payload = {
+                            **material,
+                            "error": error.message,
+                            "instruction": "输出无法完整解析或不符合任务边界，"
+                            "有限重生成符合 schema 的本任务结果。",
+                        }
+                        repaired = recovery_call(
+                            client, replace(request, user=dumps(repair_payload)), self.control
+                        )
+                        data = decode_specialist(
+                            obj(loads(normalize_model_json(repaired.content))),
+                            snapshot,
+                            candidate_actions=candidates,
+                        )
+                self.control.checkpoint("saving_planning_progress")
                 if self.memory:
                     self.memory.put(key, {"result": data})
                 report_task(
@@ -316,115 +341,59 @@ class CollaborativeStrategyGenerator:
                     "succeeded",
                     recommendation_count=len(array(data["recommendations"])),
                 )
-                return {"role": task.role, "object": task.object, **data}
+                return {"role": material["role"], **data}
+            except Cancelled:
+                raise
+            except ERPError as error:
+                report_task(self.control, task, "failed", error=error.message)
+                raise ERPError(
+                    error.code,
+                    f"{task.object} · {task.role}：{error.message} 已完成任务已保存。",
+                    error.status,
+                ) from error
 
-            if children and (
-                (saved and saved.get("split"))
-                or len(dumps(material.get("budget_templates", []))) > 24000
-            ):
-                return split()
-            client = TaskLLMClient(self.llm, self.control, task)
-            payload = material
-            for attempt in range(2):
-                self.control.checkpoint("planning_" + str(material["role"]))
-                response = None
-                try:
-                    request = request_for(task, payload)
-                    if len(request.system) + len(request.user) + len(schema) > getattr(
-                        self.llm, "max_input_chars", 100000
-                    ):
-                        raise ERPError("llm_input_limit", "规划任务输入超过模型容量。", 413)
-                    report_task(
-                        self.control,
-                        task,
-                        "running",
-                        input_chars=len(request.user),
-                        output_limit=4000,
-                    )
-                    response = recovery_call(client, request, self.control)
-                    data = decode(obj(loads(normalize_model_json(response.content))))
-                    self.control.checkpoint("saving_planning_progress")
-                    if self.memory:
-                        self.memory.put(key, {"result": data})
-                    report_task(
-                        self.control,
-                        task,
-                        "succeeded",
-                        model=response.model,
-                        recommendation_count=len(array(data["recommendations"])),
-                    )
-                    return {"role": task.role, "object": task.object, **data}
-                except Cancelled:
-                    raise
-                except ERPError as error:
-                    if children and error.code in TRANSIENT_ERRORS | {
-                        "llm_input_limit",
-                        "llm_incomplete",
-                        "llm_truncated",
-                    }:
-                        return split()
-                    if attempt == 0 and (
-                        response is not None or error.code == "llm_structured_response"
-                    ):
-                        payload = {
-                            **material,
-                            "error": error.message,
-                            "instruction": "仅修复结构或引用，保留本任务职责及依据，不扩写方案。",
-                        }
-                        continue
-                    report_task(self.control, task, "failed", error=error.message)
-                    raise ERPError(
-                        error.code,
-                        f"{task.object} · {task.role}：{error.message}"
-                        " 已保存完成的协作任务，重试可继续未完成部分。",
-                        error.status,
-                    ) from error
-            raise ERPError("solver_specialist_invalid", "协作规划失败。")
-
-        requests = tuple(request_for(task, material) for task, material in units)
-        for task, _ in units:
+        independent = [(operations_task, material_for("operations"), ())]
+        if context.templates:
+            template_task = TaskContext(
+                "solver:template_requirements",
+                "Solver",
+                "已核对模板需求",
+                " / ".join(t.source.filename for t in context.templates),
+                "solver",
+            )
+            independent.append((template_task, material_for("budget"), ()))
+        for task, _, _ in independent:
             report_task(self.control, task, "queued")
-        planner = getattr(self.llm, "plan_solver", None)
-        if planner:
-            unfinished = tuple(
-                request
-                for request, (_, material) in zip(requests, units, strict=True)
-                if not self.memory or not (self.memory.get(unit_key(material)) or {}).get("result")
-            )
-            unfinished = tuple(
-                r
-                for r in unfinished
-                if len(r.system) + len(r.user) + len(r.schema_json)
-                <= getattr(self.llm, "max_input_chars", 100000)
-            )
-            planner(unfinished, self.control, 2)
         results = RunnableLambda(run).batch(
-            units, config={"max_concurrency": 2}, return_exceptions=True
+            independent, config={"max_concurrency": 2}, return_exceptions=True
         )
         for result in results:
             if isinstance(result, Exception):
                 raise result
-        self.control.checkpoint("synthesizing_strategy")
         findings = [result for result in results if isinstance(result, dict)]
+        operations = findings[0]
+        candidates = tuple(decode_action(a) for a in array(operations["candidate_actions"]))
+        report_task(self.control, finance_task, "queued", depends_on=[operations_task.id])
+        finance = run((finance_task, material_for("finance", candidates), candidates))
+        findings.append(finance)
+        self.control.checkpoint("synthesizing_strategy")
         generator = LLMStrategyGenerator(
             TaskLLMClient(self.llm, self.control, synthesis_task),
             lambda: self.control.checkpoint("repairing_strategy"),
         )
         generator.control = self.control
-        generator.defer_budget = bool(context.templates)
         generator.collaboration = tuple(findings)
+        generator.candidate_actions = candidates
+        generator.defer_budget = True
         synthesis_key = (
             "solver-synthesis:"
             + hashlib.sha256(
                 dumps(
                     {
-                        "problem": problem_material(snapshot),
-                        "rules": snapshot.reading.rules,
-                        "issues": snapshot.reading.issues,
-                        "template_readings": snapshot.template_readings,
+                        "version": "solver-9",
+                        "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
-                        "templates": planning_templates(context.templates),
-                        "previous_plan": context.previous_plan,
+                        "template_readings": snapshot.template_readings,
                         "findings": findings,
                         "prompt": files("erp_agent").joinpath("prompts/solver.txt").read_text(),
                     }
@@ -433,39 +402,24 @@ class CollaborativeStrategyGenerator:
         )
         saved = self.memory.get(synthesis_key) if self.memory else None
         if saved:
-            proposal = decode_proposal(dumps(saved["proposal"]), string(saved["model"]))
+            proposal = decode_proposal(
+                dumps(saved["proposal"]), string(saved["model"]), allow_legacy=False
+            )
             report_task(self.control, synthesis_task, "cached", model=proposal.model)
         else:
             report_task(self.control, synthesis_task, "running")
             try:
                 proposal = generator.propose(snapshot, context)
-            except Cancelled:
-                raise
+                if self.memory:
+                    self.memory.put(
+                        synthesis_key,
+                        {
+                            "proposal": {"plan": to_json(proposal.baseline), "parameters": []},
+                            "model": proposal.model,
+                        },
+                    )
             except ERPError as error:
                 report_task(self.control, synthesis_task, "failed", error=error.message)
-                raise ERPError(
-                    error.code,
-                    error.message + " 已保存协作建议，重试可继续统筹方案。",
-                    error.status,
-                ) from error
-            evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
-            if any(issue.severity == "error" for issue in evaluation.issues):
-                raise ERPError(
-                    "strategy_plan_invalid",
-                    "；".join(i.message for i in evaluation.issues if i.severity == "error"),
-                )
-            if self.memory:
-                self.memory.put(
-                    synthesis_key,
-                    {
-                        "proposal": {"plan": to_json(proposal.baseline), "parameters": []},
-                        "model": proposal.model,
-                    },
-                )
+                raise
         report_task(self.control, synthesis_task, "succeeded", model=proposal.model)
-        if context.templates:
-            plan = PlanBudgetPlanner(self.llm, self.control, self.memory).plan(
-                snapshot, context, proposal.baseline
-            )
-            proposal = replace(proposal, baseline=plan)
         return proposal

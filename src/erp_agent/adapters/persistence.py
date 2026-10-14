@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, cast
+from typing import cast
 
 from erp_agent.application.contracts import JSONObject, JSONValue, array, dumps, integer, loads, obj
 from erp_agent.domain.errors import ERPError
@@ -27,15 +28,37 @@ class SQLiteRepository:
             for record in self.list_all("job"):
                 if record.get("status") in {"running", "queued"}:
                     record["status"] = "failed"
-                    record["error"] = {"code": "server_restarted", "message": "服务重启，请重试任务。"}
+                    record["error"] = {
+                        "code": "server_restarted",
+                        "message": "服务重启，请重试任务。",
+                    }
                     tasks = record.get("tasks", [])
                     if isinstance(tasks, list):
                         for task in tasks:
-                            if isinstance(task, dict) and task.get("status") in {"queued", "waiting", "running"}:
+                            if isinstance(task, dict) and task.get("status") in {
+                                "queued",
+                                "waiting",
+                                "running",
+                            }:
                                 task.update(status="failed", error="服务重启，请重试任务。")
                     connection.execute(
                         "UPDATE records SET payload=? WHERE kind='job' AND project_id=? AND id=?",
                         (dumps(record), str(record["project_id"]), str(record["id"])),
+                    )
+            for kind in ("budget_result", "report_result"):
+                for stage in self.list_all(kind):
+                    if stage.get("status") not in {"queued", "running", "partial"}:
+                        continue
+                    stage.update(
+                        status="failed",
+                        error={
+                            "code": "server_restarted",
+                            "message": "服务重启，已完成结果保留，请继续此阶段。",
+                        },
+                    )
+                    connection.execute(
+                        "UPDATE records SET payload=? WHERE kind=? AND id=?",
+                        (dumps(stage), kind, str(stage["id"])),
                     )
 
     @contextmanager
@@ -52,27 +75,87 @@ class SQLiteRepository:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._check_deleted(connection, project_id)
-            if kind in {"document", "template", "original", "template_original", "template_reading"}:
+            if kind in {
+                "document",
+                "template",
+                "original",
+                "template_original",
+                "template_reading",
+            }:
                 category = "document" if kind in {"document", "original"} else "template"
                 self._check_upload(connection, project_id, category, record_id)
             if kind == "solution":
                 data = obj(loads(dumps(payload)))
+                previous = connection.execute(
+                    "SELECT payload FROM records WHERE kind=? AND project_id=? AND id=?",
+                    (kind, project_id, record_id),
+                ).fetchone()
+                if previous and obj(loads(previous[0])) != data:
+                    raise ERPError("solution_immutable", "行动方案已冻结，修改须生成新方案。", 409)
                 for template_id in array(obj(data.get("generation", {})).get("template_ids", [])):
                     self._check_upload(connection, project_id, "template", str(template_id))
-                snapshot = connection.execute("SELECT payload FROM snapshots WHERE project_id=? AND version=?",
-                                              (project_id, data["problem_version"])).fetchone()
+                snapshot = connection.execute(
+                    "SELECT payload FROM snapshots WHERE project_id=? AND version=?",
+                    (project_id, data["problem_version"]),
+                ).fetchone()
                 if snapshot:
                     for document_id in array(obj(loads(snapshot[0])).get("document_ids", [])):
                         self._check_upload(connection, project_id, "document", str(document_id))
+            if kind in {"budget_result", "report_result"}:
+                data = obj(loads(dumps(payload)))
+                solution_row = connection.execute(
+                    "SELECT payload FROM records WHERE kind='solution' AND project_id=? AND id=?",
+                    (project_id, data.get("solution_id")),
+                ).fetchone()
+                if not solution_row:
+                    raise ERPError("stage_solution_missing", "阶段绑定的行动方案不存在。", 409)
+                prior_stage = connection.execute(
+                    "SELECT payload FROM records WHERE kind=? AND project_id=? AND id=?",
+                    (kind, project_id, record_id),
+                ).fetchone()
+                if prior_stage and data.get("status") != "queued":
+                    prior = obj(loads(prior_stage[0]))
+                    if prior.get("attempt_id") and prior.get("attempt_id") != data.get(
+                        "attempt_id"
+                    ):
+                        raise ERPError("stage_attempt_changed", "旧阶段响应不再保存。", 409)
+                from erp_agent.application.codec import solution_bundle
+                from erp_agent.application.solution_stages import plan_hash
+
+                solution = solution_bundle(obj(loads(solution_row[0])))
+                if data.get("problem_version") != solution.problem_version or data.get(
+                    "plan_hash"
+                ) != plan_hash(solution.plan):
+                    raise ERPError("stage_binding_changed", "阶段结果与冻结方案不一致。", 409)
+                for value in array(data.get("template_hashes", [])):
+                    template_id, digest = array(value)
+                    if kind == "budget_result":
+                        self._check_upload(connection, project_id, "template", str(template_id))
+                    row = connection.execute(
+                        "SELECT payload FROM records WHERE kind='template' "
+                        "AND project_id=? AND id=?",
+                        (project_id, template_id),
+                    ).fetchone()
+                    if (
+                        not row
+                        or obj(obj(loads(row[0]))["source"])["sha256"] != digest
+                        or template_id not in solution.generation.template_ids
+                    ):
+                        raise ERPError(
+                            "template_changed", "阶段引用的空表已变化或未绑定此方案。", 409
+                        )
             if kind == "job":
                 data = obj(loads(dumps(payload)))
                 metadata = obj(data.get("metadata", {}))
                 category = "document" if data.get("kind") == "parse" else "template"
                 upload_id = metadata.get("document_id" if category == "document" else "template_id")
-                if data.get("kind") in {"parse", "template"} and connection.execute(
-                    "SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
-                    (project_id, category, upload_id),
-                ).fetchone():
+                if (
+                    data.get("kind") in {"parse", "template"}
+                    and connection.execute(
+                        "SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
+                        (project_id, category, upload_id),
+                    ).fetchone()
+                ):
                     data.update(status="cancelled", error=None)
                     metadata["upload_deleted"] = True
                     payload = data
@@ -105,29 +188,35 @@ class SQLiteRepository:
     def list_all(self, kind: str) -> list[JSONObject]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT payload FROM records WHERE kind=?", (kind,),
+                "SELECT payload FROM records WHERE kind=?",
+                (kind,),
             ).fetchall()
         return [obj(loads(row[0])) for row in rows]
 
-    def save_snapshot(self, project_id: str, payload: JSONObject,
-                      expected_version: int | None = None) -> JSONObject:
+    def save_snapshot(
+        self, project_id: str, payload: JSONObject, expected_version: int | None = None
+    ) -> JSONObject:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._check_deleted(connection, project_id)
             for document_id in array(payload.get("document_ids", [])):
                 self._check_upload(connection, project_id, "document", str(document_id))
             for value in array(payload.get("template_readings", [])):
-                self._check_upload(connection, project_id, "template", str(obj(value)["template_id"]))
+                self._check_upload(
+                    connection, project_id, "template", str(obj(value)["template_id"])
+                )
             row = connection.execute(
-                "SELECT MAX(version) FROM snapshots WHERE project_id=?", (project_id,),
+                "SELECT MAX(version) FROM snapshots WHERE project_id=?",
+                (project_id,),
             ).fetchone()
             latest = int(row[0] or 0)
             if expected_version is not None and latest != expected_version:
                 raise ERPError("version_conflict", "题目已有新版本，请重新加载后修改。", 409)
             saved = dict(payload)
             saved["version"] = latest + 1
-            connection.execute("INSERT INTO snapshots VALUES(?,?,?)",
-                               (project_id, latest + 1, dumps(saved)))
+            connection.execute(
+                "INSERT INTO snapshots VALUES(?,?,?)", (project_id, latest + 1, dumps(saved))
+            )
         return saved
 
     def snapshot(self, project_id: str, version: int | None = None) -> JSONObject:
@@ -149,20 +238,25 @@ class SQLiteRepository:
 
     def versions(self, project_id: str) -> list[int]:
         with self._connection() as connection:
-            rows = connection.execute("SELECT version FROM snapshots WHERE project_id=? "
-                                      "ORDER BY version DESC", (project_id,)).fetchall()
+            rows = connection.execute(
+                "SELECT version FROM snapshots WHERE project_id=? ORDER BY version DESC",
+                (project_id,),
+            ).fetchall()
         return [cast(int, row[0]) for row in rows]
 
     @staticmethod
     def _check_deleted(connection: sqlite3.Connection, project_id: str) -> None:
-        if connection.execute("SELECT 1 FROM deleted_projects WHERE id=?", (project_id,)).fetchone():
+        if connection.execute(
+            "SELECT 1 FROM deleted_projects WHERE id=?", (project_id,)
+        ).fetchone():
             raise ERPError("project_deleted", "项目已删除。", 404)
 
     def delete_project(self, project_id: str) -> None:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if not connection.execute(
-                "SELECT 1 FROM records WHERE kind='project' AND project_id=?", (project_id,),
+                "SELECT 1 FROM records WHERE kind='project' AND project_id=?",
+                (project_id,),
             ).fetchone():
                 raise ERPError("not_found", "项目不存在。", 404)
             connection.execute("INSERT OR IGNORE INTO deleted_projects VALUES(?)", (project_id,))
@@ -171,17 +265,23 @@ class SQLiteRepository:
             connection.execute("DELETE FROM deleted_uploads WHERE project_id=?", (project_id,))
 
     @staticmethod
-    def _check_upload(connection: sqlite3.Connection, project_id: str, kind: str, record_id: str) -> None:
-        if connection.execute("SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
-                              (project_id, kind, record_id)).fetchone():
+    def _check_upload(
+        connection: sqlite3.Connection, project_id: str, kind: str, record_id: str
+    ) -> None:
+        if connection.execute(
+            "SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
+            (project_id, kind, record_id),
+        ).fetchone():
             raise ERPError("upload_deleted", "文件已删除，请重新上传或选择其他文件。", 409)
 
     def upload_deleted(self, project_id: str, kind: str, record_id: str) -> bool:
         with self._connection() as connection:
-            return bool(connection.execute(
-                "SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
-                (project_id, kind, record_id),
-            ).fetchone())
+            return bool(
+                connection.execute(
+                    "SELECT 1 FROM deleted_uploads WHERE project_id=? AND kind=? AND id=?",
+                    (project_id, kind, record_id),
+                ).fetchone()
+            )
 
     def delete_upload(self, project_id: str, kind: str, record_id: str) -> JSONObject:
         if kind not in {"document", "template"}:
@@ -191,40 +291,84 @@ class SQLiteRepository:
             connection.execute("BEGIN IMMEDIATE")
             self._check_deleted(connection, project_id)
             self._check_upload(connection, project_id, kind, record_id)
-            if not connection.execute("SELECT 1 FROM records WHERE kind=? AND project_id=? AND id=?",
-                                      (original, project_id, record_id)).fetchone():
+            if not connection.execute(
+                "SELECT 1 FROM records WHERE kind=? AND project_id=? AND id=?",
+                (original, project_id, record_id),
+            ).fetchone():
                 raise ERPError("not_found", "文件不存在或不属于当前项目。", 404)
-            connection.execute("INSERT INTO deleted_uploads VALUES(?,?,?)", (project_id, kind, record_id))
+            connection.execute(
+                "INSERT INTO deleted_uploads VALUES(?,?,?)", (project_id, kind, record_id)
+            )
             if kind == "document":
-                histories = connection.execute("SELECT payload FROM snapshots WHERE project_id=?", (project_id,)).fetchall()
-                referenced = any(record_id in array(obj(loads(row[0])).get("document_ids", [])) for row in histories)
-                row = connection.execute("SELECT payload FROM records WHERE kind='inputs' AND project_id=? AND id=?",
-                                         (project_id, project_id)).fetchone()
-                inputs: JSONObject | None = (obj(loads(row[0])) if row else
-                                             {"revision": 0, "problem_text": "", "supplement_text": "", "annotations": []})
+                histories = connection.execute(
+                    "SELECT payload FROM snapshots WHERE project_id=?", (project_id,)
+                ).fetchall()
+                referenced = any(
+                    record_id in array(obj(loads(row[0])).get("document_ids", []))
+                    for row in histories
+                )
+                row = connection.execute(
+                    "SELECT payload FROM records WHERE kind='inputs' AND project_id=? AND id=?",
+                    (project_id, project_id),
+                ).fetchone()
+                inputs: JSONObject | None = (
+                    obj(loads(row[0]))
+                    if row
+                    else {
+                        "revision": 0,
+                        "problem_text": "",
+                        "supplement_text": "",
+                        "annotations": [],
+                    }
+                )
                 inputs["revision"] = integer(inputs["revision"], 0) + 1
-                inputs["annotations"] = [a for a in array(inputs["annotations"]) if obj(a)["document_id"] != record_id]
-                connection.execute("INSERT OR REPLACE INTO records VALUES('inputs',?,?,?)",
-                                   (project_id, project_id, dumps(inputs)))
+                inputs["annotations"] = [
+                    a for a in array(inputs["annotations"]) if obj(a)["document_id"] != record_id
+                ]
+                connection.execute(
+                    "INSERT OR REPLACE INTO records VALUES('inputs',?,?,?)",
+                    (project_id, project_id, dumps(inputs)),
+                )
             else:
-                histories = connection.execute("SELECT payload FROM records WHERE kind='solution' AND project_id=?", (project_id,)).fetchall()
-                referenced = any(record_id in array(obj(obj(loads(row[0])).get("generation", {})).get("template_ids", []))
-                                 for row in histories)
-                snapshots = connection.execute("SELECT payload FROM snapshots WHERE project_id=?",
-                                               (project_id,)).fetchall()
-                referenced = referenced or any(any(obj(t)["template_id"] == record_id
-                    for t in array(obj(loads(row[0])).get("template_readings", []))) for row in snapshots)
+                histories = connection.execute(
+                    "SELECT payload FROM records WHERE kind='solution' AND project_id=?",
+                    (project_id,),
+                ).fetchall()
+                referenced = any(
+                    record_id
+                    in array(obj(obj(loads(row[0])).get("generation", {})).get("template_ids", []))
+                    for row in histories
+                )
+                snapshots = connection.execute(
+                    "SELECT payload FROM snapshots WHERE project_id=?", (project_id,)
+                ).fetchall()
+                referenced = referenced or any(
+                    any(
+                        obj(t)["template_id"] == record_id
+                        for t in array(obj(loads(row[0])).get("template_readings", []))
+                    )
+                    for row in snapshots
+                )
                 inputs = None
             if not referenced:
-                connection.execute("DELETE FROM records WHERE project_id=? AND id=? AND kind IN (?,?)",
-                                   (project_id, record_id, kind, original))
-            for row in connection.execute("SELECT id,payload FROM records WHERE kind='job' AND project_id=?", (project_id,)).fetchall():
+                connection.execute(
+                    "DELETE FROM records WHERE project_id=? AND id=? AND kind IN (?,?)",
+                    (project_id, record_id, kind, original),
+                )
+            for row in connection.execute(
+                "SELECT id,payload FROM records WHERE kind='job' AND project_id=?", (project_id,)
+            ).fetchall():
                 job = obj(loads(row[1]))
                 metadata = obj(job.get("metadata", {}))
-                if (job.get("kind") == ("parse" if kind == "document" else "template")
-                        and metadata.get("document_id" if kind == "document" else "template_id") == record_id):
+                if (
+                    job.get("kind") == ("parse" if kind == "document" else "template")
+                    and metadata.get("document_id" if kind == "document" else "template_id")
+                    == record_id
+                ):
                     metadata["upload_deleted"] = True
                     job.update(status="cancelled", error=None)
-                    connection.execute("UPDATE records SET payload=? WHERE kind='job' AND project_id=? AND id=?",
-                                       (dumps(job), project_id, row[0]))
+                    connection.execute(
+                        "UPDATE records SET payload=? WHERE kind='job' AND project_id=? AND id=?",
+                        (dumps(job), project_id, row[0]),
+                    )
         return {"deleted": True, "inputs": inputs}

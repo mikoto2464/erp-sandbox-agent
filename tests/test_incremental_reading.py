@@ -48,5 +48,5 @@ class IncrementalReadingTests(unittest.TestCase):
             SourceDocument("template", "budget.xlsx", "changed", 1, "xlsx"), ())
         report = ReportData(problem, None, ())
         with self.assertRaises(ERPError) as caught:
-            AnswererService._require_planned_template(report, template)
+            AnswererService._require_planned_template(None, report, template)
         self.assertEqual(caught.exception.code, "template_changed")

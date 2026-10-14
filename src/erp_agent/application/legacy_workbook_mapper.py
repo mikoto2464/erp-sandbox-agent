@@ -1,3 +1,4 @@
+from dataclasses import replace
 from importlib.resources import files
 from uuid import uuid4
 
@@ -74,6 +75,15 @@ def legacy_mapping(
         )
         batch = workbook_entries(
             obj(loads(normalize_model_json(response.content)), {"entries"})["entries"]
+        )
+        aliases = {
+            f"action:{i}:{field}": f"action:{a.action_id}:{field}"
+            for i, a in enumerate(solution.plan.actions)
+            for field in ("amount", "quantity", "description")
+        }
+        batch = tuple(
+            replace(entry, source_ids=tuple(aliases.get(ref, ref) for ref in entry.source_ids))
+            for entry in batch
         )
         cell_index = {c.coordinate: c for c in sheet.cells}
         entries += tuple(
