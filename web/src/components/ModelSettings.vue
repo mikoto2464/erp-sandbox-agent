@@ -28,6 +28,14 @@ const providerHelp: Record<string, string> = {
   gemini: 'Google Gemini 原生接口。',
   ollama: '本机 Ollama 服务可不填写密钥。',
 };
+const taskRoles = [
+  { value: 'reader', label: '读题与空表解读' },
+  { value: 'operations', label: '产销规划' },
+  { value: 'finance', label: '资金核对' },
+  { value: 'coordinator', label: '全周期统筹' },
+  { value: 'budget', label: '预算与填表来源映射' },
+  { value: 'report', label: '报告组织' },
+];
 const busy = computed(() => operations.value.has('preset'));
 const formats = [
   { value: 'json_schema', label: '结构化 Schema' },
@@ -157,6 +165,21 @@ defineExpose({
         >
         <fieldset class="model-scheduling">
           <legend>任务分配</legend>
+          <label
+            >任务档位<AppSelect
+              v-model="draft.task_tier"
+              label="任务档位"
+              :options="[
+                { value: 'general', label: '通用 · 兼容原有配置' },
+                { value: 'light', label: '轻量 · 优先处理简单任务' },
+                { value: 'strong', label: '复杂 · 优先处理经营推理' },
+              ]"
+              @update:model-value="dirty = true"
+            />
+            <small class="muted"
+              >轻量档位仅承接简单任务；通用可兜底；复杂档位优先承接跨期规划和冲突判断。不按模型名称推断能力。</small
+            >
+          </label>
           <div class="form-grid">
             <label
               >优先级<input
@@ -166,7 +189,7 @@ defineExpose({
                 max="1000"
                 required
               />
-              <small class="muted">数字越大越优先；最高优先级模型担任主 Agent。</small></label
+              <small class="muted">同一适用档位内，数字越大越优先。</small></label
             >
             <label
               >最大并行请求<input
@@ -187,8 +210,24 @@ defineExpose({
               maxlength="500"
               placeholder="例如：适合规则推理和跨表关联；或擅长格式稳定的表格提取。"
             />
-            <small class="muted">帮助主 Agent 判断任务适配度；优先级表示偏好，不代表能力。</small>
+            <small class="muted"
+              >默认本地调度使用任务档位和职责范围；能力说明仅供可选主 Agent 分配模式参考。</small
+            >
           </label>
+          <fieldset>
+            <legend>适用职责（全部不选表示不限）</legend>
+            <label
+              v-for="role in taskRoles"
+              :key="role.value"
+              class="check"
+            >
+              <input
+                v-model="draft.task_roles"
+                type="checkbox"
+                :value="role.value"
+              />{{ role.label }}
+            </label>
+          </fieldset>
           <label class="check"
             ><input
               v-model="draft.scheduling_enabled"
@@ -196,8 +235,7 @@ defineExpose({
             />参与多模型协作</label
           >
           <p class="muted">
-            当前启用预设始终参与。主 Agent
-            根据具体任务难度、能力说明、优先级及剩余额度选择执行模型。
+            当前启用预设始终入池，其他完整预设勾选后入池。默认由本地规则按任务档位、职责、输入容量、优先级和共享额度分配；没有适用候选时会提示配置问题。
           </p>
         </fieldset>
         <details class="advanced">

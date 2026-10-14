@@ -276,6 +276,7 @@ class PlanBudgetPlanner:
                 stream=True,
                 retries=0,
                 task=task,
+                task_complexity="moderate" if any(g.depends_on_sheets for g in groups) else "auto",
             )
             if len(request.system) + len(request.user) + len(schema) > getattr(
                 self.llm, "max_input_chars", 100000

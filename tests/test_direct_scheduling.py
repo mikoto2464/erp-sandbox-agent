@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from unittest.mock import patch
 
+from erp_agent.application.contracts import dumps
 from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.model_scheduler import ModelCapacity, ScheduledLLMClient
 from erp_agent.application.ports import LLMRequest, LLMResponse, ModelBinding, TaskContext
@@ -38,6 +39,158 @@ def request(identifier="a", parent="", role="产销规划"):
 
 
 class DirectSchedulingTests(unittest.TestCase):
+    def tiered_pool(self, capacity=None, **options):
+        models = tuple(
+            replace(
+                binding(name, priority),
+                configuration={
+                    **binding(name, priority).configuration,
+                    "task_tier": tier,
+                },
+            )
+            for name, priority, tier in (
+                ("strong", 900, "strong"),
+                ("general", 500, "general"),
+                ("light", 10, "light"),
+            )
+        )
+        return ScheduledLLMClient(models, capacity or ModelCapacity(), **options)
+
+    def test_simple_reader_budget_report_prefer_light_over_priority_without_dispatch(self):
+        pool = self.tiered_pool()
+        with patch.object(pool.dispatcher, "decide", side_effect=AssertionError("no dispatch")):
+            for agent, role in (
+                ("Reader", "整表整理"),
+                ("Solver", "预算来源映射"),
+                ("Mapper", "来源核对"),
+                ("Answerer", "执行风险报告"),
+            ):
+                req = replace(request(agent), task=TaskContext(agent, agent, role, "整表"))
+                self.assertEqual(pool.generate(req).model, "light")
+
+    def test_complex_planning_never_uses_light_even_when_strong_busy(self):
+        pool = self.tiered_pool()
+        for role in ("产销规划", "资金核对", "全周期统筹"):
+            self.assertEqual(pool.generate(request(role, role=role)).model, "strong")
+        pool.capacity.used["strong"] = 1
+        pool.capacity.endpoint_used[pool.capacity.endpoint(pool.models[0])] = 1
+        self.assertEqual(pool.generate(request("busy")).model, "general")
+        only_light = ScheduledLLMClient((pool.models[-1],), ModelCapacity())
+        with self.assertRaises(ERPError):
+            only_light.generate(request())
+
+    def test_large_conflicted_review_and_dependency_tasks_upgrade(self):
+        pool = self.tiered_pool(simple_max_chars=100, moderate_max_chars=200)
+        base = replace(request("base"), task=TaskContext("base", "Reader", "整表整理", "表"))
+        for identifier, user, complexity, expected in (
+            ("ordinary", "{}", "auto", "light"),
+            ("large", "x" * 110, "auto", "general"),
+            ("huge", "x" * 210, "auto", "strong"),
+            ("conflict", '{"facts":[{"state":"conflicted"}]}', "auto", "strong"),
+            ("dependency", "{}", "moderate", "general"),
+        ):
+            req = replace(
+                base, user=user, task=replace(base.task, id=identifier), task_complexity=complexity
+            )
+            self.assertEqual(pool.generate(req).model, expected)
+        review = replace(base, task=replace(base.task, id="review", role="关联复核"))
+        self.assertEqual(pool.generate(review).model, "general")
+
+    def test_light_input_capacity_and_shared_quota_upgrade_with_diagnostics(self):
+        pool = self.tiered_pool()
+        req = replace(request(), task=TaskContext("table", "Reader", "整理", "表"))
+        small = replace(
+            pool.models[-1],
+            configuration={
+                **pool.models[-1].configuration,
+                "max_input_chars": 1,
+            },
+        )
+        limited = ScheduledLLMClient((*pool.models[:-1], small), ModelCapacity())
+        self.assertEqual(limited.generate(req).model, "general")
+        _, checks = limited._candidate_review(req)
+        self.assertIn("字符容量", checks[-1]["reason"])
+        pool.capacity.used["light"] = 1
+        pool.capacity.endpoint_used[pool.capacity.endpoint(pool.models[-1])] = 1
+        self.assertEqual(pool.generate(req).model, "general")
+
+    def test_light_repair_remains_sticky_when_repair_input_changes_classification(self):
+        pool = self.tiered_pool(simple_max_chars=100, moderate_max_chars=200)
+        req = replace(request(), task=TaskContext("table", "Reader", "整理", "表"))
+        self.assertEqual(pool.generate(req).model, "light")
+        repair = replace(req, user=dumps({"errors": ["x" * 250], "previous_output": "{}"}))
+        self.assertEqual(pool.generate(repair).model, "light")
+
+    def test_frontend_role_scope_intersects_environment_candidates(self):
+        pool = self.tiered_pool(role_candidates={"reader": ("light", "strong")})
+        models = tuple(
+            replace(m, configuration={**m.configuration, "task_roles": ["budget"]})
+            if m.preset_id == "light"
+            else m
+            for m in pool.models
+        )
+        scoped = ScheduledLLMClient(models, ModelCapacity(), role_candidates=pool.role_candidates)
+        req = replace(request(), task=TaskContext("table", "Reader", "整理", "表"))
+        self.assertEqual(scoped.generate(req).model, "strong")
+
+    def test_complex_tier_precedes_higher_priority_general_and_light(self):
+        pool = self.tiered_pool()
+        models = tuple(
+            replace(
+                m,
+                configuration={
+                    **m.configuration,
+                    "priority": 1 if m.preset_id == "strong" else 1000,
+                },
+            )
+            for m in pool.models
+        )
+        self.assertEqual(
+            ScheduledLLMClient(models, ModelCapacity()).generate(request()).model, "strong"
+        )
+
+    def test_shared_endpoint_exclusion_is_reported_before_and_at_selection(self):
+        class Reporting(Control):
+            def __init__(self):
+                super().__init__()
+                self.updates = []
+
+            def report_task(self, identifier, metadata):
+                self.updates.append(metadata)
+
+        pool = self.tiered_pool()
+        models = tuple(
+            replace(
+                m,
+                configuration={
+                    **m.configuration,
+                    "provider": "openai_chat",
+                    "base_url": "https://shared.test/v1",
+                },
+            )
+            if m.preset_id != "general"
+            else m
+            for m in pool.models
+        )
+        pool = ScheduledLLMClient(models, ModelCapacity())
+        # 模拟同端点已有一个真实在途请求，轻量别名也必须受共享额度限制。
+        pool.capacity.used["strong"] = 1
+        pool.capacity.endpoint_used[pool.capacity.endpoint(pool.models[0])] = 1
+        req = replace(request(), task=TaskContext("table", "Reader", "整理", "表"))
+        control = Reporting()
+        self.assertEqual(pool.generate_controlled(req, control).model, "general")
+        waiting = control.updates[-2]
+        self.assertIn("共享端点", waiting["candidate_checks"][-1]["reason"])
+        selected = control.updates[-1]
+        self.assertEqual(waiting["difficulty_source"], "local")
+        self.assertIn("额度占满", selected["assignment_reason"])
+        checks = {check["id"]: check for check in selected["candidate_checks"]}
+        self.assertIn("共享端点", checks["light"]["reason"])
+        only_light = ScheduledLLMClient((models[-1],), ModelCapacity())
+        with self.assertRaises(ERPError) as error:
+            only_light.generate(request("unsupported"))
+        self.assertEqual(error.exception.code, "llm_task_suitability")
+
     def test_default_has_no_dispatch_and_role_override_repair_sticks(self):
         client = ScheduledLLMClient(
             (binding("main"), binding("other", 90)),

@@ -1108,6 +1108,16 @@ describe('Vue migration', () => {
           status: 'running',
           model: 'flash',
           difficulty: 'moderate',
+          difficulty_source: 'local',
+          candidate_checks: [
+            {
+              id: 'busy-light',
+              name: '备用轻量',
+              task_tier: 'light',
+              eligible: true,
+              reason: '适用，但共享端点额度已占满',
+            },
+          ],
           assignment_reason: '存在合并表头，选择具备表格关联能力的模型。',
           preset_name: '轻量模型',
           evidence_count: 44,
@@ -1145,6 +1155,8 @@ describe('Vue migration', () => {
     const settings = wrapper
       .findAllComponents(AppModal)
       .find((modal) => modal.props('title') === '模型预设')!;
+    expect(settings.text()).toContain('任务档位');
+    expect(settings.text()).toContain('适用职责');
     await settings.find('.select-trigger').trigger('click');
     await flushPromises();
     expect(settings.find('.select-menu[role="listbox"]').exists()).toBe(true);
@@ -1165,7 +1177,8 @@ describe('Vue migration', () => {
     expect(wrapper.find('.task-detail').text()).toContain('Reader · 参数提取');
     expect(wrapper.find('.task-detail').text()).toContain('订单.xls · 行 17–20');
     expect(wrapper.find('.task-detail').text()).toContain('轻量模型 · flash');
-    expect(wrapper.find('.task-detail').text()).toContain('任务难度：中等');
+    expect(wrapper.find('.task-detail').text()).toContain('本地规则分级：中等');
+    expect(wrapper.find('.task-detail').text()).toContain('共享端点额度已占满');
     expect(wrapper.find('.task-detail').text()).toContain('存在合并表头');
     expect(wrapper.find('.task-detail').text()).toContain('等待可用模型：主模型');
     await wrapper.find('.drawer-modal').trigger('pointerdown', { clientX: -1, clientY: -1 });
@@ -1188,6 +1201,9 @@ describe('Vue migration', () => {
     models.draft.value!.max_parallel = 3;
     models.draft.value!.scheduling_enabled = true;
     models.draft.value!.capabilities = '适合复杂规则';
+    expect(models.draft.value!.task_tier).toBe('general');
+    models.draft.value!.task_tier = 'strong';
+    models.draft.value!.task_roles = ['finance', 'coordinator'];
     await models.save();
     const call = fetcher.mock.calls.find(([url]) => url === '/api/model-presets/model')!;
     expect(JSON.parse(String(call[1]!.body))).toMatchObject({
@@ -1198,6 +1214,8 @@ describe('Vue migration', () => {
       max_parallel: 3,
       scheduling_enabled: true,
       capabilities: '适合复杂规则',
+      task_tier: 'strong',
+      task_roles: ['finance', 'coordinator'],
     });
     expect(models.draft.value!.api_key).toBe('');
     workspace.dispose();

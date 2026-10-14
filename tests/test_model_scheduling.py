@@ -557,10 +557,12 @@ class ModelSchedulingTests(unittest.TestCase):
             saved["schema_version"] = 2
             for preset in saved["presets"]:
                 preset.pop("capabilities")
+                preset.pop("task_tier")
+                preset.pop("task_roles")
             service.path.write_text(dumps(saved))
             reloaded = ModelSettingsService(settings)
             self.assertEqual(reloaded.public()["capabilities"], "")
-            self.assertEqual(loads(service.path.read_text())["schema_version"], 3)
+            self.assertEqual(loads(service.path.read_text())["schema_version"], 4)
             for change in (
                 {"max_parallel": 0},
                 {"priority": 1001},

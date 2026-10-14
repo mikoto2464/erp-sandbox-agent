@@ -7,7 +7,14 @@ export function useModelPresets(workspace: Workspace) {
     selectedId = ref(''),
     dirty = ref(false),
     testResult = ref('');
-  const draft = ref<ModelPreset & { api_key: string; clear_api_key: boolean }>();
+  const draft = ref<
+    ModelPreset & {
+      api_key: string;
+      clear_api_key: boolean;
+      task_tier: string;
+      task_roles: string[];
+    }
+  >();
   const current = computed(() =>
     workspace.catalog.value?.presets.find((preset) => preset.id === selectedId.value),
   );
@@ -19,6 +26,8 @@ export function useModelPresets(workspace: Workspace) {
       max_parallel: preset.max_parallel ?? 2,
       scheduling_enabled: preset.scheduling_enabled ?? false,
       capabilities: preset.capabilities ?? '',
+      task_tier: preset.task_tier ?? 'general',
+      task_roles: [...(preset.task_roles ?? [])],
       api_key: '',
       clear_api_key: false,
     };
@@ -55,6 +64,8 @@ export function useModelPresets(workspace: Workspace) {
       max_parallel: 2,
       scheduling_enabled: false,
       capabilities: '',
+      task_tier: 'general',
+      task_roles: [],
       provider: 'openai_chat',
       base_url: workspace.catalog.value!.providers.find(
         (provider) => provider.id === 'openai_chat',
@@ -97,7 +108,7 @@ export function useModelPresets(workspace: Workspace) {
     await post(`/api/model-presets/${id}/activate`, { expected_revision: preset.revision });
     await workspace.loadStatus();
     if (open.value) fill(workspace.catalog.value!.presets.find((preset) => preset.id === id)!);
-    workspace.notify(`已启用 ${preset.name}，新任务按协作模型优先级分配。`, 'success');
+    workspace.notify(`已启用 ${preset.name}，新任务按任务适配和协作模型优先级分配。`, 'success');
   }
   async function save() {
     if (!draft.value) return;
@@ -119,6 +130,8 @@ export function useModelPresets(workspace: Workspace) {
       max_parallel,
       scheduling_enabled,
       capabilities,
+      task_tier,
+      task_roles,
     } = draft.value;
     const saved = await post<ModelPreset>(
       selectedId.value ? `/api/model-presets/${selectedId.value}` : '/api/model-presets',
@@ -140,6 +153,8 @@ export function useModelPresets(workspace: Workspace) {
         max_parallel,
         scheduling_enabled,
         capabilities,
+        task_tier,
+        task_roles,
         ...(selectedId.value ? { expected_revision: current.value!.revision } : {}),
       },
     );

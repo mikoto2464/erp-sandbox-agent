@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from erp_agent.application.contracts import JSONObject, JSONValue
 from erp_agent.domain.models import (
@@ -44,6 +44,7 @@ class LLMRequest:
     task: TaskContext | None = None
     reasoning_reserve_tokens: int = 0
     stream: bool = False
+    task_complexity: Literal["auto", "moderate", "complex"] = "auto"
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,7 @@ from erp_agent.application.contracts import JSONObject, array, dumps, integer, l
 from erp_agent.application.model_dispatch import DISPATCH_VERSION
 from erp_agent.application.model_scheduler import ModelCapacity, ScheduledLLMClient
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse, ModelBinding
+from erp_agent.application.task_suitability import MODEL_ROLES, MODEL_TIERS
 from erp_agent.config import LLM_BASE_URLS, Settings
 from erp_agent.domain.errors import ERPError
 
@@ -30,7 +31,14 @@ MODEL_FIELDS = {
     "llm_thinking_mode",
     "llm_thinking_budget",
 }
-SCHEDULING_FIELDS = {"priority", "max_parallel", "scheduling_enabled", "capabilities"}
+SCHEDULING_FIELDS = {
+    "priority",
+    "max_parallel",
+    "scheduling_enabled",
+    "capabilities",
+    "task_tier",
+    "task_roles",
+}
 EDIT_FIELDS = {
     "base_url",
     "model",
@@ -82,6 +90,8 @@ class ModelPreset:
     max_parallel: int = 2
     scheduling_enabled: bool = False
     capabilities: str = ""
+    task_tier: str = "general"
+    task_roles: tuple[str, ...] = ()
 
 
 class SchedulingOptions(TypedDict):
@@ -89,6 +99,8 @@ class SchedulingOptions(TypedDict):
     max_parallel: int
     scheduling_enabled: bool
     capabilities: str
+    task_tier: str
+    task_roles: tuple[str, ...]
 
 
 def _configuration(settings: Settings) -> JSONObject:
@@ -164,7 +176,7 @@ class ModelSettingsService:
             saved = obj(loads(self.path.read_text(encoding="utf-8")))
             if "schema_version" in saved:
                 obj(saved, {"schema_version", "active_id", "presets"})
-                version = integer(saved["schema_version"], 1, 3)
+                version = integer(saved["schema_version"], 1, 4)
                 migrate = version < 3
                 self._active_id = string(saved["active_id"])
                 for item in array(saved["presets"]):
@@ -174,8 +186,10 @@ class ModelSettingsService:
                         | (
                             (
                                 SCHEDULING_FIELDS
+                                if version == 4
+                                else SCHEDULING_FIELDS - {"task_tier", "task_roles"}
                                 if version == 3
-                                else SCHEDULING_FIELDS - {"capabilities"}
+                                else SCHEDULING_FIELDS - {"capabilities", "task_tier", "task_roles"}
                             )
                             if version >= 2
                             else set()
@@ -214,7 +228,16 @@ class ModelSettingsService:
         enabled = data.get("scheduling_enabled", current.scheduling_enabled if current else False)
         if not isinstance(enabled, bool):
             raise ERPError("invalid_model_settings", "参与调度选项必须为布尔值。")
+        tier = string(data.get("task_tier", current.task_tier if current else "general"))
+        roles = tuple(
+            string(role)
+            for role in array(data.get("task_roles", list(current.task_roles) if current else []))
+        )
+        if tier not in MODEL_TIERS or set(roles) - MODEL_ROLES or len(set(roles)) != len(roles):
+            raise ERPError("invalid_model_settings", "任务档位或适用职责无效。")
         return {
+            "task_tier": tier,
+            "task_roles": roles,
             "priority": integer(
                 data.get("priority", current.priority if current else 100), 0, 1000
             ),
@@ -280,6 +303,8 @@ class ModelSettingsService:
             "max_parallel": preset.max_parallel,
             "scheduling_enabled": preset.scheduling_enabled,
             "capabilities": preset.capabilities,
+            "task_tier": preset.task_tier,
+            "task_roles": list(preset.task_roles),
             **_configuration(preset.settings),
         }
 
@@ -330,6 +355,8 @@ class ModelSettingsService:
                     priority=preset.priority,
                     max_parallel=preset.max_parallel,
                     capabilities=preset.capabilities,
+                    task_tier=preset.task_tier,
+                    task_roles=list(preset.task_roles),
                 )
                 models.append(
                     ModelBinding(preset.id, preset.name, preset.revision, configuration, client)
@@ -344,12 +371,16 @@ class ModelSettingsService:
                     **primary.configuration,
                     "model_pool": [m.metadata() for m in models],
                     "dispatcher_version": DISPATCH_VERSION,
+                    "task_simple_max_chars": self._base.task_simple_max_chars,
+                    "task_moderate_max_chars": self._base.task_moderate_max_chars,
                 },
                 client=ScheduledLLMClient(
                     tuple(models),
                     self._capacity,
                     strategy=self._base.model_dispatch_strategy,
                     role_candidates=dict(self._base.model_role_candidates),
+                    simple_max_chars=self._base.task_simple_max_chars,
+                    moderate_max_chars=self._base.task_moderate_max_chars,
                     task_max_calls=self._base.task_max_model_calls,
                     task_deadline_seconds=self._base.task_deadline_seconds,
                 ),
@@ -357,7 +388,7 @@ class ModelSettingsService:
 
     def _persist(self, presets: dict[str, ModelPreset], active_id: str) -> None:
         payload = {
-            "schema_version": 3,
+            "schema_version": 4,
             "active_id": active_id,
             "presets": [
                 {
@@ -368,6 +399,8 @@ class ModelSettingsService:
                     "max_parallel": p.max_parallel,
                     "scheduling_enabled": p.scheduling_enabled,
                     "capabilities": p.capabilities,
+                    "task_tier": p.task_tier,
+                    "task_roles": list(p.task_roles),
                     "settings": {
                         field: getattr(p.settings, field) for field in sorted(MODEL_FIELDS)
                     },

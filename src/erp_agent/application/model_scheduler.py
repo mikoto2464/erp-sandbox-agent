@@ -27,6 +27,7 @@ from erp_agent.application.task_budget import (
     task_budget,
 )
 from erp_agent.application.task_reporting import report_task
+from erp_agent.application.task_suitability import classify_task
 from erp_agent.domain.errors import Cancelled, ERPError
 
 
@@ -34,7 +35,7 @@ class ModelCapacity:
     """同一服务内共享并发额度，包括主 Agent 的分配请求。"""
 
     def __init__(self) -> None:
-        self.condition = threading.Condition()
+        self.condition = threading.Condition(threading.RLock())
         self.used: dict[str, int] = {}
         self.limits: dict[str, int] = {}
         self.endpoints: dict[str, str] = {}
@@ -113,6 +114,8 @@ class ModelCapacity:
                         self.endpoint(m), self.limit(m)
                     ),
                     "capabilities": m.configuration.get("capabilities", "未填写"),
+                    "task_tier": m.configuration.get("task_tier", "general"),
+                    "task_roles": m.configuration.get("task_roles", []),
                     "max_input_chars": m.configuration["max_input_chars"],
                     "max_output_tokens": m.configuration.get("max_output_tokens"),
                     "thinking_mode": m.configuration.get("thinking_mode", "default"),
@@ -139,6 +142,8 @@ class ScheduledLLMClient:
         *,
         strategy: str = "direct",
         role_candidates: dict[str, tuple[str, ...]] | None = None,
+        simple_max_chars: int = 32000,
+        moderate_max_chars: int = 64000,
         task_max_calls: int = 8,
         task_deadline_seconds: float = 900,
     ) -> None:
@@ -149,6 +154,9 @@ class ScheduledLLMClient:
         if strategy not in {"direct", "agent"}:
             raise ValueError("模型调度策略必须为 direct 或 agent。")
         self.strategy, self.role_candidates = strategy, role_candidates or {}
+        if not 1 <= simple_max_chars < moderate_max_chars:
+            raise ValueError("轻量输入阈值必须为正且小于复杂输入阈值。")
+        self.simple_max_chars, self.moderate_max_chars = simple_max_chars, moderate_max_chars
         self.task_max_calls, self.task_deadline_seconds = task_max_calls, task_deadline_seconds
         self._budgets = TaskBudgetRegistry(task_max_calls, task_deadline_seconds)
         self._selected: dict[tuple[object, str], str] = {}
@@ -187,6 +195,7 @@ class ScheduledLLMClient:
         control: RunControl | None,
         balance: bool = False,
         budget: TaskCallBudget | None = None,
+        load_snapshot: list[JSONObject] | None = None,
     ) -> ModelBinding:
         while True:
             self._check(control)
@@ -203,6 +212,8 @@ class ScheduledLLMClient:
                     )
                 selected = available[0] if available else None
                 if selected:
+                    if load_snapshot is not None:
+                        load_snapshot.extend(self.capacity.catalog(self.models))
                     self.capacity.used[selected.preset_id] = (
                         self.capacity.used.get(selected.preset_id, 0) + 1
                     )
@@ -319,28 +330,76 @@ class ScheduledLLMClient:
     def generate(self, request: LLMRequest) -> LLMResponse:
         return self.generate_controlled(request, None)
 
-    def _eligible(self, request: LLMRequest) -> tuple[ModelBinding, ...]:
+    def _candidate_review(
+        self, request: LLMRequest, sticky_preset: str = ""
+    ) -> tuple[tuple[ModelBinding, ...], list[JSONObject]]:
         size = len(request.system) + len(request.user) + len(request.schema_json)
-        role_ids = self.role_candidates.get(task_responsibility(request), ())
-        pool = tuple(m for m in self.models if not role_ids or m.preset_id in role_ids)
-        eligible = []
-        for model in pool:
-            if int(model.configuration["max_input_chars"]) < size:
-                continue
-            capacity_check = getattr(model.client, "check_request_capacity", None)
-            if capacity_check:
-                try:
-                    capacity_check(request)
-                except ERPError as error:
-                    if error.code == "llm_input_limit":
-                        continue
-                    raise
-            eligible.append(model)
-        if not eligible:
-            raise ERPError(
-                "llm_input_limit", "职责候选无法承载任务输入，请检查候选配置或缩小任务。", 413
+        role = task_responsibility(request)
+        role_ids = self.role_candidates.get(role, ())
+        suitability = classify_task(request, self.simple_max_chars, self.moderate_max_chars)
+        eligible, checks = [], []
+        for model in self.models:
+            roles = model.configuration.get("task_roles", [])
+            reason = ""
+            if role_ids and model.preset_id not in role_ids:
+                reason = "不在环境配置的职责候选内"
+            elif roles and role not in roles:
+                reason = "预设未开放当前职责"
+            elif suitability.rank(model) is None and model.preset_id != sticky_preset:
+                reason = "轻量预设不承接中等或复杂任务"
+            elif int(model.configuration["max_input_chars"]) < size:
+                reason = "完整输入超过预设字符容量"
+            else:
+                capacity_check = getattr(model.client, "check_request_capacity", None)
+                if capacity_check:
+                    try:
+                        capacity_check(request)
+                    except ERPError as error:
+                        if error.code == "llm_input_limit":
+                            reason = "完整请求超过模型 Token/输出预留容量"
+                        else:
+                            raise
+            checks.append(
+                {
+                    "id": model.preset_id,
+                    "name": model.preset_name,
+                    "task_tier": model.configuration.get("task_tier", "general"),
+                    "eligible": not reason,
+                    "reason": reason or "任务档位、职责及容量适用",
+                }
             )
-        return tuple(eligible)
+            if not reason:
+                eligible.append(model)
+        if self.strategy == "direct":
+            # 原列表已按用户优先级稳定排序，适用档位优先于优先级。
+            eligible.sort(key=lambda m: 0 if m.preset_id == sticky_preset else suitability.rank(m))
+        return tuple(eligible), checks
+
+    @staticmethod
+    def _load_checks(checks: list[JSONObject], snapshot: list[JSONObject]) -> list[JSONObject]:
+        unavailable = {str(m["id"]) for m in snapshot if not m["available"]}
+        return [
+            {**check, "reason": "适用，但预设或共享端点额度已占满"}
+            if check["eligible"] and check["id"] in unavailable
+            else check
+            for check in checks
+        ]
+
+    @staticmethod
+    def _no_candidates(checks: list[JSONObject]) -> ERPError:
+        capacity_failure = any("容量" in str(check["reason"]) for check in checks)
+        detail = "；".join(f"{c['name']}：{c['reason']}" for c in checks[:6])
+        return ERPError(
+            "llm_input_limit" if capacity_failure else "llm_task_suitability",
+            "没有同时满足任务档位、职责及容量的模型，请检查模型预设。" + detail,
+            413 if capacity_failure else 400,
+        )
+
+    def _eligible(self, request: LLMRequest) -> tuple[ModelBinding, ...]:
+        eligible, checks = self._candidate_review(request)
+        if not eligible:
+            raise self._no_candidates(checks)
+        return eligible
 
     def _direct_generate(self, request: LLMRequest, control: RunControl | None) -> LLMResponse:
         child, _ = self._task(request)
@@ -350,7 +409,7 @@ class ScheduledLLMClient:
             else self._budgets.task(child)
         )
         budget.check()
-        candidates = self._eligible(request)
+        suitability = classify_task(request, self.simple_max_chars, self.moderate_max_chars)
         owner: object = control if control is not None else self
         key = (owner, child.id)
         try:
@@ -362,6 +421,18 @@ class ScheduledLLMClient:
             previous = self._selected.get(key) or self._selected.get((owner, child.parent_id))
             failures = self._failures.get((owner, child.id, previous or ""), 0)
             switch_target = self._switch_targets.get(key)
+        candidates, checks = self._candidate_review(request, previous if repair else "")
+        if not candidates:
+            if control:
+                report_task(
+                    control,
+                    child,
+                    "waiting",
+                    difficulty=suitability.difficulty,
+                    dispatch_reason=suitability.reason,
+                    candidate_checks=checks,
+                )
+            raise self._no_candidates(checks)
         if previous:
             same = tuple(m for m in candidates if m.preset_id == previous)
             if repair:
@@ -379,17 +450,37 @@ class ScheduledLLMClient:
                     with self._lock:
                         self._switch_targets[key] = remaining[0].preset_id
         role = task_responsibility(request)
-        reason = f"按 {role} 职责候选、用户优先级、实际容量及共享额度直接执行。"
+        reason = (
+            f"本地规则判定：{suitability.reason}；按 {role} 职责及任务档位优先，"
+            "同档位按用户优先级，再检查实际容量和共享额度。"
+        )
+        if previous and repair:
+            reason += " 格式修复沿用原执行模型。"
+        elif previous and failures >= 2 and not switch_target:
+            reason += " 临时故障已重试，有限切换一次适用候选。"
+        elif previous:
+            reason += " 当前任务继续沿用已选模型。"
         if control:
+            waiting_loads = self.capacity.catalog(self.models)
             report_task(
                 control,
                 child,
                 "waiting",
                 candidates=[m.preset_name for m in candidates],
                 dispatch_reason=reason,
+                difficulty=suitability.difficulty,
+                difficulty_source="local",
+                model_loads=waiting_loads,
+                candidate_checks=self._load_checks(checks, waiting_loads),
                 stage="model_execution",
             )
-        selected = self._acquire(candidates, control, budget=budget)
+        loads_snapshot: list[JSONObject] = []
+        selected = self._acquire(candidates, control, budget=budget, load_snapshot=loads_snapshot)
+        checks = self._load_checks(checks, loads_snapshot)
+        if selected != candidates[0]:
+            reason += " 更优先的适用候选额度占满，使用下一可用候选。"
+        tier = selected.configuration.get("task_tier", "general")
+        reason += f" 执行预设：{selected.preset_name}（{tier}）。"
         with self._lock:
             self._selected[key] = selected.preset_id
         try:
@@ -406,7 +497,8 @@ class ScheduledLLMClient:
                     preset_revision=selected.preset_revision,
                     assignment_reason=reason,
                     stage="model_execution",
-                    model_loads=self.capacity.catalog(self.models),
+                    model_loads=loads_snapshot,
+                    candidate_checks=checks,
                     task_call_limit=budget.max_calls,
                     task_calls=budget.calls + 1,
                 )
@@ -461,6 +553,10 @@ class ScheduledLLMClient:
             return
         if any(request.task is None for request in requests):
             raise ERPError("dispatch_contract", "统筹请求缺少任务标识。")
+        eligible_ids = {
+            request.task.id: tuple(m.preset_id for m in self._eligible(request))
+            for request in requests
+        }
         primary = self.models[0]
         solver = purpose == "solver"
         output = purpose == "answerer"
@@ -514,6 +610,7 @@ class ScheduledLLMClient:
                     BudgetLLMClient(primary.client, budgets[0], budgets),
                     int(primary.configuration["max_input_chars"]),
                     concurrency,
+                    eligible_ids=eligible_ids,
                     **options,
                 )
             except Cancelled:
@@ -526,15 +623,7 @@ class ScheduledLLMClient:
                 )
                 decisions = {}
                 for request in requests:
-                    size = len(request.system) + len(request.user) + len(request.schema_json)
-                    model = next(
-                        (m for m in self.models if int(m.configuration["max_input_chars"]) >= size),
-                        None,
-                    )
-                    if model is None:
-                        raise ERPError(
-                            "llm_input_limit", "完整任务超过所有模型输入上限。", 413
-                        ) from error
+                    model = self._eligible(request)[0]
                     decisions[request.task.id] = DispatchDecision(
                         "unassessed",
                         (ModelAssignment(model.preset_id, reason),),
@@ -590,10 +679,6 @@ class ScheduledLLMClient:
             raise ERPError("llm_not_configured", "没有可调度的完整模型预设。", 503)
         if self.strategy == "direct":
             return self._direct_generate(request, control)
-        size = len(request.system) + len(request.user) + len(request.schema_json)
-        eligible = tuple(m for m in self.models if int(m.configuration["max_input_chars"]) >= size)
-        if not eligible:
-            raise ERPError("llm_input_limit", "任务输入超过所有协作模型的上限，请缩小任务。", 413)
         child = request.task
         child, default_dispatch = self._task(request)
         owner = control if control is not None else self
@@ -610,6 +695,9 @@ class ScheduledLLMClient:
             repair = any(k in repair_data for k in ("error", "errors", "previous_output"))
         except ERPError:
             repair = False
+        eligible, checks = self._candidate_review(request, original if repair else "")
+        if not eligible:
+            raise self._no_candidates(checks)
         with self._lock:
             planned = self._reading_plan.get(child.id) if child else None
             if (

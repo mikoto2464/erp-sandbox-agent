@@ -247,6 +247,14 @@ export interface AgentTask {
   planned_count?: number;
   batch_count?: number;
   difficulty?: string;
+  difficulty_source?: string;
+  candidate_checks?: {
+    id: string;
+    name: string;
+    task_tier: string;
+    eligible: boolean;
+    reason: string;
+  }[];
   dispatch_reason?: string;
   assignment_reason?: string;
   dispatch_fallback?: boolean;
@@ -385,6 +393,8 @@ export interface ModelPreset {
   max_parallel: number;
   scheduling_enabled: boolean;
   capabilities: string;
+  task_tier?: string;
+  task_roles?: string[];
   provider: string;
   base_url: string;
   model: string;

@@ -55,12 +55,16 @@ class Settings:
     max_upload_mb: int = 20
     model_dispatch_strategy: str = "direct"
     model_role_candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    task_simple_max_chars: int = 32000
+    task_moderate_max_chars: int = 64000
     task_max_model_calls: int = 8
     task_deadline_seconds: int = 900
 
     def __post_init__(self) -> None:
         if self.model_dispatch_strategy not in {"direct", "agent"}:
             raise ValueError("模型调度策略必须为 direct 或 agent。")
+        if not 1 <= self.task_simple_max_chars < self.task_moderate_max_chars:
+            raise ValueError("轻量输入阈值必须为正且小于复杂输入阈值。")
         roles = {"reader", "operations", "finance", "coordinator", "budget", "report"}
         if any(
             role not in roles or not ids or any(not isinstance(i, str) or not i for i in ids)
@@ -141,6 +145,8 @@ class Settings:
                 (role, tuple(ids))
                 for role, ids in json.loads(os.getenv("ERP_MODEL_ROLE_CANDIDATES", "{}")).items()
             ),
+            task_simple_max_chars=int(os.getenv("ERP_TASK_SIMPLE_MAX_CHARS", "32000")),
+            task_moderate_max_chars=int(os.getenv("ERP_TASK_MODERATE_MAX_CHARS", "64000")),
             task_max_model_calls=int(os.getenv("ERP_TASK_MAX_MODEL_CALLS", "8")),
             task_deadline_seconds=int(os.getenv("ERP_TASK_DEADLINE_SECONDS", "900")),
         )

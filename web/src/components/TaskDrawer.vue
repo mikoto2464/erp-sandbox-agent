@@ -216,7 +216,11 @@ function duration(task: AgentTask) {
               class="dispatch-decision"
             >
               <p v-if="task.difficulty">
-                <strong>任务难度：{{ difficultyNames[task.difficulty] || task.difficulty }}</strong>
+                <strong
+                  >{{ task.difficulty_source === 'local' ? '本地规则分级' : '任务难度' }}：{{
+                    difficultyNames[task.difficulty] || task.difficulty
+                  }}</strong
+                >
                 <span
                   v-if="task.dispatch_fallback"
                   class="badge assumed"
@@ -236,6 +240,28 @@ function duration(task: AgentTask) {
               >
                 复用主 Agent 对同表数据的分配，当前并发额度实时检查。
               </p>
+              <details
+                v-if="task.candidate_checks?.length"
+                class="dispatch-loads"
+              >
+                <summary>候选适配与排除原因</summary>
+                <ul>
+                  <li
+                    v-for="candidate in task.candidate_checks"
+                    :key="candidate.id"
+                  >
+                    {{ candidate.name }} ·
+                    {{
+                      candidate.task_tier === 'light'
+                        ? '轻量'
+                        : candidate.task_tier === 'strong'
+                          ? '复杂'
+                          : '通用'
+                    }}
+                    · {{ candidate.reason }}
+                  </li>
+                </ul>
+              </details>
               <details
                 v-if="task.model_loads?.length"
                 class="dispatch-loads"

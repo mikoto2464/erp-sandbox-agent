@@ -103,7 +103,7 @@ class ModelPresetTests(unittest.TestCase):
         migrated = ModelSettingsService(self.settings)
         self.assertEqual(migrated.public()["name"], "默认配置")
         self.assertFalse(migrated.public()["api_key_set"])
-        self.assertEqual(loads(migrated.path.read_text())["schema_version"], 3)
+        self.assertEqual(loads(migrated.path.read_text())["schema_version"], 4)
         self.assertFalse(ModelSettingsService(self.settings).public()["api_key_set"])
 
     def test_names_and_new_preset_do_not_inherit_env_key(self):
@@ -137,3 +137,30 @@ class ModelPresetTests(unittest.TestCase):
             with self.assertRaises(ERPError) as caught:
                 self.service.test_preset("default",{"expected_revision":1})
         self.assertEqual(caught.exception.code,"llm_test_contract")
+
+    def test_task_profiles_persist_freeze_and_do_not_rewrite_schema_three_on_load(self):
+        self.create()
+        saved = loads(self.service.path.read_text())
+        saved["schema_version"] = 3
+        for preset in saved["presets"]:
+            preset.pop("task_tier")
+            preset.pop("task_roles")
+        self.service.path.write_text(dumps(saved))
+        original = self.service.path.read_bytes()
+        reloaded = ModelSettingsService(self.settings)
+        self.assertEqual(reloaded.public()["task_tier"], "general")
+        self.assertEqual(reloaded.public()["task_roles"], [])
+        self.assertEqual(reloaded.path.read_bytes(), original)
+        frozen = reloaded.capture_pool()
+        changed = reloaded.update_preset("default", {
+            "expected_revision": 1, "task_tier": "light", "task_roles": ["reader", "budget"],
+        })
+        self.assertEqual(changed["task_tier"], "light")
+        self.assertEqual(frozen.configuration["task_tier"], "general")
+        again = ModelSettingsService(self.settings)
+        self.assertEqual(again.public()["task_roles"], ["reader", "budget"])
+        self.assertEqual(again.capture_pool().configuration["task_tier"], "light")
+        for data in ({"task_tier": "guessed-model"}, {"task_roles": ["unknown"]},
+                     {"task_roles": ["reader", "reader"]}, {"task_roles": "reader"}):
+            with self.subTest(data=data), self.assertRaises(ERPError):
+                again.update(data)

@@ -18,7 +18,7 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-5-direct"
+DISPATCH_VERSION = "dispatcher-6-suitability"
 
 
 def task_responsibility(request: LLMRequest) -> str:
@@ -213,6 +213,7 @@ class ModelDispatcher:
         max_chars: int,
         concurrency: int,
         purpose: str = "reader",
+        eligible_ids: dict[str, tuple[str, ...]] | None = None,
     ) -> dict[str, DispatchDecision]:
         prompt = (
             files("erp_agent")
@@ -241,7 +242,12 @@ class ModelDispatcher:
             task_id = f"t{index}"
             task_ids[task_id] = request.task.id
             task["task_id"] = task_id
-            allowed = [m for m in models if int(m["max_input_chars"]) >= int(task["input_chars"])]
+            allowed = [
+                m
+                for m in models
+                if int(m["max_input_chars"]) >= int(task["input_chars"])
+                and (eligible_ids is None or m["id"] in eligible_ids[request.task.id])
+            ]
             task["model_output_budgets"] = {
                 str(m["id"]): output_token_limit(
                     request,
