@@ -5,7 +5,9 @@ from erp_agent.application.contracts import (
     SPECIALIST_SCHEMA,
     JSONObject,
     array,
+    field_patch_schema,
     integer,
+    merge_patch_fields,
     obj,
     object_schema,
     string,
@@ -52,6 +54,8 @@ def specialist_patch(raw: JSONObject, error: ERPError) -> SpecialistRepair | Non
         elif key not in fields or fields[key] is not None:
             if field:
                 fields.setdefault(key, set()).add(field.split(".")[0])
+                if diagnostic.get("error_code") == "invalid_action_type":
+                    fields[key].update({"kind", "details"})
                 if diagnostic.get("code") == "plan.amount_unit":
                     fields[key].update({"amount_unit", "amount_meaning"})
             else:
@@ -87,7 +91,10 @@ def specialist_patch(raw: JSONObject, error: ERPError) -> SpecialistRepair | Non
             {
                 "collection": {"type": "string", "const": item["collection"]},
                 "index": {"type": "integer", "const": item["index"]},
-                "replacement": SPECIALIST_SCHEMA["properties"][item["collection"]]["items"],
+                "replacement": field_patch_schema(
+                    SPECIALIST_SCHEMA["properties"][item["collection"]]["items"],
+                    fields[(item["collection"], item["index"])],
+                ),
             }
         )
         for item in objects
@@ -126,13 +133,8 @@ def apply_specialist_patch(
         original = obj(array(raw[collection])[index])
         replacement = obj(entry["replacement"])
         identity = "action_id" if collection in {"candidate_actions", "dependencies"} else "id"
-        if identity not in original or replacement.get(identity) != original[identity]:
-            raise ERPError("patch_scope", "协作补丁不能改写稳定对象 ID。")
         allowed = repair.allowed_fields[key]
-        if allowed is not None:
-            for name in set(original) | set(replacement):
-                if name not in allowed and original.get(name) != replacement.get(name):
-                    raise ERPError("patch_scope", f"协作补丁不能修改未定位字段 {name}。")
+        replacement = merge_patch_fields(original, replacement, allowed, identity)
         if collection == "candidate_actions" and allowed and "period" in allowed:
             if any(
                 original.get(name) is not None and replacement.get(name) is None

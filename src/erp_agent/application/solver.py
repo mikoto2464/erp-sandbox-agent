@@ -29,6 +29,7 @@ from erp_agent.application.solver_collaboration import (
 )
 from erp_agent.application.solver_context import (
     planning_policy,
+    planning_requirements,
     repair_material,
     role_material,
 )
@@ -84,8 +85,10 @@ class LLMStrategyGenerator:
             "generation": context.config,
             "tone_instruction": policy["tone_instruction"],
             "planning_policy": policy,
-            "template_requirements": to_json(snapshot.template_readings),
-            "previous_plan": context.previous_plan,
+            "template_requirements": planning_requirements(snapshot),
+            "previous_plan": replace(context.previous_plan, budget_items=())
+            if context.previous_plan
+            else None,
             "collaboration": self.collaboration,
         }
         if self.defer_budget:
@@ -303,8 +306,9 @@ class LLMStrategyGenerator:
             "errors": to_json(errors),
             "allowed_fields": {k: sorted(v) for k, v in allowed_fields.items()},
             "objects": to_json(subset),
-            "instruction": "仅替换 errors 对应行动，保留 action_id；"
-            "只能修改 allowed_fields；保留时间依赖，不能清空已知完成/支付期。"
+            "instruction": "仅修复 errors 对应行动；replacement 只返回 allowed_fields 中的字段，"
+            "其余字段由 Python 原样保留，未开放的 condition 不要重新输出。"
+            "保留时间依赖，不能清空已知完成/支付期。"
             "不得修改题目、版本、其它行动、动作顺序或预算。",
         }
         if allow_additions:
@@ -332,7 +336,7 @@ class LLMStrategyGenerator:
                 "新行动需合法引用，未知值保留 null，不编造数值；"
                 "不得在已覆盖期追加或覆盖已有行动，替换与新增合计最多24项。"
             )
-        schema = dumps(plan_repair_schema(allow_additions))
+        schema = dumps(plan_repair_schema(allow_additions, allowed_fields))
         output_budget = min(16000, max(4000, (len(affected) + len(missing) + len(temporal)) * 600))
         request = LLMRequest(
             "修复已定位的结构、引用、依赖或周期遗漏；只返回受限补丁。\nJSON schema:\n" + schema,

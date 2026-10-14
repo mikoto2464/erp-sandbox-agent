@@ -8,6 +8,7 @@ from erp_agent.application.contracts import (
     apply_action_patch,
     array,
     decode_action,
+    field_patch_schema,
     obj,
     object_schema,
 )
@@ -17,12 +18,32 @@ from erp_agent.domain.models import Plan
 MAX_REPAIR_OBJECTS = 24
 
 
-def plan_repair_schema(allow_additions: bool) -> JSONObject:
+def plan_repair_schema(
+    allow_additions: bool, allowed_fields: dict[str, set[str]] | None = None
+) -> JSONObject:
+    patches = PATCH_SCHEMA["properties"]["patches"]
+    if allowed_fields is not None:
+        variants = [
+            object_schema(
+                {
+                    "action_id": {"type": "string", "const": identifier},
+                    "replacement": field_patch_schema(ACTION_SCHEMA, fields),
+                }
+            )
+            for identifier, fields in allowed_fields.items()
+        ]
+        patches = {
+            "type": "array",
+            "maxItems": len(variants),
+            "items": {"anyOf": variants}
+            if variants
+            else PATCH_SCHEMA["properties"]["patches"]["items"],
+        }
     if not allow_additions:
-        return PATCH_SCHEMA
+        return object_schema({"patches": patches})
     return object_schema(
         {
-            "patches": PATCH_SCHEMA["properties"]["patches"],
+            "patches": patches,
             "additions": {"type": "array", "maxItems": MAX_REPAIR_OBJECTS, "items": ACTION_SCHEMA},
         }
     )

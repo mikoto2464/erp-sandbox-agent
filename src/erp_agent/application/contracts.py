@@ -708,6 +708,33 @@ PATCH_SCHEMA = object_schema(
 )
 
 
+def field_patch_schema(schema: JSONObject, allowed: set[str] | None) -> JSONObject:
+    if allowed is None:
+        return schema
+    properties = obj(schema["properties"])
+    return object_schema({name: properties[name] for name in sorted(allowed)})
+
+
+def merge_patch_fields(
+    original: JSONObject, replacement: JSONObject, allowed: set[str] | None, identity: str
+) -> JSONObject:
+    if (
+        identity not in original
+        or replacement.get(identity, original[identity]) != original[identity]
+    ):
+        raise ERPError("patch_scope", "补丁不得改写稳定对象 ID。")
+    if allowed is None:
+        if replacement.get(identity) != original[identity]:
+            raise ERPError("patch_scope", "完整结构补丁必须保留稳定对象 ID。")
+        return replacement
+    if not replacement or not any(name in allowed for name in replacement):
+        raise ERPError("patch_empty", "补丁没有提供定位字段的修正。")
+    for name in set(original) | set(replacement):
+        if name not in allowed and name in replacement and original.get(name) != replacement[name]:
+            raise ERPError("patch_scope", f"补丁不能修改未定位字段 {name}。")
+    return {**original, **replacement}
+
+
 def apply_action_patch(
     plan: Plan,
     value: JSONValue,
@@ -723,12 +750,16 @@ def apply_action_patch(
         identifier = string(entry["action_id"])
         if identifier not in allowed_ids or identifier in updates:
             raise ERPError("patch_scope", "补丁引用超出本次错误范围或重复行动。")
-        action = decode_action(entry["replacement"])
-        if action.action_id != identifier:
-            raise ERPError("patch_scope", "补丁不得修改稳定行动 ID。")
         original = next((a for a in plan.actions if a.action_id == identifier), None)
         if original is None:
             raise ERPError("patch_scope", "补丁引用不存在的行动。")
+        replacement = merge_patch_fields(
+            obj(to_json(original)),
+            obj(entry["replacement"]),
+            allowed_fields.get(identifier, set()) if allowed_fields is not None else None,
+            "action_id",
+        )
+        action = decode_action(replacement)
         if allowed_fields is not None:
             allowed = allowed_fields.get(identifier, set())
             for field in fields(action):

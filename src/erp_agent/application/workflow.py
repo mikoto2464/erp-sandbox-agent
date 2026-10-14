@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from erp_agent.application.answerer import AnswererService
-from erp_agent.application.budget_context import budget_material
 from erp_agent.application.codec import (
     budget_template,
     generation_config,
@@ -56,6 +55,7 @@ from erp_agent.application.solver import (
     SolverService,
 )
 from erp_agent.application.solver_budget import PlanBudgetPlanner
+from erp_agent.application.solver_context import planning_requirements, selected_snapshot
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
 from erp_agent.application.template_library import TemplateLibrary
 from erp_agent.application.template_reader import LIBRARY_SCOPE
@@ -779,8 +779,8 @@ class WorkflowService:
                 raise ERPError(
                     "template_not_reviewed", "请先在空表库解读核对并导入空表，再生成方案。", 409
                 )
-        if len(dumps(budget_material(templates))) > 1500000:
-            raise ERPError("template_context_limit", "所选预算表内容过多，请精简或减少模板。")
+        if len(dumps(planning_requirements(selected_snapshot(snapshot, templates)))) > 1500000:
+            raise ERPError("template_context_limit", "所选预算表参数需求过多，请精简或减少模板。")
         request = SolveRequest(
             snapshot, mode, context=PlanningContext(config, templates, previous_plan)
         )
@@ -806,7 +806,7 @@ class WorkflowService:
                             dumps(
                                 {
                                     "config": config,
-                                    "version": "solver-12",
+                                    "version": "solver-13",
                                     "model": binding.metadata() if binding else None,
                                 }
                             ).encode()
@@ -856,7 +856,7 @@ class WorkflowService:
                 "mode": mode.value,
                 "version": snapshot.version,
                 "generation": to_json(config),
-                "prompt_version": "solver-12",
+                "prompt_version": "solver-13",
                 "model_preset": binding.metadata() if binding else None,
             },
         )

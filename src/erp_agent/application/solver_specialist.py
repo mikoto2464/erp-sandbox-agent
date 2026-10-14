@@ -1,4 +1,4 @@
-import re
+from collections.abc import Callable
 
 from erp_agent.application.contracts import (
     ACTION_DETAILS,
@@ -49,15 +49,23 @@ def decode_specialist(
         raise ERPError("solver_status", "部分建议必须说明剩余缺口及受影响范围。")
     diagnostics: list[JSONObject] = []
     proposed_items = []
+    proposed_indices = []
     for index, value in enumerate(array(data["candidate_actions"])):
         try:
             proposed_items.append(decode_action(value))
+            proposed_indices.append(index)
         except ERPError as error:
             target = f"candidate_actions.{index}"
             if isinstance(value, dict) and set(value) == set(ACTION_SCHEMA["properties"]):
                 kind = value.get("kind")
                 if error.code == "invalid_action_type":
                     target += ".kind"
+                elif error.code == "invalid_action_condition":
+                    target += ".condition"
+                elif error.code == "invalid_action_amount":
+                    target += ".amount_meaning"
+                elif error.code == "invalid_action_details":
+                    target += ".details"
                 elif value.get("schema_version") != "2":
                     target += ".schema_version"
                 elif not isinstance(value.get("condition"), dict) or set(value["condition"]) != set(
@@ -72,14 +80,19 @@ def decode_specialist(
                 {"error_code": error.code, "target": target, "message": error.message}
             )
     proposed = tuple(proposed_items)
+    pending_ids = {
+        value.get("action_id")
+        for index, value in enumerate(array(data["candidate_actions"]))
+        if index not in proposed_indices
+        and isinstance(value, dict)
+        and isinstance(value.get("action_id"), str)
+    }
     if role == "budget" and array(data["candidate_actions"]):
         raise ERPError("solver_role_scope", "模板需求角色不能生成经营行动。")
     all_actions = candidate_actions + proposed
     plan = Plan("协作候选", "", all_actions, (), ())
     action_issues = (
-        validate_actions(snapshot, plan, coverage=False, ordering=False)
-        if all_actions and not diagnostics
-        else ()
+        validate_actions(snapshot, plan, coverage=False, ordering=False) if all_actions else ()
     )
     if action_issues:
         for issue in action_issues:
@@ -88,7 +101,20 @@ def decode_specialist(
             if len(parts) > 1 and parts[0] == "actions" and parts[1].isdigit():
                 local_index = int(parts[1]) - len(candidate_actions)
                 if local_index >= 0:
-                    target = ".".join(["candidate_actions", str(local_index), *parts[2:]])
+                    action = proposed[local_index]
+                    if issue.code == "plan.dependency" and pending_ids.intersection(
+                        action.depends_on
+                    ):
+                        continue
+                    if (
+                        issue.code == "plan.condition"
+                        and action.condition.kind == "action"
+                        and action.condition.reference_id in pending_ids
+                    ):
+                        continue
+                    target = ".".join(
+                        ["candidate_actions", str(proposed_indices[local_index]), *parts[2:]]
+                    )
             diagnostics.append({**to_json(issue), "error_code": "solver_action", "target": target})
     facts = {f.id for f in snapshot.reading.problem.facts}
     rules = {r.id for r in snapshot.reading.rules.rules}
@@ -116,79 +142,131 @@ def decode_specialist(
     if status == "partial" and not (proposed or counts["recommendations"]):
         raise ERPError("solver_empty", "部分结果必须提供有依据的行动或建议，不能只有缺失说明。")
 
+    def check(target: str, operation: Callable[[], object]) -> None:
+        try:
+            operation()
+        except ERPError as error:
+            diagnostics.append(
+                {"error_code": error.code, "target": target, "message": error.message}
+            )
+
+    def validate_condition(entry: JSONObject) -> None:
+        condition = obj(entry["condition"], set(CONDITION_SCHEMA["properties"]))
+        for value in condition.values():
+            if value is not None:
+                string(value)
+        allowed = {"fact": facts, "rule": rules, "action": identifiers, "gap": gaps}
+        kind = string(condition.get("kind"))
+        if kind != "always" and (
+            kind not in allowed or condition.get("reference_id") not in allowed[kind]
+        ):
+            raise ERPError("solver_source", "条件引用无效。")
+        operator = condition.get("operator")
+        if operator not in OPERATORS or (
+            kind == "always"
+            and any(condition.get(key) for key in ("reference_id", "operator", "value"))
+        ):
+            raise ERPError("solver_source", "条件结构无效。")
+
+    def validate_refs(entry: JSONObject, key: str, allowed: set[str]) -> None:
+        for identifier in strings(entry.get(key, [])):
+            if identifier not in allowed:
+                raise ERPError("solver_source", f"引用未知 ID {identifier}。")
+
+    for index, raw in enumerate(array(data["candidate_actions"])):
+        if index in proposed_indices or not isinstance(raw, dict):
+            continue
+        target = f"candidate_actions.{index}"
+        if "condition" in raw:
+            check(target + ".condition", lambda raw=raw: validate_condition(raw))
+        for key, allowed in (("fact_ids", facts), ("rule_ids", rules), ("gap_ids", gaps)):
+            if key in raw:
+                check(
+                    target + "." + key,
+                    lambda raw=raw, key=key, allowed=allowed: validate_refs(raw, key, allowed),
+                )
+
     def validate_entry(
         item: JSONValue, expected: set[str], name: str, target: str, seen: set[str]
     ) -> None:
-        entry = obj(item, expected)
+        try:
+            entry = obj(item, expected)
+        except ERPError as error:
+            diagnostics.append(
+                {"error_code": error.code, "target": target, "message": error.message}
+            )
+            return
         for key, allowed in (
             ("fact_ids", facts),
             ("rule_ids", rules),
             ("gap_ids", gaps),
             ("action_ids", identifiers),
         ):
-            for identifier in strings(entry.get(key, [])):
-                if identifier not in allowed:
-                    raise ERPError("solver_source", f"{target}.{key} 引用未知 ID {identifier}。")
-        if "entity_id" in entry and string(entry["entity_id"]) not in entities:
-            raise ERPError(
-                "solver_source",
-                f"{target}.entity_id 引用未知实体 {entry['entity_id']}；"
-                "请使用规范实体 ID，模板/工作表/输入组不是实体。",
+            check(
+                target + "." + key,
+                lambda key=key, allowed=allowed: validate_refs(entry, key, allowed),
             )
-        for period in array(entry.get("periods", [])):
-            integer(period, 1, horizon)
+        if "entity_id" in entry:
+
+            def entity() -> None:
+                if string(entry["entity_id"]) not in entities:
+                    raise ERPError("solver_source", "引用未知实体；模板/工作表/输入组不是实体。")
+
+            check(target + ".entity_id", entity)
+
+        def periods() -> None:
+            for period in array(entry.get("periods", [])):
+                integer(period, 1, horizon)
+
+        check(target + ".periods", periods)
         if "id" in entry:
-            identifier = string(entry["id"])
-            if not identifier.strip() or identifier in seen:
-                raise ERPError("solver_source", f"{target}.id 为空或重复。")
-            seen.add(identifier)
+
+            def identity() -> None:
+                identifier = string(entry["id"])
+                if not identifier.strip() or identifier in seen:
+                    raise ERPError("solver_source", "ID 为空或重复。")
+                seen.add(identifier)
+
+            check(target + ".id", identity)
         if name == "dependencies":
-            dependent = string(entry["action_id"])
-            required = string(entry["requires_action_id"])
-            if dependent not in identifiers or required not in identifiers or dependent == required:
-                raise ERPError("solver_source", f"{target} 的行动依赖无效。")
+
+            def dependency() -> None:
+                dependent = string(entry["action_id"])
+                required = string(entry["requires_action_id"])
+                if (
+                    dependent not in identifiers
+                    or required not in identifiers
+                    or dependent == required
+                ):
+                    raise ERPError("solver_source", "行动依赖无效。")
+
+            check(target, dependency)
             if entry["required_period"] is not None:
-                integer(entry["required_period"], 1, horizon)
-        if name == "recommendations" and not string(entry["explanation"]).strip():
-            raise ERPError("solver_source", f"{target}.explanation 为空。")
+                check(
+                    target + ".required_period",
+                    lambda: integer(entry["required_period"], 1, horizon),
+                )
+        if name == "recommendations":
+
+            def explanation() -> None:
+                if not string(entry["explanation"]).strip():
+                    raise ERPError("solver_source", "建议说明不能为空。")
+
+            check(target + ".explanation", explanation)
         if name == "risks":
-            condition = obj(entry["condition"], set(CONDITION_SCHEMA["properties"]))
-            for value in condition.values():
-                if value is not None:
-                    string(value)
-            allowed = {"fact": facts, "rule": rules, "action": identifiers, "gap": gaps}
-            kind = string(condition.get("kind"))
-            if kind != "always" and (
-                kind not in allowed or condition.get("reference_id") not in allowed[kind]
-            ):
-                raise ERPError("solver_source", f"{target}.condition 引用无效。")
-            operator = condition.get("operator")
-            if operator not in OPERATORS or (
-                kind == "always"
-                and any(condition.get(key) for key in ("reference_id", "operator", "value"))
-            ):
-                raise ERPError("solver_source", f"{target}.condition 条件结构无效。")
-            if not string(entry["response"]).strip():
-                raise ERPError("solver_source", f"{target}.response 不能为空。")
+            check(target + ".condition", lambda: validate_condition(entry))
+
+            def response() -> None:
+                if not string(entry["response"]).strip():
+                    raise ERPError("solver_source", "风险应对不能为空。")
+
+            check(target + ".response", response)
 
     for name in ("recommendations", "dependencies", "risks"):
         expected = set(obj(SPECIALIST_SCHEMA["properties"])[name]["items"]["properties"])
         seen = set()
         for index, item in enumerate(array(data[name])):
-            target = f"{name}.{index}"
-            try:
-                validate_entry(item, expected, name, target, seen)
-            except ERPError as error:
-                match = re.search(
-                    r"(?:recommendations|dependencies|risks)\.\d+(?:\.\w+)*", error.message
-                )
-                diagnostics.append(
-                    {
-                        "error_code": error.code,
-                        "target": match.group() if match else target,
-                        "message": error.message,
-                    }
-                )
+            validate_entry(item, expected, name, f"{name}.{index}", seen)
     if diagnostics:
         raise SpecialistValidationError(diagnostics)
     if status == "partial":

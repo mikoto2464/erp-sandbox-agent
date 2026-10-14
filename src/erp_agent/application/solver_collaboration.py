@@ -24,6 +24,7 @@ from erp_agent.application.solver_context import (
     action_material,
     entity_catalog,
     planning_policy,
+    planning_requirements,
     repair_material,
     role_material,
     selected_snapshot,
@@ -75,6 +76,7 @@ class CollaborativeStrategyGenerator:
                 "role": role,
                 "generation": to_json(context.config),
                 "planning_policy": planning_policy(context),
+                "template_requirements": planning_requirements(snapshot),
                 "entity_catalog": entity_catalog(snapshot),
             }
             if role == "operations":
@@ -86,7 +88,6 @@ class CollaborativeStrategyGenerator:
             if role == "finance":
                 material["candidate_plan"] = to_json(action_material(candidates))
             if role == "budget":
-                material["template_requirements"] = to_json(snapshot.template_readings)
                 material["entity_catalog"] = [
                     entry
                     for entry in material["entity_catalog"]
@@ -123,7 +124,7 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-12", "request": request}).encode()
+                    dumps({"version": "solver-13", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
@@ -183,7 +184,9 @@ class CollaborativeStrategyGenerator:
                                 "objects": list(patch.objects),
                                 "object": patch.objects[0] if len(patch.objects) == 1 else None,
                                 "instruction": "一次修复目录内的定位问题和受影响下游时间字段；"
-                                "只修改 allowed_fields，保持稳定 ID 和目录外对象。"
+                                "replacement 只返回 allowed_fields 中的字段，"
+                                "其余内容由 Python 原样保留，未开放的 condition 不要重新输出。"
+                                "保持稳定 ID 和目录外对象。"
                                 "不能删掉时间依赖或清空已知完成/支付期来绕过校验；"
                                 "实体 ID 从 entity_catalog 选，不将模板或输入组 ID 当实体。",
                             }
@@ -286,14 +289,15 @@ class CollaborativeStrategyGenerator:
         )
         generator.control = self.control
         generator.collaboration = tuple(findings)
-        generator.candidate_actions = candidates
+        finance_candidates = tuple(decode_action(a) for a in array(finance["candidate_actions"]))
+        generator.candidate_actions = candidates + finance_candidates
         generator.defer_budget = True
         synthesis_key = (
             "solver-synthesis:"
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-12",
+                        "version": "solver-13",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,

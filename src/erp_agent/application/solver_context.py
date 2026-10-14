@@ -2,7 +2,6 @@ from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
 
 from erp_agent.application.contracts import JSONObject, to_json
-from erp_agent.application.template_reader import template_material
 from erp_agent.domain.models import (
     Action,
     BudgetTemplate,
@@ -232,14 +231,46 @@ def problem_material(snapshot: ProblemSnapshot, *, order_details: bool = True) -
     }
 
 
-def planning_templates(templates: tuple[BudgetTemplate, ...]) -> tuple[JSONObject, ...]:
-    return tuple(
-        {
-            "source": to_json(template.source),
-            "sheets": [template_material(template, sheet)["sheet"] for sheet in template.sheets],
-        }
-        for template in templates
-    )
+def planning_requirements(snapshot: ProblemSnapshot) -> list[JSONObject]:
+    """规划只消费 Reader 已核对的业务输入需求，不传原格、公式或写入坐标。"""
+    result = []
+    for reading in snapshot.template_readings:
+        sheets = []
+        for sheet in reading.sheets:
+            parameters = tuple(
+                dict.fromkeys(
+                    (group.label, group.unit, group.description, group.depends_on_sheets)
+                    for group in sheet.input_groups
+                )
+            )
+            sheets.append(
+                {
+                    "name": sheet.name,
+                    "purpose": sheet.purpose,
+                    "periods": sheet.periods,
+                    "required_parameters": [
+                        {
+                            "label": label,
+                            "unit": unit,
+                            "description": description,
+                            "depends_on_sheets": list(dependencies),
+                        }
+                        for label, unit, description, dependencies in parameters
+                    ],
+                }
+            )
+        result.append(
+            {
+                "template_id": reading.template_id,
+                "sha256": reading.sha256,
+                "sheets": sheets,
+                "explanation": reading.explanation,
+                "issue_reviews": to_json(reading.issue_reviews),
+                "scope": "仅为输出所需业务参数，不是题目事实或已实现的计算规则；"
+                "未知派生值保留缺口。",
+            }
+        )
+    return result
 
 
 def selected_snapshot(
