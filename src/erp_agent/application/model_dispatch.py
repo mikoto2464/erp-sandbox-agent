@@ -18,7 +18,7 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest
 from erp_agent.domain.errors import ERPError
 
-DISPATCH_VERSION = "dispatcher-6-suitability"
+DISPATCH_VERSION = "dispatcher-7-role-scope"
 
 
 def task_responsibility(request: LLMRequest) -> str:
@@ -28,7 +28,10 @@ def task_responsibility(request: LLMRequest) -> str:
     if task and task.agent in {"Answerer", "Mapper"}:
         return "report" if task.agent == "Answerer" and "预算" not in task.role else "budget"
     identity = (task.id + " " + task.role) if task else request.schema_name
-    if any(part in identity for part in ("values", "budget", "预算", "mapper")):
+    if any(
+        part in identity
+        for part in ("values", "budget", "预算", "mapper", "template_requirements", "模板需求")
+    ):
         return "budget"
     if any(part in identity for part in ("finance", "资金")):
         return "finance"

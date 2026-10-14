@@ -4,7 +4,8 @@ from dataclasses import replace
 from erp_agent.application.contracts import dumps, loads
 from erp_agent.application.ports import LLMResponse
 from erp_agent.application.solver import CollaborativeStrategyGenerator, LLMStrategyGenerator
-from tests.helpers import Control, proposal_json, snapshot
+from tests.helpers import Control, structured_action, structured_proposal_json, snapshot
+from tests.test_solver_dependency_flow import specialist
 
 
 class SolverScheduleTests(unittest.TestCase):
@@ -18,9 +19,10 @@ class SolverScheduleTests(unittest.TestCase):
             ),
         )
         calls = []
-        proposal = loads(proposal_json())
-        prototype = proposal["plan"]["actions"][1]
-        proposal["plan"]["actions"] = [{**prototype, "period": period} for period in range(1, 7)]
+        proposal = loads(structured_proposal_json())
+        proposal["plan"]["actions"] = [
+            structured_action(index=period, period=period) for period in range(1, 7)
+        ]
         proposal["parameters"] = []
 
         class Client:
@@ -30,7 +32,7 @@ class SolverScheduleTests(unittest.TestCase):
                 calls.append(facts["calendar"])
                 if request.schema_name == "erp_solver_specialist":
                     return LLMResponse(
-                        dumps({"recommendations": [], "dependencies": [], "risks": []}),
+                        dumps(specialist(material["role"])),
                         "specialist",
                     )
                 return LLMResponse(dumps(proposal), "coordinator")
@@ -51,7 +53,7 @@ class SolverScheduleTests(unittest.TestCase):
         self.assertEqual(result.baseline.actions[-1].period, 6)
 
     def test_chronology_error_is_repaired_without_silently_reordering_actions(self):
-        proposal = loads(proposal_json())
+        proposal = loads(structured_proposal_json())
         calls = []
 
         class Client:
@@ -64,14 +66,38 @@ class SolverScheduleTests(unittest.TestCase):
                         "actions": list(reversed(proposal["plan"]["actions"])),
                     }
                     return LLMResponse(dumps(malformed), "coordinator")
-                return LLMResponse(dumps(proposal), "coordinator")
+                payload = loads(request.user)
+                self_outer.assertEqual(request.schema_name, "erp_action_patch")
+                self_outer.assertEqual(
+                    {o["action_id"] for o in payload["objects"]}, {"action-0", "action-1"}
+                )
+                return LLMResponse(
+                    dumps(
+                        {
+                            "patches": [
+                                {
+                                    "action_id": "action-1",
+                                    "replacement": structured_action(index=1, period=1),
+                                },
+                                {
+                                    "action_id": "action-0",
+                                    "replacement": structured_action(
+                                        index=0, period=2, amount="10"
+                                    ),
+                                },
+                            ]
+                        }
+                    ),
+                    "coordinator",
+                )
 
+        self_outer = self
         result = LLMStrategyGenerator(Client()).propose(snapshot())
         self.assertEqual([a.period for a in result.baseline.actions], [1, 2])
         self.assertEqual(len(calls), 2)
         repair = loads(calls[1].user)
-        self.assertIn("执行次序", repair["error"])
-        self.assertEqual(loads(repair["previous_output"])["plan"]["actions"][0]["period"], 2)
+        self.assertEqual([a.action_id for a in result.baseline.actions], ["action-1", "action-0"])
+        self.assertIn("allowed_fields", repair)
 
 
 if __name__ == "__main__":

@@ -739,6 +739,12 @@ def apply_action_patch(
                     raise ERPError(
                         "patch_scope", f"补丁不得修改未报错字段 {identifier}.{field.name}。"
                     )
+        if allowed_fields and "period" in allowed_fields.get(identifier, set()):
+            if any(
+                getattr(original, name) is not None and getattr(action, name) is None
+                for name in ("completion_period", "payment_period")
+            ):
+                raise ERPError("patch_scope", "时序补丁不能清空已知完成期或支付期。")
         updates[identifier] = action
     if not updates:
         raise ERPError("patch_empty", "未提供任何受限修正。")

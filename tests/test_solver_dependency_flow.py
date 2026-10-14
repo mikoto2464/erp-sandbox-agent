@@ -233,7 +233,8 @@ class SolverDependencyFlowTests(unittest.TestCase):
                 calls.append(request.schema_name)
                 data = loads(request.user)
                 if request.schema_name == "erp_specialist_patch":
-                    outer.assertNotIn("problem", data)
+                    outer.assertEqual([f[0] for f in data["problem"]["facts"]], ["cash"])
+                    outer.assertNotIn("candidate_plan", data)
                     outer.assertEqual(data["object"]["collection"], "recommendations")
                     return LLMResponse(
                         dumps(

@@ -9,9 +9,11 @@ from erp_agent.application.contracts import (
     PROPOSAL_SCHEMA,
     JSONObject,
     apply_action_patch,
+    decode_action,
     decode_proposal,
     dumps,
     loads,
+    obj,
     to_json,
 )
 from erp_agent.application.llm_recovery import recovery_call
@@ -28,6 +30,7 @@ from erp_agent.application.solver_collaboration import (
 )
 from erp_agent.application.solver_context import (
     planning_policy,
+    repair_material,
     role_material,
 )
 from erp_agent.domain.action_validation import validate_actions
@@ -182,8 +185,18 @@ class LLMStrategyGenerator:
         index = int(match.group(1))
         raw = obj(entries[index])
         identifier = string(raw.get("action_id"))
+        known_actions = []
+        for entry in entries:
+            try:
+                known_actions.append(decode_action(entry))
+            except ERPError:
+                # 待修对象原样传递，目录不把未解码对象提升为正式行动。
+                continue
         payload = {
-            **role_material(snapshot, "coordinator"),
+            **repair_material(snapshot, tuple(known_actions), [raw]),
+            "project_id": snapshot.project_id,
+            "problem_version": snapshot.version,
+            "rule_version": snapshot.reading.rules.version,
             "error": error.message,
             "action_id": identifier,
             "object": raw,
@@ -234,24 +247,50 @@ class LLMStrategyGenerator:
                     if issue.code == "plan.amount_unit":
                         allowed.update({"amount_unit", "amount_meaning"})
                     if issue.code == "plan.dependency_time":
-                        allowed.update({"period", "depends_on"})
+                        allowed.discard("depends_on")
+                        allowed.update({"period", "completion_period", "payment_period"})
+                    if issue.code == "plan.action_order":
+                        index = int(parts[1])
+                        if index > 0:
+                            previous_id = proposal.baseline.actions[index - 1].action_id
+                            affected.add(previous_id)
+                            allowed_fields.setdefault(previous_id, set()).update(
+                                {"period", "completion_period", "payment_period"}
+                            )
                     if issue.code == "plan.review_value":
                         allowed.update({"amount", "quantity", "amount_meaning", "missing_reason"})
+        temporal = {identifier for identifier, names in allowed_fields.items() if "period" in names}
+        changed = True
+        while changed:
+            changed = False
+            for action in proposal.baseline.actions:
+                if temporal.intersection(action.depends_on) and action.action_id not in temporal:
+                    temporal.add(action.action_id)
+                    affected.add(action.action_id)
+                    allowed_fields.setdefault(action.action_id, set()).update(
+                        {"period", "completion_period", "payment_period"}
+                    )
+                    changed = True
+        if len(affected) > 24:
+            raise ERPError("solver_repair_limit", "关联补丁超过 24 个行动，本次修复停止。")
         if not affected:
             raise ERPError("strategy_plan_invalid", "；".join(i.message for i in errors[:8]))
         if self.on_repair:
             self.on_repair()
         subset = tuple(a for a in proposal.baseline.actions if a.action_id in affected)
         payload = {
-            **role_material(snapshot, "coordinator", subset),
+            **repair_material(
+                snapshot, proposal.baseline.actions, [obj(to_json(a)) for a in subset]
+            ),
+            "project_id": snapshot.project_id,
+            "problem_version": snapshot.version,
+            "rule_version": snapshot.reading.rules.version,
             "errors": to_json(errors),
             "allowed_fields": {k: sorted(v) for k, v in allowed_fields.items()},
             "objects": to_json(subset),
-            "dependency_catalog": [
-                [a.action_id, a.period, a.completion_period] for a in proposal.baseline.actions
-            ],
             "instruction": "仅替换 errors 对应行动，保留 action_id；"
-            "不得修改题目、版本、其它行动或预算。",
+            "只能修改 allowed_fields；保留时间依赖，不能清空已知完成/支付期。"
+            "不得修改题目、版本、其它行动、动作顺序或预算。",
         }
         schema = dumps(PATCH_SCHEMA)
         request = LLMRequest(

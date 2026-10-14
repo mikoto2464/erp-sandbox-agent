@@ -1,5 +1,4 @@
 import hashlib
-import re
 from dataclasses import replace
 from importlib.resources import files
 
@@ -12,12 +11,9 @@ from erp_agent.application.contracts import (
     decode_action,
     decode_proposal,
     dumps,
-    integer,
     loads,
     obj,
-    object_schema,
     string,
-    strings,
     to_json,
 )
 from erp_agent.application.llm_recovery import recovery_call
@@ -26,178 +22,19 @@ from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import LLMClient, LLMRequest, RunControl, TaskContext
 from erp_agent.application.solver_context import (
     action_material,
+    entity_catalog,
     planning_policy,
+    repair_material,
     role_material,
     selected_snapshot,
 )
+from erp_agent.application.solver_repairs import apply_specialist_patch, specialist_patch
+from erp_agent.application.solver_specialist import decode_specialist as decode_specialist
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
-from erp_agent.domain.action_validation import validate_actions
 from erp_agent.domain.errors import Cancelled, ERPError
-from erp_agent.domain.models import Action, Plan, PlanningContext, ProblemSnapshot, StrategyProposal
+from erp_agent.domain.models import Action, PlanningContext, ProblemSnapshot, StrategyProposal
 
 DEFAULT_PLANNING_CONTEXT = PlanningContext()
-
-
-def decode_specialist(
-    value: JSONObject, snapshot: ProblemSnapshot, *, candidate_actions: tuple[Action, ...] = ()
-) -> JSONObject:
-    data = obj(value, set(SPECIALIST_SCHEMA["properties"]))
-    status = string(data["status"])
-    reason = string(data["reason"], 1200)
-    if status not in {"applicable", "partial", "not_applicable", "missing_input", "failed"}:
-        raise ERPError("solver_status", "协作任务状态无效。")
-    if status in {"missing_input", "failed"}:
-        raise ERPError("solver_" + status, reason or "任务未提供可用结果。")
-    if status == "not_applicable" and not reason.strip():
-        raise ERPError("solver_status", "不适用结果必须明确说明原因。")
-    if status == "partial" and not reason.strip():
-        raise ERPError("solver_status", "部分建议必须说明剩余缺口及受影响范围。")
-    proposed_items = []
-    for index, value in enumerate(array(data["candidate_actions"])):
-        try:
-            proposed_items.append(decode_action(value))
-        except ERPError as error:
-            raise ERPError(
-                error.code, f"candidate_actions.{index}：{error.message}", error.status
-            ) from error
-    proposed = tuple(proposed_items)
-    all_actions = candidate_actions + proposed
-    plan = Plan("协作候选", "", all_actions, (), ())
-    diagnostics = (
-        validate_actions(snapshot, plan, coverage=False, ordering=False) if all_actions else ()
-    )
-    if diagnostics:
-        rendered = []
-        for issue in diagnostics[:8]:
-            parts = issue.target.split(".")
-            target = issue.target
-            if len(parts) > 1 and parts[0] == "actions" and parts[1].isdigit():
-                local_index = int(parts[1]) - len(candidate_actions)
-                if local_index >= 0:
-                    target = ".".join(["candidate_actions", str(local_index), *parts[2:]])
-            rendered.append({**to_json(issue), "target": target})
-        raise ERPError("solver_action", dumps(rendered))
-    facts = {f.id for f in snapshot.reading.problem.facts}
-    rules = {r.id for r in snapshot.reading.rules.rules}
-    entities = {f.entity_id for f in snapshot.reading.problem.facts} | {"company"}
-    gaps = {f"{i.code}:{i.target}" for i in snapshot.reading.issues}
-    identifiers = {a.action_id for a in all_actions}
-    horizon = (snapshot.reading.problem.years or 4) * (
-        snapshot.reading.problem.periods_per_year or 4
-    )
-    counts = {name: len(array(data[name])) for name in ("recommendations", "dependencies", "risks")}
-    if counts["recommendations"] > 24 or counts["dependencies"] > 16 or counts["risks"] > 16:
-        raise ERPError("solver_limit", "协作结果超过当前职责的结论数量上限。")
-    if status == "applicable" and not (proposed or any(counts.values())):
-        raise ERPError("solver_empty", "空结果必须说明不适用、缺少输入或失败，不能标为有效建议。")
-    if status == "not_applicable" and (proposed or any(counts.values())):
-        raise ERPError("solver_status", "不适用结果不能同时提供行动或结论。")
-    if status == "partial" and not (proposed or counts["recommendations"]):
-        raise ERPError("solver_empty", "部分结果必须提供有依据的行动或建议，不能只有缺失说明。")
-    for name in ("recommendations", "dependencies", "risks"):
-        expected = set(obj(SPECIALIST_SCHEMA["properties"])[name]["items"]["properties"])
-        seen = set()
-        for index, item in enumerate(array(data[name])):
-            entry = obj(item, expected)
-            target = f"{name}.{index}"
-            for key, allowed in (
-                ("fact_ids", facts),
-                ("rule_ids", rules),
-                ("gap_ids", gaps),
-                ("action_ids", identifiers),
-            ):
-                for identifier in strings(entry.get(key, [])):
-                    if identifier not in allowed:
-                        raise ERPError(
-                            "solver_source", f"{target}.{key} 引用未知 ID {identifier}。"
-                        )
-            if "entity_id" in entry and string(entry["entity_id"]) not in entities:
-                raise ERPError("solver_source", f"{target}.entity_id 引用未知实体。")
-            for period in array(entry.get("periods", [])):
-                integer(period, 1, horizon)
-            if "id" in entry:
-                identifier = string(entry["id"])
-                if not identifier.strip() or identifier in seen:
-                    raise ERPError("solver_source", f"{target}.id 为空或重复。")
-                seen.add(identifier)
-            if name == "dependencies":
-                dependent = string(entry["action_id"])
-                required = string(entry["requires_action_id"])
-                if (
-                    dependent not in identifiers
-                    or required not in identifiers
-                    or dependent == required
-                ):
-                    raise ERPError("solver_source", f"{target} 的行动依赖无效。")
-                if entry["required_period"] is not None:
-                    integer(entry["required_period"], 1, horizon)
-            if name == "recommendations" and not string(entry["explanation"]).strip():
-                raise ERPError("solver_source", f"{target}.explanation 为空。")
-            if name == "risks":
-                condition = obj(entry["condition"])
-                allowed = {"fact": facts, "rule": rules, "action": identifiers, "gap": gaps}
-                kind = string(condition.get("kind"))
-                if kind != "always" and (
-                    kind not in allowed or condition.get("reference_id") not in allowed[kind]
-                ):
-                    raise ERPError("solver_source", f"{target}.condition 引用无效。")
-                string(entry["response"])
-    if status == "partial":
-        anchored = any(a.fact_ids or a.rule_ids or a.gap_ids for a in proposed) or any(
-            entry.get("fact_ids")
-            or entry.get("rule_ids")
-            or entry.get("gap_ids")
-            or set(strings(entry.get("action_ids", []))).intersection(
-                a.action_id for a in candidate_actions
-            )
-            for entry in (obj(v) for v in array(data["recommendations"]))
-        )
-        if not anchored:
-            raise ERPError("solver_source", "部分结果必须引用已有事实、规则、缺口或上游行动。")
-    return data
-
-
-def specialist_patch(
-    raw: JSONObject, error: ERPError
-) -> tuple[JSONObject, JSONObject, str, int] | None:
-    match = re.search(r"(recommendations|dependencies|risks)\.(\d+)", error.message)
-    if match:
-        collection, index = match.group(1), int(match.group(2))
-    else:
-        match = re.search(r"candidate_actions\.(\d+)", error.message)
-        if not match:
-            return None
-        collection, index = "candidate_actions", int(match.group(1))
-    entries = array(raw.get(collection, []))
-    if index >= len(entries):
-        return None
-    entry = obj(entries[index])
-    properties = obj(SPECIALIST_SCHEMA["properties"])
-    entry_schema = obj(properties[collection])["items"]
-    schema = object_schema(
-        {
-            "collection": {"type": "string", "const": collection},
-            "index": {"type": "integer", "const": index},
-            "replacement": entry_schema,
-        }
-    )
-    return {"collection": collection, "index": index, "object": entry}, schema, collection, index
-
-
-def apply_specialist_patch(
-    raw: JSONObject, value: JSONObject, collection: str, index: int
-) -> JSONObject:
-    entry = obj(value, {"collection", "index", "replacement"})
-    if entry["collection"] != collection or entry["index"] != index:
-        raise ERPError("patch_scope", "协作补丁不能修改其它对象。")
-    original = obj(array(raw[collection])[index])
-    replacement = obj(entry["replacement"])
-    identity = "action_id" if collection in {"candidate_actions", "dependencies"} else "id"
-    if replacement.get(identity) != original.get(identity):
-        raise ERPError("patch_scope", "协作补丁不能改写对象 ID。")
-    updated = list(array(raw[collection]))
-    updated[index] = replacement
-    return {**raw, collection: updated}
 
 
 class CollaborativeStrategyGenerator:
@@ -238,6 +75,7 @@ class CollaborativeStrategyGenerator:
                 "role": role,
                 "generation": to_json(context.config),
                 "planning_policy": planning_policy(context),
+                "entity_catalog": entity_catalog(snapshot),
             }
             if role == "operations":
                 material["previous_plan"] = to_json(
@@ -249,15 +87,33 @@ class CollaborativeStrategyGenerator:
                 material["candidate_plan"] = to_json(action_material(candidates))
             if role == "budget":
                 material["template_requirements"] = to_json(snapshot.template_readings)
+                material["entity_catalog"] = [
+                    entry
+                    for entry in material["entity_catalog"]
+                    if "order_pool" not in entry["categories"]
+                ]
+                material["scope_instruction"] += "模板 ID、工作表、输入组/范围不是经营实体，"
+                material["scope_instruction"] += (
+                    "跨对象模板建议用 company；entity_id 只能选 entity_catalog 的 id。"
+                )
             return material
 
         def run(unit: tuple[TaskContext, JSONObject, tuple[Action, ...]]) -> JSONObject:
             task, material, candidates = unit
+            role = string(material["role"])
+            schema_data = obj(loads(schema))
+            schema_data["properties"]["recommendations"]["items"]["properties"]["entity_id"] = {
+                "type": "string",
+                "enum": [entry["id"] for entry in material["entity_catalog"]],
+            }
+            if role == "budget":
+                schema_data["properties"]["candidate_actions"]["maxItems"] = 0
+            task_schema = dumps(schema_data)
             request = LLMRequest(
-                prompt + "\nJSON schema:\n" + schema,
+                prompt + "\nJSON schema:\n" + task_schema,
                 dumps(material),
                 "erp_solver_specialist",
-                schema,
+                task_schema,
                 max_output_tokens=6000,
                 reasoning_reserve_tokens=8192,
                 stream=True,
@@ -267,13 +123,13 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-10", "request": request}).encode()
+                    dumps({"version": "solver-11", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
             if saved and "result" in saved:
                 data = decode_specialist(
-                    obj(saved["result"]), snapshot, candidate_actions=candidates
+                    obj(saved["result"]), snapshot, candidate_actions=candidates, role=role
                 )
                 report_task(self.control, task, "cached")
                 return {"role": material["role"], **data}
@@ -289,59 +145,73 @@ class CollaborativeStrategyGenerator:
                 response = recovery_call(client, request, self.control)
                 try:
                     raw = obj(loads(normalize_model_json(response.content)))
-                    data = decode_specialist(raw, snapshot, candidate_actions=candidates)
+                    data = decode_specialist(raw, snapshot, candidate_actions=candidates, role=role)
                 except ERPError as error:
                     if error.code == "solver_failed":
                         raise
                     raw = locals().get("raw")
                     patch = specialist_patch(raw, error) if raw is not None else None
                     if patch:
-                        scoped, patch_schema, collection, index = patch
+                        known_actions = list(candidates)
+                        for value in array(raw["candidate_actions"]):
+                            try:
+                                known_actions.append(decode_action(value))
+                            except ERPError:
+                                # 错误对象原样留在补丁范围，只读依赖目录仅使用完整可解码行动。
+                                continue
                         focused = {
                             key: material[key]
                             for key in ("project_id", "problem_version", "rule_version", "role")
                         }
                         focused.update(
+                            repair_material(snapshot, tuple(known_actions), list(patch.objects))
+                        )
+                        focused["reference_catalog"]["action_ids"] = list(
+                            dict.fromkeys(
+                                [a.action_id for a in candidates]
+                                + [
+                                    value["action_id"]
+                                    for value in array(raw["candidate_actions"])
+                                    if isinstance(value, dict)
+                                    and isinstance(value.get("action_id"), str)
+                                ]
+                            )
+                        )
+                        focused.update(
                             {
                                 "error": error.message,
-                                "object": scoped,
-                                "reference_catalog": {
-                                    "fact_ids": [f.id for f in snapshot.reading.problem.facts],
-                                    "entity_ids": list(
-                                        {f.entity_id for f in snapshot.reading.problem.facts}
-                                        | {"company"}
-                                    ),
-                                    "rule_ids": [r.id for r in snapshot.reading.rules.rules],
-                                    "action_ids": [a.action_id for a in candidates]
-                                    + [
-                                        obj(a)["action_id"] for a in array(raw["candidate_actions"])
-                                    ],
-                                },
-                                "instruction": "仅修复当前对象，"
-                                "不修改其它结论、事实、版本或行动 ID。",
+                                "objects": list(patch.objects),
+                                "object": patch.objects[0] if len(patch.objects) == 1 else None,
+                                "instruction": "一次修复目录内的定位问题和受影响下游时间字段；"
+                                "只修改 allowed_fields，保持稳定 ID 和目录外对象。"
+                                "不能删掉时间依赖或清空已知完成/支付期来绕过校验；"
+                                "实体 ID 从 entity_catalog 选，不将模板或输入组 ID 当实体。",
                             }
                         )
                         repair_request = replace(
                             request,
                             user=dumps(focused),
                             schema_name="erp_specialist_patch",
-                            schema_json=dumps(patch_schema),
-                            system="只返回当前对象的受限修正。\nJSON schema:\n"
-                            + dumps(patch_schema),
+                            schema_json=dumps(patch.schema),
+                            system="只返回目录内对象的受限修正。\nJSON schema:\n"
+                            + dumps(patch.schema),
+                            max_output_tokens=min(12000, max(2000, len(patch.objects) * 600)),
                         )
                         repaired = recovery_call(client, repair_request, self.control)
                         patched = apply_specialist_patch(
                             raw,
                             obj(loads(normalize_model_json(repaired.content))),
-                            collection,
-                            index,
+                            patch,
                         )
-                        data = decode_specialist(patched, snapshot, candidate_actions=candidates)
+                        data = decode_specialist(
+                            patched, snapshot, candidate_actions=candidates, role=role
+                        )
                     else:
                         if raw is not None and error.code not in {
                             "solver_empty",
                             "solver_status",
                             "solver_missing_input",
+                            "solver_role_scope",
                         }:
                             raise
                         repair_payload = {
@@ -361,6 +231,7 @@ class CollaborativeStrategyGenerator:
                             obj(loads(normalize_model_json(repaired.content))),
                             snapshot,
                             candidate_actions=candidates,
+                            role=role,
                         )
                 self.control.checkpoint("saving_planning_progress")
                 if self.memory and data["status"] != "partial":
@@ -422,7 +293,7 @@ class CollaborativeStrategyGenerator:
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-10",
+                        "version": "solver-11",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,

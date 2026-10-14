@@ -13,6 +13,69 @@ from erp_agent.domain.models import (
 )
 
 
+def entity_catalog(snapshot: ProblemSnapshot) -> list[JSONObject]:
+    grouped: dict[str, tuple[set[str], set[str]]] = {}
+    for fact in snapshot.reading.problem.facts:
+        names, categories = grouped.setdefault(fact.entity_id, (set(), set()))
+        names.add(fact.entity_name)
+        categories.add(fact.category)
+    return [
+        {"id": identifier, "names": sorted(names), "categories": sorted(categories)}
+        for identifier, (names, categories) in sorted(grouped.items())
+    ] + ([] if "company" in grouped else [{"id": "company", "names": ["本企业"], "categories": []}])
+
+
+def repair_material(
+    snapshot: ProblemSnapshot, actions: tuple[Action, ...], objects: list[JSONObject]
+) -> JSONObject:
+    """只传补丁对象引用的事实及前置行动；目录区分实体和模板。"""
+    identifiers: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif isinstance(value, str):
+            identifiers.add(value)
+
+    collect(objects)
+    index = {a.action_id: a for a in actions}
+    selected = set(index).intersection(identifiers)
+    pending = list(selected)
+    while pending:
+        action = index[pending.pop()]
+        for identifier in action.depends_on:
+            if identifier in index and identifier not in selected:
+                selected.add(identifier)
+                pending.append(identifier)
+    related = tuple(a for a in actions if a.action_id in selected)
+    scoped = role_snapshot(
+        snapshot,
+        "repair",
+        related,
+        fact_ids=tuple(f.id for f in snapshot.reading.problem.facts if f.id in identifiers),
+        rule_ids=tuple(r.id for r in snapshot.reading.rules.rules if r.id in identifiers),
+    )
+    return {
+        "problem": problem_material(scoped),
+        "rules": to_json(scoped.reading.rules),
+        "related_actions": action_material(related),
+        "dependency_catalog": [
+            [a.action_id, a.period, a.completion_period, list(a.depends_on)] for a in actions
+        ],
+        "entity_catalog": entity_catalog(snapshot),
+        "reference_catalog": {
+            "fact_ids": [f.id for f in snapshot.reading.problem.facts],
+            "rule_ids": [r.id for r in snapshot.reading.rules.rules],
+            "action_ids": list(index),
+            "gap_ids": [f"{i.code}:{i.target}" for i in snapshot.reading.issues],
+        },
+    }
+
+
 def planning_policy(context: PlanningContext) -> JSONObject:
     tones = {
         PlanTone.CONSERVATIVE: "保守：优先现金安全与履约，控制借款、扩产和前期投入，说明收益取舍。",
@@ -347,11 +410,16 @@ def role_material(
     rule_ids: tuple[str, ...] = (),
 ) -> JSONObject:
     focused = role_snapshot(snapshot, role, actions, fact_ids=fact_ids, rule_ids=rule_ids)
+    material = problem_material(focused)
+    if role != "operations":
+        material["deferred_order_pool"] = {
+            "instruction": "只传当前行动或显式引用的订单事实，其他明细由产销持有；裁剪不代表缺失。",
+        }
     return {
         "project_id": snapshot.project_id,
         "problem_version": snapshot.version,
         "rule_version": snapshot.reading.rules.version,
-        "problem": problem_material(focused, order_details=role == "operations"),
+        "problem": material,
         "rules": to_json(focused.reading.rules),
         "gaps": [
             {"gap_id": f"{i.code}:{i.target}", **to_json(i)}
