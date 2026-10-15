@@ -16,3 +16,16 @@ def output_token_limit(
     if explicit_thinking:
         return min(maximum, max(content_limit, thinking_budget + 1024))
     return content_limit
+
+
+def request_input_chars(request: LLMRequest) -> int:
+    """只计真正发送的上下文、输出契约与工具签名，服务端查询目录不占输入。"""
+    from erp_agent.application.contracts import dumps
+    from erp_agent.application.planning_tools import PlanningTools
+
+    return (
+        len(request.system)
+        + len(request.user)
+        + len(request.schema_json)
+        + (len(dumps(PlanningTools.schemas())) + 300 if request.tool_context is not None else 0)
+    )

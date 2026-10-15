@@ -171,11 +171,11 @@ class WebTests(unittest.TestCase):
         done = self.wait_job(project, job['id'])
         self.assertEqual(done['status'], 'succeeded')
         first = self.request(base + '/solutions')[0]
-        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_strategy'))
-        self.assertEqual(payload['template_requirements'][0]['template_id'], template['source']['id'])
+        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_planning_decisions'))
+        self.assertEqual(payload['context']['template_requirements'][0]['template_id'], template['source']['id'])
         self.assertNotIn('budget_templates', payload)
-        self.assertIn('保守', payload['tone_instruction'])
-        self.assertIsNone(payload['previous_plan'])
+        self.assertIn('保守', payload['planning_policy']['tone_instruction'])
+        self.assertNotIn('previous_plan_summary', payload)
         self.assertEqual(first['generation']['tone'], 'conservative')
         self.assertEqual(job['metadata']['generation']['template_ids'], generation['template_ids'])
         old_raw = first['raw_response']
@@ -190,8 +190,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(plans), 3)
         self.assertEqual(plans[0]['raw_response'], old_raw)
         self.assertEqual(plans[-1]['generation']['requirements'], ['第一年不增产线', '继续减少借款'])
-        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_strategy'))
-        self.assertEqual(payload['previous_plan']['title'], '第一年不增产线')
+        payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_planning_decisions'))
+        self.assertEqual(payload['previous_plan_summary']['title'], '第一年不增产线')
         self.assertNotIn('raw_response', payload)
         self.assertEqual(len(self.request(base + '/documents')), 1)
         other = self.request('/api/projects', {'name': '其他'})['id']
@@ -894,12 +894,11 @@ class WebTests(unittest.TestCase):
         self.llm.response = proposal_json()
         job = self.request(base + '/solve', {'version': revised['version']})
         self.assertEqual(self.wait_job(project, job['id'])['status'], 'succeeded')
-        material = loads(self.llm.calls[-1].user)['snapshot']
-        columns = material['problem']['fact_columns']
-        rows = [dict(zip(columns, row, strict=True)) for row in material['problem']['facts'][-2:]]
-        self.assertEqual(rows, [{key: value for key, value in item.items() if key in columns}
-                                for item in (fact, basis)])
-        self.assertIn(issue, material['issues'])
+        material = loads(self.llm.calls[-1].user)['context']
+        rows = {item['id']: item for item in material['facts']}
+        self.assertEqual([rows[item['id']] for item in (fact, basis)], [fact, basis])
+        self.assertTrue(any(all(item.get(key) == value for key, value in issue.items())
+                            for item in material['issues']))
 
     def test_missing_horizon_uses_defaults_and_generates_without_confirmation(self):
         project, result = self.setup_problem()

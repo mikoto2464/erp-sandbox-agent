@@ -4,7 +4,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 from erp_agent.application.contracts import JSONObject, loads, obj
-from erp_agent.application.llm_budget import output_token_limit
+from erp_agent.application.llm_budget import output_token_limit, request_input_chars
 from erp_agent.application.model_dispatch import (
     DispatchDecision,
     ModelAssignment,
@@ -23,6 +23,7 @@ from erp_agent.application.task_budget import (
     BudgetLLMClient,
     TaskBudgetRegistry,
     TaskCallBudget,
+    current_task_budget,
     model_call,
     task_budget,
 )
@@ -145,6 +146,7 @@ class ScheduledLLMClient:
         simple_max_chars: int = 32000,
         moderate_max_chars: int = 64000,
         task_max_calls: int = 8,
+        solver_max_calls: int = 32,
         task_deadline_seconds: float = 900,
     ) -> None:
         self.models = tuple(sorted(models, key=lambda m: -int(m.configuration["priority"])))
@@ -158,6 +160,7 @@ class ScheduledLLMClient:
             raise ValueError("轻量输入阈值必须为正且小于复杂输入阈值。")
         self.simple_max_chars, self.moderate_max_chars = simple_max_chars, moderate_max_chars
         self.task_max_calls, self.task_deadline_seconds = task_max_calls, task_deadline_seconds
+        self.solver_max_calls = solver_max_calls
         self._budgets = TaskBudgetRegistry(task_max_calls, task_deadline_seconds)
         self._selected: dict[tuple[object, str], str] = {}
         self._failures: dict[tuple[object, str, str], int] = {}
@@ -333,7 +336,7 @@ class ScheduledLLMClient:
     def _candidate_review(
         self, request: LLMRequest, sticky_preset: str = ""
     ) -> tuple[tuple[ModelBinding, ...], list[JSONObject]]:
-        size = len(request.system) + len(request.user) + len(request.schema_json)
+        size = request_input_chars(request)
         role = task_responsibility(request)
         role_ids = self.role_candidates.get(role, ())
         suitability = classify_task(request, self.simple_max_chars, self.moderate_max_chars)
@@ -475,10 +478,20 @@ class ScheduledLLMClient:
                 stage="model_execution",
             )
         loads_snapshot: list[JSONObject] = []
-        selected = self._acquire(candidates, control, budget=budget, load_snapshot=loads_snapshot)
+        selected = self._acquire(
+            candidates,
+            control,
+            balance=request.distribute and not previous,
+            budget=budget,
+            load_snapshot=loads_snapshot,
+        )
         checks = self._load_checks(checks, loads_snapshot)
         if selected != candidates[0]:
-            reason += " 更优先的适用候选额度占满，使用下一可用候选。"
+            reason += (
+                " 并行职责按可用负载分散到适用模型。"
+                if request.distribute and not previous
+                else " 更优先的适用候选额度占满，使用下一可用候选。"
+            )
         tier = selected.configuration.get("task_tier", "general")
         reason += f" 执行预设：{selected.preset_name}（{tier}）。"
         with self._lock:
@@ -500,7 +513,9 @@ class ScheduledLLMClient:
                     model_loads=loads_snapshot,
                     candidate_checks=checks,
                     task_call_limit=budget.max_calls,
-                    task_calls=budget.calls + 1,
+                    task_calls=budget.calls + (current_task_budget() is not budget),
+                    workflow_call_limit=budget.parent.max_calls if budget.parent else None,
+                    workflow_calls=budget.parent.calls if budget.parent else None,
                 )
             with model_call(budget):
                 response = selected.client.generate(replace(request, retries=0))
@@ -828,7 +843,7 @@ class ScheduledLLMClient:
                     preset_id=selected.preset_id,
                     preset_revision=selected.preset_revision,
                     assignment_reason=reason,
-                    input_chars=len(request.system) + len(request.user) + len(request.schema_json),
+                    input_chars=request_input_chars(request),
                     output_limit=output_token_limit(
                         request,
                         int(selected.configuration.get("max_output_tokens") or 12000),

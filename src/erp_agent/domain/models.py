@@ -3,6 +3,7 @@ from decimal import Decimal
 from enum import Enum, StrEnum
 from uuid import uuid4
 
+from erp_agent.domain.planning import PlanPreparation
 from erp_agent.domain.reporting import ReportOutline
 
 
@@ -407,6 +408,7 @@ class Plan:
     assumptions: tuple[str, ...]
     risks: tuple[str, ...]
     budget_items: tuple[BudgetItem, ...] = ()
+    preparation: PlanPreparation | None = None
 
 
 @dataclass(frozen=True)
@@ -475,7 +477,7 @@ class SolutionBundle:
     raw_response: str
     candidate_plans: tuple[Plan, ...] = ()
     generation: GenerationConfig = field(default_factory=GenerationConfig)
-    prompt_version: str = "solver-14"
+    prompt_version: str = "solver-15"
 
 
 @dataclass(frozen=True)

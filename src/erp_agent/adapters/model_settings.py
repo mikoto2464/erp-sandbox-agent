@@ -371,6 +371,8 @@ class ModelSettingsService:
                     **primary.configuration,
                     "model_pool": [m.metadata() for m in models],
                     "dispatcher_version": DISPATCH_VERSION,
+                    "solver_max_model_calls": self._base.solver_max_model_calls,
+                    "task_max_model_calls": self._base.task_max_model_calls,
                     "task_simple_max_chars": self._base.task_simple_max_chars,
                     "task_moderate_max_chars": self._base.task_moderate_max_chars,
                 },
@@ -382,6 +384,7 @@ class ModelSettingsService:
                     simple_max_chars=self._base.task_simple_max_chars,
                     moderate_max_chars=self._base.task_moderate_max_chars,
                     task_max_calls=self._base.task_max_model_calls,
+                    solver_max_calls=self._base.solver_max_model_calls,
                     task_deadline_seconds=self._base.task_deadline_seconds,
                 ),
             )

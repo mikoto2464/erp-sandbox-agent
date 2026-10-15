@@ -14,7 +14,7 @@ from erp_agent.adapters.llm_diagnostics import MAX_RESPONSE_CHARS, validate_comp
 from erp_agent.adapters.llm_errors import model_error
 from erp_agent.adapters.model_catalog import requires_api_key
 from erp_agent.application.contracts import dumps, loads, obj
-from erp_agent.application.llm_budget import output_token_limit
+from erp_agent.application.llm_budget import output_token_limit, request_input_chars
 from erp_agent.application.ports import LLMRequest, LLMResponse
 from erp_agent.application.task_budget import current_task_budget
 from erp_agent.config import Settings
@@ -168,13 +168,21 @@ class LangChainLLMClient:
             and (self.settings.llm_api_key or not requires_api_key(self.settings))
         )
 
+    @staticmethod
+    def _tool_signatures(request: LLMRequest) -> str:
+        if request.tool_context is None:
+            return ""
+        from erp_agent.application.planning_tools import PlanningTools
+
+        return "\n" + dumps(PlanningTools.schemas())
+
     def check_request_capacity(self, request: LLMRequest) -> None:
-        if (
-            len(request.system) + len(request.user) + len(request.schema_json)
-            > self.max_input_chars
-        ):
+        if request_input_chars(request) > self.max_input_chars:
             raise ERPError("llm_input_limit", "材料超过输入字符限制，请拆分文件或调整预设。", 413)
-        model = self._model(self.settings)
+        capacity_settings = self.settings
+        if request.tool_context is not None and self.settings.llm_provider == "anthropic":
+            capacity_settings = replace(self.settings, llm_format="text")
+        model = self._model(capacity_settings)
         profile = getattr(model, "profile", None) or {}
         if not isinstance(profile, dict):
             return
@@ -193,7 +201,10 @@ class LangChainLLMClient:
             )
             .invoke(
                 {
-                    "instructions": request.system + "\n" + request.schema_json,
+                    "instructions": request.system
+                    + "\n"
+                    + request.schema_json
+                    + self._tool_signatures(request),
                     "material": request.user,
                 }
             )
@@ -218,7 +229,13 @@ class LangChainLLMClient:
             raise ERPError("llm_not_configured", "请配置模型名称和所需 API 密钥。", 503)
         self.check_request_capacity(request)
         system = request.system
-        if self.settings.llm_format == "json_schema":
+        if request.tool_context is not None:
+            system += (
+                "\n工具已由服务端绑定本次题目，无需填写 context_hash。"
+                "需要时批量使用 planning_lookup/erp_calculate，完成后单独调用 "
+                + request.schema_name
+            )
+        elif self.settings.llm_format == "json_schema":
             system = system.replace("\nJSON schema:\n" + request.schema_json, "")
         elif request.schema_json not in system:
             system += "\nJSON schema:\n" + request.schema_json
@@ -241,15 +258,20 @@ class LangChainLLMClient:
                 settings,
                 llm_timeout=max(1, min(settings.llm_timeout, int(budget.remaining_seconds))),
             )
+        if request.tool_context is not None and settings.llm_provider == "anthropic":
+            settings = replace(settings, llm_format="text")
         started = monotonic()
+        planning_tools = None
         try:
             model = self._model(settings)
             if request.stream and "streaming" in type(model).model_fields:
                 model = model.model_copy(update={"streaming": True})
             runnable: Runnable[Any, Any] = model
             schema = obj(loads(request.schema_json))
-            structured = settings.llm_format == "json_schema"
-            if structured:
+            structured = request.tool_context is not None or settings.llm_format == "json_schema"
+            if request.tool_context is not None:
+                pass  # 工具模式由下方有界循环统一提交结构化结果。
+            elif structured:
                 named_schema = {**schema, "title": request.schema_name}
                 options: dict[str, object] = {"include_raw": True}
                 if settings.llm_provider != "anthropic":
@@ -272,7 +294,62 @@ class LangChainLLMClient:
                 .to_messages()
             )
             options = {"stream": True} if request.stream else {}
-            output = runnable.invoke(messages, **options)
+            if request.tool_context is not None:
+                from erp_agent.adapters.planning_tool_loop import invoke_planning_tools
+
+                def validate_tool_message(message: object) -> None:
+                    metadata = getattr(message, "response_metadata", {}) or {}
+                    usage = getattr(message, "usage_metadata", {}) or {}
+                    validate_completion(
+                        metadata, usage, settings, self.settings.llm_max_output_tokens
+                    )
+                    if request.stream and not any(
+                        metadata.get(key) is not None
+                        for key in ("finish_reason", "stop_reason", "done_reason", "status", "done")
+                    ):
+                        raise ERPError("llm_incomplete", "工具响应缺少完成标记。", 502)
+                    if (getattr(message, "additional_kwargs", {}) or {}).get("refusal"):
+                        raise ERPError("llm_refusal", "模型拒绝生成结果。", 502)
+
+                capacity_client = LangChainLLMClient(settings, lambda _: model)
+
+                def planning_model() -> BaseChatModel:
+                    active = current_task_budget()
+                    current_settings = (
+                        replace(
+                            settings,
+                            llm_timeout=max(
+                                1, min(settings.llm_timeout, int(active.remaining_seconds))
+                            ),
+                        )
+                        if active
+                        else settings
+                    )
+                    current_model = self._model(current_settings)
+                    if request.stream and "streaming" in type(current_model).model_fields:
+                        current_model = current_model.model_copy(update={"streaming": True})
+                    return current_model
+
+                output, planning_tools = invoke_planning_tools(
+                    model,
+                    request,
+                    messages,
+                    settings.llm_max_input_chars,
+                    validate_tool_message,
+                    lambda history, definitions: capacity_client.check_request_capacity(
+                        replace(
+                            request,
+                            system="",
+                            user=dumps([m.model_dump(mode="json") for m in history]),
+                            schema_json=dumps(definitions),
+                            tool_context=None,
+                        )
+                    ),
+                    planning_model,
+                    force_tool_choice=settings.llm_thinking_mode != "enabled",
+                )
+            else:
+                output = runnable.invoke(messages, **options)
         except ERPError:
             raise
         except Exception as error:
@@ -311,7 +388,7 @@ class LangChainLLMClient:
         ):
             raise ERPError("llm_refusal", "模型拒绝生成结果。", 502)
         if structured:
-            if settings.llm_provider == "anthropic":
+            if planning_tools is None and settings.llm_provider == "anthropic":
                 calls = getattr(message, "tool_calls", [])
                 if (
                     len(calls) != 1
@@ -323,7 +400,7 @@ class LangChainLLMClient:
                 raise ERPError(
                     "llm_structured_response", "模型未返回符合 Schema 的完整结构化结果。", 502
                 )
-            if settings.llm_provider != "anthropic":
+            if planning_tools is None and settings.llm_provider != "anthropic":
                 try:
                     raw_content = loads(_message_text(message))
                 except ERPError as error:
@@ -357,6 +434,8 @@ class LangChainLLMClient:
             output if isinstance(output, int) and not isinstance(output, bool) else None,
             reasoning if isinstance(reasoning, int) and not isinstance(reasoning, bool) else None,
             round(monotonic() - started, 3),
+            tuple(planning_tools.records.values()) if planning_tools else (),
+            tuple(sorted(planning_tools.accessed_reference_ids)) if planning_tools else (),
         )
 
     @lru_cache(maxsize=8)  # noqa: B019

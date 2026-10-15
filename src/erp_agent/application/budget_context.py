@@ -181,5 +181,18 @@ def budget_task_material(
         "template_sha256": template.source.sha256,
         "sheet": sheet.name,
         "input_groups": to_json(groups),
+        "calculations": [
+            {
+                "id": r.id,
+                "formula": r.formula,
+                "unit": r.unit,
+                "period": r.period,
+                "fact_ids": list(r.fact_ids),
+                "rule_id": r.rule_id,
+                "assumption": r.assumption,
+            }
+            for r in (plan.preparation.calculations if plan.preparation else ())
+            if not r.fact_ids or requested.intersection(r.fact_ids)
+        ],
         "context_scope": "Current-sheet linked facts only; omitted facts are not missing.",
     }

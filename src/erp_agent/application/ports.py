@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from erp_agent.application.contracts import JSONObject, JSONValue
+from erp_agent.domain.calculations import CalculationRecord
 from erp_agent.domain.models import (
     BudgetTemplate,
     Evaluation,
@@ -45,6 +46,8 @@ class LLMRequest:
     reasoning_reserve_tokens: int = 0
     stream: bool = False
     task_complexity: Literal["auto", "moderate", "complex"] = "auto"
+    tool_context: JSONObject | None = field(default=None, repr=False)
+    distribute: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,8 @@ class LLMResponse:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     elapsed_seconds: float | None = None
+    calculations: tuple[CalculationRecord, ...] = ()
+    accessed_reference_ids: tuple[str, ...] = ()
 
 
 class LLMClient(Protocol):
@@ -125,7 +130,7 @@ class WorkbookMappingAnalyzer(Protocol):
         self,
         solution: SolutionBundle,
         template: BudgetTemplate,
-        llm: LLMClient,
+        llm: LLMClient | None,
         control: RunControl,
         snapshot: ProblemSnapshot | None = None,
     ) -> WorkbookMapping: ...

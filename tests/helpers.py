@@ -47,6 +47,43 @@ class FakeLLM:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         self.calls.append(request)
+        if request.schema_name in {"erp_planning_analysis", "erp_planning_decisions", "erp_planning_route"}:
+            from erp_agent.application.contracts import loads
+            from erp_agent.application.model_output import normalize_model_json
+
+            material = loads(request.user)
+            context = material["context"]
+            if request.schema_name == "erp_planning_analysis":
+                return LLMResponse(dumps({"context_hash": context["context_hash"],
+                    "summary": "受控职责分析无额外建议。", "findings": []}), "test-model")
+            fixture = loads(normalize_model_json(self.response))
+            plan = fixture["plan"]
+            if request.schema_name == "erp_planning_route":
+                return LLMResponse(dumps({"context_hash": context["context_hash"],
+                    "title": plan["title"], "summary": plan["summary"],
+                    "assumptions": plan["assumptions"], "risks": plan["risks"],
+                    "shared_actions": [], "windows": {
+                        str(i + 1): {"references": [context["facts"][0]["id"]],
+                            "constraints": [], "cash_outflow_limit": None, "cash_unit": ""}
+                        for i in range(len(material["planning_windows"]))
+                    }}), "test-model")
+            periods = {str(p): [] for p in range(1, context["years"] * context["periods_per_year"] + 1)}
+            for index, value in enumerate(plan["actions"]):
+                action = dict(value) if value.get("schema_version") == "2" else structured_action(
+                    index=index, period=value["period"], amount=value["amount"],
+                    description=value["description"])
+                for name in ("action_id", "schema_version", "fact_ids", "rule_ids", "gap_ids", "missing_reason", "period"):
+                    action.pop(name)
+                action.update(key=f"fixture-{index}", references=[context["facts"][0]["id"]],
+                    amount_calculation_id=None, quantity_calculation_id=None,
+                    payment_period=value["period"] if value["amount"] is not None else None)
+                periods[str(value["period"])].append(action)
+            if "assigned_periods" in material:
+                return LLMResponse(dumps({"context_hash": context["context_hash"], "periods": {
+                    str(p): periods[str(p)] for p in material["assigned_periods"]}}), "test-model")
+            return LLMResponse(dumps({"context_hash": context["context_hash"],
+                "title": plan["title"], "summary": plan["summary"], "assumptions": plan["assumptions"],
+                "risks": plan["risks"], "periods": periods}), "test-model")
         if request.schema_name == "erp_report_outline":
             from erp_agent.application.contracts import loads
 
@@ -218,9 +255,9 @@ def proposal_json() -> str:
                     },
                     {
                         "period": 2,
-                        "kind": "review",
+                        "kind": "payment",
                         "entity_id": "company",
-                        "amount": None,
+                        "amount": "10",
                         "quantity": None,
                         "description": "第二期",
                     },
@@ -289,7 +326,7 @@ def structured_proposal_json():
     payload = loads(proposal_json())
     payload["plan"]["actions"] = [
         structured_action(index=0, period=1, amount="10"),
-        structured_action(index=1, period=2),
+        structured_action(index=1, period=2, amount="10"),
     ]
     payload["plan"]["budget_items"] = []
     payload["parameters"] = []

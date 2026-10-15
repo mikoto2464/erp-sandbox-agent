@@ -2,6 +2,7 @@ from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
 
 from erp_agent.application.contracts import JSONObject, to_json
+from erp_agent.application.solver_references import REFERENCE_INSTRUCTION, reference_catalog
 from erp_agent.domain.models import (
     Action,
     BudgetTemplate,
@@ -66,12 +67,8 @@ def repair_material(
             [a.action_id, a.period, a.completion_period, list(a.depends_on)] for a in actions
         ],
         "entity_catalog": entity_catalog(snapshot),
-        "reference_catalog": {
-            "fact_ids": [f.id for f in snapshot.reading.problem.facts],
-            "rule_ids": [r.id for r in snapshot.reading.rules.rules],
-            "action_ids": list(index),
-            "gap_ids": [f"{i.code}:{i.target}" for i in snapshot.reading.issues],
-        },
+        "reference_catalog": reference_catalog(snapshot, actions),
+        "reference_instruction": REFERENCE_INSTRUCTION,
     }
 
 
@@ -475,10 +472,14 @@ def role_material(
         "rule_version": snapshot.reading.rules.version,
         "problem": material,
         "rules": to_json(focused.reading.rules),
+        "reference_catalog": {
+            **reference_catalog(focused, actions),
+            "entity_ids": reference_catalog(snapshot)["entity_ids"],
+        },
+        "reference_instruction": REFERENCE_INSTRUCTION,
         "gaps": [
             {"gap_id": f"{i.code}:{i.target}", **to_json(i)}
             for i in snapshot.reading.issues
-            if i.severity != "info"
         ],
         "scope_instruction": "这是当前职责的相关事实；"
         "被裁剪资料仍保存在权威快照中，不能视为题目缺失。"

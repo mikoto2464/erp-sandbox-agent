@@ -57,6 +57,7 @@ class Settings:
     model_role_candidates: tuple[tuple[str, tuple[str, ...]], ...] = ()
     task_simple_max_chars: int = 32000
     task_moderate_max_chars: int = 64000
+    solver_max_model_calls: int = 32
     task_max_model_calls: int = 8
     task_deadline_seconds: int = 900
 
@@ -71,6 +72,8 @@ class Settings:
             for role, ids in self.model_role_candidates
         ):
             raise ValueError("职责候选须为合法职责到预设 ID 列表的映射。")
+        if not 1 <= self.solver_max_model_calls <= 256:
+            raise ValueError("求解总调用上限须为 1–256。")
         if not 1 <= self.task_max_model_calls <= 32 or not 30 <= self.task_deadline_seconds <= 7200:
             raise ValueError("任务调用上限须为 1–32，截止时间须为 30–7200 秒。")
         if self.llm_provider not in LLM_BASE_URLS:
@@ -147,6 +150,7 @@ class Settings:
             ),
             task_simple_max_chars=int(os.getenv("ERP_TASK_SIMPLE_MAX_CHARS", "32000")),
             task_moderate_max_chars=int(os.getenv("ERP_TASK_MODERATE_MAX_CHARS", "64000")),
+            solver_max_model_calls=int(os.getenv("ERP_SOLVER_MAX_MODEL_CALLS", "32")),
             task_max_model_calls=int(os.getenv("ERP_TASK_MAX_MODEL_CALLS", "8")),
             task_deadline_seconds=int(os.getenv("ERP_TASK_DEADLINE_SECONDS", "900")),
         )

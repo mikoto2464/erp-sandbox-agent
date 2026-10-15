@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from erp_agent.application.contracts import JSONValue, loads
+from erp_agent.application.llm_budget import request_input_chars
 from erp_agent.application.model_dispatch import task_responsibility
 from erp_agent.application.ports import LLMRequest, ModelBinding
 from erp_agent.domain.errors import ERPError
@@ -38,7 +39,7 @@ def classify_task(
     request: LLMRequest, simple_max_chars: int = 32000, moderate_max_chars: int = 64000
 ) -> TaskSuitability:
     role = task_responsibility(request)
-    size = len(request.system) + len(request.user) + len(request.schema_json)
+    size = request_input_chars(request)
     if role in {"operations", "finance", "coordinator"}:
         return TaskSuitability("complex", "跨期经营规划、资金核对或全周期统筹")
     try:

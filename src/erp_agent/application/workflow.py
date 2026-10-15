@@ -31,7 +31,6 @@ from erp_agent.application.contracts import (
 from erp_agent.application.input_sources import input_sources
 from erp_agent.application.jobs import ApplicationJobs
 from erp_agent.application.memory import MemoryService
-from erp_agent.application.memory_client import MemoryLLMClient
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.ports import (
     BudgetTemplateParser,
@@ -50,7 +49,6 @@ from erp_agent.application.solution_stages import (
     stage_record,
 )
 from erp_agent.application.solver import (
-    CollaborativeStrategyGenerator,
     LLMStrategyGenerator,
     SolverService,
 )
@@ -806,7 +804,7 @@ class WorkflowService:
                             dumps(
                                 {
                                     "config": config,
-                                    "version": "solver-14",
+                                    "version": "solver-17",
                                     "model": binding.metadata() if binding else None,
                                 }
                             ).encode()
@@ -814,8 +812,14 @@ class WorkflowService:
                         snapshot.document_ids,
                     )
                     role_memory.put("requirements", {"generation": to_json(config)})
-                    client = MemoryLLMClient(client, role_memory, "行动依赖与已确认经营约束")
-                generator = CollaborativeStrategyGenerator(client, control, role_memory)
+                    # Solver v17 只使用冻结快照的职责投影/只读查询，不自动注入记忆检索文本。
+                from erp_agent.application.planning_pipeline import ParallelPlanningGenerator
+
+                documents = tuple(
+                    parsed_document(self.repository.get("document", project_id, document_id))
+                    for document_id in snapshot.document_ids
+                )
+                generator = ParallelPlanningGenerator(client, control, role_memory, documents)
             result = self.solver.solve(request, control, generator)
             report_task(
                 control,
@@ -856,7 +860,7 @@ class WorkflowService:
                 "mode": mode.value,
                 "version": snapshot.version,
                 "generation": to_json(config),
-                "prompt_version": "solver-14",
+                "prompt_version": "solver-17",
                 "model_preset": binding.metadata() if binding else None,
             },
         )
@@ -891,7 +895,10 @@ class WorkflowService:
         context = PlanningContext(solution.generation, templates)
         hashes = tuple((t.source.id, t.source.sha256) for t in templates)
         attempt_id = uuid4().hex
-        binding = binding or (self.model_settings.capture_pool() if self.model_settings else None)
+        if not solution.plan.preparation:
+            binding = binding or (
+                self.model_settings.capture_pool() if self.model_settings else None
+            )
         client = binding.client if binding else self.reader.llm
         stage_record(
             self.repository,
@@ -950,9 +957,18 @@ class WorkflowService:
                         attempt_id=attempt_id,
                     )
 
-                result = planner.generate(
-                    snapshot, context, solution.plan, solution_id=solution.id, on_sheet=save_partial
-                )
+                if solution.plan.preparation:
+                    from erp_agent.application.prepared_budget import prepared_budget
+
+                    result = prepared_budget(solution, snapshot, templates)
+                else:
+                    result = planner.generate(
+                        snapshot,
+                        context,
+                        solution.plan,
+                        solution_id=solution.id,
+                        on_sheet=save_partial,
+                    )
                 control.checkpoint("saving_budget_result")
                 stage_record(
                     self.repository,
@@ -964,6 +980,12 @@ class WorkflowService:
                     template_hashes=hashes,
                     attempt_id=attempt_id,
                 )
+                if result.failed_sheets:
+                    raise ERPError(
+                        "budget.stage_failed",
+                        "生成阶段部分空表来源匹配未完成；"
+                        "有效行动已保留，请调整经营方案后重新生成参数。",
+                    )
                 return {"solution_id": solution.id, "needs_input": bool(result.gaps)}
             except Exception as error:
                 stage_record(

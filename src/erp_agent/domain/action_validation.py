@@ -1,8 +1,12 @@
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
+from decimal import Decimal, InvalidOperation
 
-from erp_agent.domain.models import ActionKind, Issue, Plan, ProblemSnapshot
+from erp_agent.domain.models import Action, ActionKind, Issue, KnowledgeState, Plan, ProblemSnapshot
 
 OPERATORS = {None, "eq", "ne", "gt", "gte", "lt", "lte", "exists", "completed"}
+CASH_INFLOW = {"financing_principal", "receipt"}
+CASH_OUTFLOW = {"payment", "repayment_principal"}
+INITIAL_CASH_KEYS = {"initial_cash", "cash"}
 PAYMENTS = {
     "payment",
     "purchase",
@@ -20,6 +24,156 @@ PAYMENTS = {
 
 def gap_reference(issue: Issue) -> str:
     return f"{issue.code}:{issue.target}"
+
+
+def covered_business_periods(plan: Plan) -> set[int]:
+    """review 是当期检查，不计入经营期覆盖。"""
+    return {a.period for a in plan.actions if a.kind != "review"}
+
+
+MISSING_REASON_DEFAULT = "数值未提供或该动作不涉及数量/金额。"
+
+
+def reference_catalogs(snapshot: ProblemSnapshot) -> tuple[set[str], set[str], set[str]]:
+    """返回事实、规则、缺口三个引用目录。"""
+    return (
+        {f.id for f in snapshot.reading.problem.facts},
+        {r.id for r in snapshot.reading.rules.rules},
+        {gap_reference(i) for i in snapshot.reading.issues},
+    )
+
+
+def canonical_references(
+    fact_refs: tuple[str, ...] | list[str],
+    rule_refs: tuple[str, ...] | list[str],
+    gap_refs: tuple[str, ...] | list[str],
+    facts: set[str],
+    rules: set[str],
+    gaps: set[str],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """把每个引用归位到它实际所属目录；未知引用保留在原字段以便校验继续报错。
+
+    只处理“已知 ID 放错字段”的类别误填（例如把 fact ID 写进 rule_ids/gap_ids），
+    不吞掉真正未知/臆造的引用——后者仍需修复或失败，不能静默丢弃。
+    """
+    fact_ids: list[str] = []
+    rule_ids: list[str] = []
+    gap_ids: list[str] = []
+    seen: set[str] = set()
+
+    def place(refs: object, fallback: list[str]) -> None:
+        for reference in dict.fromkeys(refs):
+            if reference in seen:
+                continue
+            seen.add(reference)
+            if reference in facts:
+                fact_ids.append(reference)
+            elif reference in rules:
+                rule_ids.append(reference)
+            elif reference in gaps:
+                gap_ids.append(reference)
+            else:
+                fallback.append(reference)
+
+    place(fact_refs, fact_ids)
+    place(rule_refs, rule_ids)
+    place(gap_refs, gap_ids)
+    return tuple(fact_ids), tuple(rule_ids), tuple(gap_ids)
+
+
+def normalize_action(
+    action: Action, facts: set[str], rules: set[str], gaps: set[str]
+) -> Action:
+    """归位跨类别引用并补全缺失说明，让结构校验不被 LLM 的类别误填打断。"""
+    if action.schema_version != "2":
+        return action
+    fact_ids, rule_ids, gap_ids = canonical_references(
+        action.fact_ids, action.rule_ids, action.gap_ids, facts, rules, gaps
+    )
+    action = replace(action, fact_ids=fact_ids, rule_ids=rule_ids, gap_ids=gap_ids)
+    if (action.amount is None or action.quantity is None) and not action.missing_reason.strip():
+        action = replace(action, missing_reason=MISSING_REASON_DEFAULT)
+    return action
+
+
+def normalize_plan(snapshot: ProblemSnapshot, plan: Plan) -> Plan:
+    """对全方案做确定性引用归位与缺失说明补全，作为 LLM 结构输出的容错层。"""
+    facts, rules, gaps = reference_catalogs(snapshot)
+    return replace(
+        plan, actions=tuple(normalize_action(action, facts, rules, gaps) for action in plan.actions)
+    )
+
+
+def validate_cash_flow(snapshot: ProblemSnapshot, plan: Plan) -> tuple[Issue, ...]:
+    """简单现金流折叠：按期累计现金支出与融资/收款，任一期余额为负即报错。
+
+    仅折叠金额含义为现金收付且单位一致的 action；初始现金未知或单位混杂时跳过，
+    不做伪精确判定。完整经营仿真（产能、库存、得分）仍由确定性内核实现。
+    """
+    problem = snapshot.reading.problem
+    horizon = (
+        problem.years * problem.periods_per_year
+        if problem.years and problem.periods_per_year
+        else None
+    )
+    if not horizon:
+        return ()
+    initial: Decimal | None = None
+    unit = ""
+    for fact in problem.facts:
+        if fact.key not in INITIAL_CASH_KEYS or fact.state != KnowledgeState.KNOWN:
+            continue
+        if fact.value is None:
+            continue
+        try:
+            value = Decimal(fact.value)
+        except InvalidOperation:
+            continue
+        if not value.is_finite() or value < 0:
+            continue
+        if initial is None:
+            initial, unit = value, fact.unit
+        elif fact.unit == unit:
+            initial += value
+        else:
+            return ()
+    if initial is None:
+        return ()
+    net: dict[int, Decimal] = {period: Decimal(0) for period in range(1, horizon + 1)}
+    outflows: dict[int, list[str]] = {period: [] for period in range(1, horizon + 1)}
+    meanings = CASH_INFLOW | CASH_OUTFLOW
+    for action in plan.actions:
+        if action.schema_version != "2" or action.amount is None:
+            continue
+        if action.amount_meaning not in meanings:
+            continue
+        if action.amount_unit and action.amount_unit != unit:
+            continue
+        if not action.amount.is_finite() or action.amount < 0:
+            continue
+        timing = action.payment_period if action.payment_period is not None else action.period
+        if not 1 <= timing <= horizon:
+            continue
+        if action.amount_meaning in CASH_OUTFLOW:
+            net[timing] -= action.amount
+            outflows[timing].append(action.action_id)
+        else:
+            net[timing] += action.amount
+    balance = initial
+    for period in range(1, horizon + 1):
+        balance += net[period]
+        if balance < 0:
+            return (
+                Issue(
+                    "plan.cash_flow",
+                    "error",
+                    "plan.actions",
+                    f"第 {period} 期现金支出超过可动用资金：期初现金 {initial}，"
+                    f"该期累计融资/收款后仍短缺 {abs(balance)} {unit or '金额'}。",
+                    impact=tuple(dict.fromkeys(outflows[period])),
+                ),
+            )
+    return ()
 
 
 def validate_actions(
@@ -65,7 +219,7 @@ def validate_actions(
     if not plan.actions:
         issues.append(Issue("plan.empty", "error", "plan.actions", "方案没有行动。"))
     if coverage and horizon:
-        missing = sorted(set(range(1, horizon + 1)) - {a.period for a in plan.actions})
+        missing = sorted(set(range(1, horizon + 1)) - covered_business_periods(plan))
         outside = [a for a in plan.actions if not 1 <= a.period <= horizon]
         if missing or outside:
             detail = []
@@ -88,7 +242,8 @@ def validate_actions(
                     "plan.period_coverage",
                     "error",
                     "plan.actions",
-                    "行动必须覆盖经营周期的每一期且不能越界。" + "；".join(detail),
+                    "行动必须覆盖经营周期的每一期且每期至少一个非 review 业务动作，不能越界。"
+                    + "；".join(detail),
                 )
             )
     seen: set[str] = set()

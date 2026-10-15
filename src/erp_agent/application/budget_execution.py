@@ -28,6 +28,17 @@ class CheckedInput:
     depends_on_sheets: tuple[str, ...] = ()
 
 
+DERIVED_SHEET_MARKERS = ("利润", "损益", "资产负债", "现金流量", "权益变动")
+DERIVED_LABEL_MARKERS = ("余额", "利润", "权益", "得分", "期末现金", "期初现金", "现金结余")
+
+
+def derived_statement_target(sheet_name: str, label: str) -> bool:
+    """派生报表（利润表/资产负债表/现金流量表）或需确定性核算的汇总格只留空。"""
+    return any(marker in sheet_name for marker in DERIVED_SHEET_MARKERS) or any(
+        marker in label for marker in DERIVED_LABEL_MARKERS
+    )
+
+
 def addresses(region: str) -> tuple[str, ...]:
     first, _, last = region.partition(":")
     lo, hi = cell_position(first), cell_position(last or first)
@@ -180,21 +191,15 @@ def expand_mappings(
                     },
                 )
                 explanation = declared[gap_id]["message"]
-            if (
-                not gap_id
-                and any(
-                    word in group.label
-                    for word in ("余额", "利润", "权益", "得分", "期末现金", "期初现金")
-                )
-                and any(r.startswith("action:") for r in refs)
-            ):
+            if not gap_id and derived_statement_target(sheet.name, group.label):
                 gap_id = "derived-unimplemented:" + group.label
                 declared.setdefault(
                     gap_id,
                     {
                         "id": gap_id,
-                        "code": "budget.rule_unimplemented",
-                        "message": "该汇总指标需确定性核算规则，不能以行动金额替代，保留空白。",
+                        "code": "budget.derived_statement",
+                        "message": "该格属于派生报表或需确定性核算规则"
+                        "（利润/资产负债/现金流量/期末余额等），预算阶段只填写输入参数，保留空白。",
                         "source_ids": list(refs),
                         "rule_id": group.label,
                     },

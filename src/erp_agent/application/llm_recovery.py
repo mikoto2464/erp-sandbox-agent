@@ -4,7 +4,7 @@ from dataclasses import replace
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from erp_agent.application.ports import LLMClient, LLMRequest, LLMResponse, RunControl
-from erp_agent.application.task_budget import model_call, task_budget
+from erp_agent.application.task_budget import model_call, run_control, task_budget
 from erp_agent.application.task_reporting import report_task
 from erp_agent.domain.errors import ERPError, ModelOutputTruncated
 
@@ -61,7 +61,7 @@ def recovery_call(client: LLMClient, request: LLMRequest, control: RunControl) -
 
         def attempt() -> LLMResponse:
             if budget:
-                with model_call(budget):
+                with model_call(budget), run_control(control):
                     return client.generate(replace(current, retries=0))
             return client.generate(replace(current, retries=0))
 

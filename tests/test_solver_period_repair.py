@@ -24,7 +24,7 @@ class SolverPeriodRepairTests(unittest.TestCase):
             ),
         )
         raw = loads(structured_proposal_json())
-        existing = [structured_action(index=i, period=i) for i in range(1, 15)]
+        existing = [structured_action(index=i, period=i, amount="10") for i in range(1, 15)]
         raw["plan"]["actions"] = existing
         calls = []
         outer = self
@@ -44,10 +44,16 @@ class SolverPeriodRepairTests(unittest.TestCase):
                             "patches": [],
                             "additions": [
                                 structured_action(
-                                    index=15, period=15, description="核对末期交付与待收款依赖"
+                                    index=15,
+                                    period=15,
+                                    amount="10",
+                                    description="核对末期交付与待收款依赖",
                                 ),
                                 structured_action(
-                                    index=16, period=16, description="核对终局债务及费用结算"
+                                    index=16,
+                                    period=16,
+                                    amount="10",
+                                    description="核对终局债务及费用结算",
                                 ),
                             ],
                         }
@@ -65,8 +71,8 @@ class SolverPeriodRepairTests(unittest.TestCase):
 
     def test_time_repair_can_fill_a_period_vacated_by_its_replacements(self):
         raw = loads(structured_proposal_json())
-        preceding = structured_action(index=0, period=2)
-        dependent = structured_action(index=1, period=1)
+        preceding = structured_action(index=0, period=2, amount="10")
+        dependent = structured_action(index=1, period=1, amount="10")
         dependent["depends_on"] = ["action-0"]
         raw["plan"]["actions"] = [preceding, dependent]
         outer = self
@@ -88,7 +94,10 @@ class SolverPeriodRepairTests(unittest.TestCase):
                             ],
                             "additions": [
                                 structured_action(
-                                    index=2, period=1, description="核对前置安排与初始资源条件"
+                                    index=2,
+                                    period=1,
+                                    amount="10",
+                                    description="核对前置安排与初始资源条件",
                                 ),
                             ],
                         }

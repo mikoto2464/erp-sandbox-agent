@@ -11,10 +11,12 @@ Action 契约：
 - 采购/到货 details 为 resource_entity_id/counterparty_entity_id；开产/完工为 product_entity_id/line_entity_id/worker_entity_ids；竞单/合同/交付/收款为 order_entity_id/product_entity_id；借还款/付款为 finance_entity_id/obligation_action_id；招工/培训/解雇为 worker_entity_id/program_entity_id；研发/认证/开拓/安装/review为target_entity_id；扩展为type_name/reason。不适用关联为 null，不混入别的类型字段。
 - amount 为十进制字符串或 null，quantity 为整数或 null。有值必须给 amount_unit/quantity_unit 与 fact_ids/rule_ids；amount_meaning 区分付款、收款、成本、收入、融资本金、还款本金、参考金额、无或未知。采购成本不自动等于当期付款；交付/销售收入不自动等于收款；现金余额和检查不能冒充付款。
 - 有依据的数量、金额、完成期、支付期写入结构字段，不能只写 description。无依据或不适用数值留 null、missing_reason 写明确原因；规则未定义时间时 completion_period/payment_period=null 并关联真实 gap_ids，不猜日期。
-- related_entity_ids 关联相关实体；depends_on 保存前置 action_id；fact_ids/rule_ids/gap_ids 保留正式引用。condition 为有引用条件或 always。period 在 calendar 真实经营周期内递增，同期顺序尊重依赖；完整覆盖每期，暂无操作用具体 review，review 数量/金额均 null，amount_meaning=none。
+- related_entity_ids 关联相关实体；depends_on 保存前置 action_id；fact_ids/rule_ids/gap_ids 保留正式引用。condition 为有引用条件或 always。period 在 calendar 真实经营周期内递增，同期顺序尊重依赖；完整覆盖每期，每期至少一个非 review 的具体业务行动，review 是当期检查、不计入期覆盖，数量/金额均 null，amount_meaning=none，不能用 review 填满空期。
 
 summary 简要说明战略取舍、阶段路线与关键依赖，不重复参数；assumptions 保留真实暂定口径及影响；risks 写触发→受影响行动→应对。保守/平稳/激进只影响偏好，不能提升草稿为已验证经营可行性或最优解。模板只用于明确输出需要的业务项目，不能当作题目规则或要求模型计算预算。
 
 输出组织按“战略取舍→关键时点倒推→逐期营销/生产/人力/财务操作→执行风险与收官”。依据本题 calendar 展开全部经营期，描述每项操作的对象、前置条件与应对；数量、金额和期间只写有依据的结构字段供报告插入，不复制参考方案的订单、价格、融资优劣或策略结论。产销和资金候选均是本轮输入，沿用选定行动的稳定 ID、引用及条件；需要拒绝或调整的候选说明具体冲突与依据，不能遗漏相关偿债/收款或把条件行动改为必然发生。
 
 本阶段不产生用户问题。尚未明确的口径采用有边界的情景假设写入 assumptions；未提供的真实初始存量不猜数值，可只规划新增资源。竞单失败、现金不足、到货延迟等用条件分支与退路处理，不写“请用户确认后继续”。尽量形成具体可操作决策，不能用全周期“核对/待确认”替代生产经营规划。
+
+snapshot.reference_catalog 给出正式事实、规则、实体与缺口 ID，引用只能取对应目录；本轮行动 ID 可新建。gap_ids 是已有题目问题的引用，不能自建 gap_* 表示新风险；新不确定性写 assumptions/risks/missing_reason，保留影响与应对。协作建议的引用已经过严格校验，仍无效的会在进入统筹前失败而非被丢弃；不得把未知事实当作已满足，不为通过校验改配无关来源。

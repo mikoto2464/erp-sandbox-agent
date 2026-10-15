@@ -54,6 +54,20 @@ def specialist_patch(raw: JSONObject, error: ERPError) -> SpecialistRepair | Non
         elif key not in fields or fields[key] is not None:
             if field:
                 fields.setdefault(key, set()).add(field.split(".")[0])
+                # 新发现的风险没有正式 gap ID；同次补丁允许保留其说明，不能错配已有缺口。
+                if field.split(".")[0] == "gap_ids" or (
+                    field.split(".")[0] == "condition"
+                    and isinstance(entries[index], dict)
+                    and isinstance(entries[index].get("condition"), dict)
+                    and entries[index]["condition"].get("kind") == "gap"
+                ):
+                    explanation_field = {
+                        "risks": "response",
+                        "recommendations": "explanation",
+                        "candidate_actions": "missing_reason",
+                    }.get(collection)
+                    if explanation_field:
+                        fields[key].add(explanation_field)
                 if diagnostic.get("error_code") == "invalid_action_type":
                     fields[key].update({"kind", "details"})
                 if diagnostic.get("code") == "plan.amount_unit":

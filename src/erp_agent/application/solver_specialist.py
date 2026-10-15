@@ -15,7 +15,12 @@ from erp_agent.application.contracts import (
     strings,
     to_json,
 )
-from erp_agent.domain.action_validation import OPERATORS, validate_actions
+from erp_agent.domain.action_validation import (
+    OPERATORS,
+    canonical_references,
+    reference_catalogs,
+    validate_actions,
+)
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import Action, Plan, ProblemSnapshot
 
@@ -52,6 +57,21 @@ def decode_specialist(
     diagnostics: list[JSONObject] = []
     proposed_items = []
     proposed_indices = []
+    facts, rules, gaps = reference_catalogs(snapshot)
+    for raw_action in array(data["candidate_actions"]):
+        if not isinstance(raw_action, dict) or "fact_ids" not in raw_action:
+            continue
+        fact_ids, rule_ids, gap_ids = canonical_references(
+            list(raw_action.get("fact_ids", [])),
+            list(raw_action.get("rule_ids", [])),
+            list(raw_action.get("gap_ids", [])),
+            facts,
+            rules,
+            gaps,
+        )
+        raw_action["fact_ids"] = list(fact_ids)
+        raw_action["rule_ids"] = list(rule_ids)
+        raw_action["gap_ids"] = list(gap_ids)
     for index, value in enumerate(array(data["candidate_actions"])):
         try:
             proposed_items.append(decode_action(value))
@@ -118,14 +138,11 @@ def decode_specialist(
                         ["candidate_actions", str(proposed_indices[local_index]), *parts[2:]]
                     )
             diagnostics.append({**to_json(issue), "error_code": "solver_action", "target": target})
-    facts = {f.id for f in snapshot.reading.problem.facts}
-    rules = {r.id for r in snapshot.reading.rules.rules}
     entities = {
         f.entity_id
         for f in snapshot.reading.problem.facts
         if role != "budget" or f.category != "order_pool"
     } | {"company"}
-    gaps = {f"{i.code}:{i.target}" for i in snapshot.reading.issues}
     identifiers = {a.action_id for a in all_actions} | {
         obj(value).get("action_id")
         for value in array(data["candidate_actions"])

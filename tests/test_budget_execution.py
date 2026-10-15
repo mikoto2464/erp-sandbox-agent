@@ -122,6 +122,31 @@ class BudgetExecutionTests(unittest.TestCase):
         self.assertEqual(len(gaps[0].targets), 2)
         self.assertEqual({i.gap_id for i in items}, {gaps[0].id})
 
+    def test_derived_statement_sheet_is_left_blank(self):
+        _, plan, template = fixture()
+        sheet = replace(template.sheets[0], name="资产负债表")
+        group = CheckedInput("group:0", "借款", "B2", "元", "本金")
+        sources = (OutputSource("action:borrowing:amount", "借款", "100.25", True, 1, "元"),)
+        data = {"status": "applicable", "mappings": [mapping()], "gaps": []}
+        items, gaps = expand_mappings(data, template, sheet, (group,), sources, plan, 16)
+        self.assertTrue(all(i.value is None for i in items))
+        self.assertEqual({g.code for g in gaps}, {"budget.derived_statement"})
+
+    def test_derived_label_is_left_blank_even_from_fact_source(self):
+        _, plan, template = fixture()
+        group = CheckedInput("group:0", "期末现金", "B2", "元", "现金结余")
+        sources = (OutputSource("fact:cash", "公司 · initial_cash", "100000", True, None, "元"),)
+        data = {
+            "status": "applicable",
+            "mappings": [mapping(refs=("fact:cash",))],
+            "gaps": [],
+        }
+        items, gaps = expand_mappings(
+            data, template, template.sheets[0], (group,), sources, plan, 16
+        )
+        self.assertTrue(all(i.value is None for i in items))
+        self.assertEqual({g.code for g in gaps}, {"budget.derived_statement"})
+
     def test_unbound_values_empty_success_and_wrong_units_are_rejected(self):
         _, plan, template = fixture()
         group = CheckedInput("group:0", "借款", "B2", "元", "本金")

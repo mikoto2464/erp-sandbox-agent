@@ -61,7 +61,7 @@ class WorkbookMapper:
         self,
         solution: SolutionBundle,
         template: BudgetTemplate,
-        llm: LLMClient,
+        llm: LLMClient | None,
         control: RunControl,
         snapshot: ProblemSnapshot | None = None,
     ) -> WorkbookMapping:
@@ -70,7 +70,9 @@ class WorkbookMapper:
             for index, item in enumerate(solution.plan.budget_items)
             if item.template_id == template.source.id
         )
-        if not planned:
+        if not planned and not solution.plan.preparation:
+            if llm is None:
+                raise ERPError("llm_not_configured", "旧方案需要来源核对模型。", 503)
             return legacy_mapping(
                 solution, template, llm, control, snapshot, dumps(MAPPING_SCHEMA), MAPPING_VERSION
             )
@@ -120,7 +122,10 @@ class WorkbookMapper:
             pending = tuple(
                 (index, item)
                 for index, item in planned
-                if item.sheet == sheet.name and item.value is None and not item.gap_id
+                if item.sheet == sheet.name
+                and item.value is None
+                and not item.gap_id
+                and not solution.plan.preparation
             )
             if not pending:
                 continue
@@ -152,6 +157,8 @@ class WorkbookMapper:
                     material,
                 )
             )
+        if units and llm is None:
+            raise ERPError("llm_not_configured", "旧方案需要来源核对模型。", 503)
         findings, models = WorkbookMappingTasks(self.memory).run(
             units,
             solution,

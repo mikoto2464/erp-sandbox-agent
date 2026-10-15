@@ -155,7 +155,7 @@ class SolverRepairFlowTests(unittest.TestCase):
                         original[0],
                         {**original[1], "period": 2},
                         {**original[2], "period": 3},
-                        structured_action(index=4, period=4),
+                        structured_action(index=4, period=4, amount="10"),
                     ]
                     return LLMResponse(dumps(output), "same")
                 return LLMResponse(
@@ -261,8 +261,8 @@ class SolverRepairFlowTests(unittest.TestCase):
                 if request.schema_name == "erp_strategy":
                     result = loads(structured_proposal_json())
                     result["plan"]["actions"] += [
-                        structured_action(index=3, period=3),
-                        structured_action(index=4, period=4),
+                        structured_action(index=3, period=3, amount="10"),
+                        structured_action(index=4, period=4, amount="10"),
                     ]
                     return LLMResponse(dumps(result), self.name)
                 return LLMResponse(dumps(specialist(data["role"])), self.name)

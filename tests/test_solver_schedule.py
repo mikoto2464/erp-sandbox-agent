@@ -4,7 +4,7 @@ from dataclasses import replace
 from erp_agent.application.contracts import dumps, loads
 from erp_agent.application.ports import LLMResponse
 from erp_agent.application.solver import CollaborativeStrategyGenerator, LLMStrategyGenerator
-from tests.helpers import Control, structured_action, structured_proposal_json, snapshot
+from tests.helpers import Control, snapshot, structured_action, structured_proposal_json
 from tests.test_solver_dependency_flow import specialist
 
 
@@ -21,7 +21,7 @@ class SolverScheduleTests(unittest.TestCase):
         calls = []
         proposal = loads(structured_proposal_json())
         proposal["plan"]["actions"] = [
-            structured_action(index=period, period=period) for period in range(1, 7)
+            structured_action(index=period, period=period, amount="10") for period in range(1, 7)
         ]
         proposal["parameters"] = []
 
@@ -77,7 +77,9 @@ class SolverScheduleTests(unittest.TestCase):
                             "patches": [
                                 {
                                     "action_id": "action-1",
-                                    "replacement": structured_action(index=1, period=1),
+                                    "replacement": structured_action(
+                                        index=1, period=1, amount="10"
+                                    ),
                                 },
                                 {
                                     "action_id": "action-0",

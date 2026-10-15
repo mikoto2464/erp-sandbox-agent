@@ -124,14 +124,14 @@ class AnswererService:
         )
         self._require_planned_template(report, template)
         self._check_active(project_id, "mapping", report.solution.id, template.source.id)
-        binding = self.models.capture_pool()
+        binding = None if report.solution.plan.preparation else self.models.capture_pool()
 
         def operation(control: RunControl) -> JSONValue:
             task = TaskContext("mapper", "Answerer", "核对既有方案预算", template.source.filename)
             report_task(control, task, "running")
-            client = TaskLLMClient(binding.client, control, task)
+            client = TaskLLMClient(binding.client, control, task) if binding else None
             shared = None
-            if self.memory:
+            if self.memory and binding:
                 self.memory.remember(report.snapshot)
                 self.memory.remember_solution(report.solution)
                 shared = self.memory.scope(
@@ -185,7 +185,7 @@ class AnswererService:
             {
                 "solution_id": report.solution.id,
                 "template_id": template.source.id,
-                "model_preset": binding.metadata(),
+                "model_preset": binding.metadata() if binding else None,
             },
         )
 
@@ -235,7 +235,11 @@ class AnswererService:
             for i in report.solution.evaluation.issues
         ):
             raise ERPError("plan_invalid", "方案的周期或操作结构有错误，请先调整方案。", 409)
-        binding = self.models.capture_pool() if kind == "docx" else None
+        binding = (
+            self.models.capture_pool()
+            if kind == "docx" and not report.solution.plan.preparation
+            else None
+        )
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "Word 方案组织需要已配置的模型。", 503)
         mapping = None
@@ -301,7 +305,9 @@ class AnswererService:
             )
             report_task(control, render_task, "queued")
             report_task(control, verify_task, "queued")
-            if binding:
+            if report.solution.plan.preparation:
+                output_report = replace(report, outline=report.solution.plan.preparation.outline)
+            elif binding:
                 control.checkpoint("organizing_report")
                 client = binding.client
                 shared = None
@@ -508,9 +514,13 @@ class AnswererService:
                 for sheet in reading.sheets
                 if sheet.input_groups
             ):
-                raise ERPError(
-                    "template_budget_pending", "此空表预算尚未完整处理，可等待或重试预算阶段。", 409
+                message = (
+                    "此方案生成时未完成这份表的预算来源，请调整经营方案后重新生成。"
+                    if report.solution.plan.preparation
+                    and report.solution.plan.preparation.failed_sheets
+                    else "此空表预算尚未完整处理，可等待或重试预算阶段。"
                 )
+                raise ERPError("template_budget_pending", message, 409)
         if not any(item.template_id == template_id for item in report.solution.plan.budget_items):
             raise ERPError(
                 "template_plan_missing", "此方案没有这份表的预算安排，请返回经营方案重新生成。", 409

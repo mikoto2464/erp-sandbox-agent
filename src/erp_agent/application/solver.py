@@ -42,7 +42,13 @@ from erp_agent.application.solver_plan_repairs import (
     apply_plan_repair,
     plan_repair_schema,
 )
-from erp_agent.domain.action_validation import validate_actions
+from erp_agent.application.solver_references import REFERENCE_INSTRUCTION, reference_schema
+from erp_agent.domain.action_validation import (
+    covered_business_periods,
+    normalize_plan,
+    validate_actions,
+    validate_cash_flow,
+)
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import (
     Action,
@@ -79,15 +85,18 @@ class LLMStrategyGenerator:
         prompt = files("erp_agent").joinpath("prompts/solver.txt").read_text(encoding="utf-8")
         problem = snapshot.reading.problem
         horizon = (problem.years or 0) * (problem.periods_per_year or 0)
-        schema = dumps(period_proposal_schema(horizon))
-        prompt += "\nplan 用 period_actions 按真实经营期编号分组，每一期至少一个具体行动；"
+        prompt += "\nplan 用 period_actions 按真实经营期编号分组，"
+        prompt += "每一期至少一个非 review 的具体业务行动；"
         prompt += "行动不写 period，由 Python 根据分组赋值；不得遗漏中间期或末期。"
         prompt += (
-            "review 是当期检查，无建设或支付过程；"
+            "review 是当期检查，不计入期覆盖，无建设或支付过程；"
             "completion_period/payment_period 必须为 null。"
         )
         material = role_material(
             snapshot, "coordinator" if self.collaboration else "operations", self.candidate_actions
+        )
+        schema = dumps(
+            reference_schema(period_proposal_schema(horizon), obj(material["reference_catalog"]))
         )
         instruction = "只生成完整经营行动草稿，parameters 必须为空数组，budget_items 必须为空数组。"
         policy = planning_policy(context)
@@ -116,7 +125,7 @@ class LLMStrategyGenerator:
                 ):
                     raise ERPError("solver_input_limit", "方案输入超过模型容量，请减少空表或资料。")
                 request = LLMRequest(
-                    prompt + "\nJSON schema:\n" + schema,
+                    prompt,
                     dumps(payload),
                     "erp_strategy",
                     schema,
@@ -146,6 +155,8 @@ class LLMStrategyGenerator:
                         )
                     else:
                         raise
+                # 归位跨类别引用并补全缺失说明，避免类别误填/空说明打断结构校验。
+                proposal = replace(proposal, baseline=normalize_plan(snapshot, proposal.baseline))
                 check_planning_content(proposal.baseline)
                 evaluation = DraftPlanEvaluator().evaluate(snapshot, proposal.baseline)
                 errors = [
@@ -228,9 +239,14 @@ class LLMStrategyGenerator:
             "instruction": "仅修复这个行动的结构或类型，保留 action_id 与已正确值；"
             "不得改变其它行动、题目事实或版本。",
         }
-        schema = dumps(PATCH_SCHEMA)
+        payload["instruction"] += REFERENCE_INSTRUCTION
+        schema = dumps(
+            reference_schema(
+                PATCH_SCHEMA, obj(payload["reference_catalog"]), allow_new_actions=False
+            )
+        )
         request = LLMRequest(
-            "只返回当前行动的受限补丁。\nJSON schema:\n" + schema,
+            "只返回当前行动的受限补丁。",
             dumps(payload),
             "erp_action_patch",
             schema,
@@ -269,6 +285,11 @@ class LLMStrategyGenerator:
                 if len(parts) > 2:
                     allowed = allowed_fields.setdefault(identifier, set())
                     allowed.add(parts[2])
+                    action = proposal.baseline.actions[int(parts[1])]
+                    if parts[2] == "gap_ids" or (
+                        parts[2] == "condition" and action.condition.kind == "gap"
+                    ):
+                        allowed.add("missing_reason")
                     if issue.code == "plan.amount_unit":
                         allowed.update({"amount_unit", "amount_meaning"})
                     if issue.code == "plan.dependency_time":
@@ -298,7 +319,7 @@ class LLMStrategyGenerator:
                     changed = True
         problem = snapshot.reading.problem
         horizon = (problem.years or 0) * (problem.periods_per_year or 0)
-        missing = sorted(set(range(1, horizon + 1)) - {a.period for a in proposal.baseline.actions})
+        missing = sorted(set(range(1, horizon + 1)) - covered_business_periods(proposal.baseline))
         if len(affected) > MAX_REPAIR_OBJECTS or len(missing) > MAX_REPAIR_OBJECTS:
             raise ERPError(
                 "solver_repair_limit", "本轮修复范围或缺失经营期超过 24 项，本次修复停止。"
@@ -350,14 +371,22 @@ class LLMStrategyGenerator:
             )
             payload["instruction"] += (
                 " 本次可用 additions 补充替换后仍缺失的经营期，使用新 action_id；"
-                "针对已有依赖、交付/收付或终局核对提出该期具体行动，不用泛化 review 填满。"
+                "针对已有依赖、交付/收付或终局核对提出该期具体业务行动，review 不计入期覆盖，"
+                "不能用泛化 review 填满空期。"
                 "新行动需合法引用，未知值保留 null，不编造数值；"
                 "不得在已覆盖期追加或覆盖已有行动，替换与新增合计最多24项。"
             )
-        schema = dumps(plan_repair_schema(allow_additions, allowed_fields))
+        payload["instruction"] += REFERENCE_INSTRUCTION
+        schema = dumps(
+            reference_schema(
+                plan_repair_schema(allow_additions, allowed_fields),
+                obj(payload["reference_catalog"]),
+                allow_new_actions=allow_additions,
+            )
+        )
         output_budget = min(16000, max(4000, (len(affected) + len(missing) + len(temporal)) * 600))
         request = LLMRequest(
-            "修复已定位的结构、引用、依赖或周期遗漏；只返回受限补丁。\nJSON schema:\n" + schema,
+            "修复已定位的结构、引用、依赖或周期遗漏；只返回受限补丁。",
             dumps(payload),
             "erp_action_patch",
             schema,
@@ -384,6 +413,7 @@ class LLMStrategyGenerator:
             horizon=horizon,
             allow_additions=allow_additions,
         )
+        plan = normalize_plan(snapshot, plan)
         diagnostics = validate_actions(snapshot, plan)
         remaining = [i for i in diagnostics if i.severity == "error"]
         if remaining:
@@ -410,12 +440,13 @@ class DraftPlanEvaluator:
         if horizon is None:
             issues.append(Issue("plan.horizon_missing", "warning", "plan", "经营周期未确认。"))
         issues.extend(validate_actions(snapshot, plan))
+        issues.extend(validate_cash_flow(snapshot, plan))
         issues.append(
             Issue(
                 "simulation.unavailable",
                 "warning",
                 "plan",
-                "已检查结构与周期；经营仿真尚未实现，产能、现金和得分未验证。",
+                "已检查结构、周期与简单现金流折叠；产能、库存与得分等完整经营仿真仍未实现。",
             )
         )
         return Evaluation(
@@ -423,7 +454,7 @@ class DraftPlanEvaluator:
             False,
             None,
             tuple(issues),
-            "结构校验草稿，尚未验证经营可行性",
+            "结构校验与简单现金流折叠草稿，尚未验证完整经营可行性",
         )
 
 
@@ -460,4 +491,5 @@ class SolverService:
             proposal.raw_response,
             tuple(candidates),
             request.context.config,
+            best_plan.preparation.version if best_plan.preparation else "solver-15",
         )

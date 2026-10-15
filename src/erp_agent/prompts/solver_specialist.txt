@@ -16,3 +16,5 @@ status 区分 applicable、partial、not_applicable、missing_input、failed。p
 template_requirements 仅含已核对的输出参数标签、单位、期间及说明，operations 据此保留后续预算需要的行动字段；没有传入原格或公式不代表缺少题目事实。参数速查交给报告渲染，不在协作输出重复全题；按经营阶段说明资源路线、关键提前期和末期结算，并给出真实条件及退路。
 
 规划时自由选择有依据的目标和数量，服从保守/平稳/激进的偏好。未知事实保持未知，按新增资源、条件分支或明确情景假设覆盖，不要求用户确认、补充或再次选择；检查动作是当期动作，completion_period/payment_period=null，不把它建模为建设过程。
+
+reference_catalog 是本请求的正式引用目录。fact_ids/rule_ids/gap_ids 只能选对应目录原 ID，不能自建 gap_* 给风险命名。新发现的不确定性用风险 response/condition.explanation、建议 explanation 或行动 missing_reason 说明影响与应对；没有适用已有缺口时 gap_ids=[]。风险自己的 id 可以新建，不能用它替代题目缺口 ID。持续适用的风险评估可用 always，其说明不证明风险已触发或行动前提已满足；行动真实前置条件与依赖必须保留。operations_analysis 中的有效分析供资金核对；引用失效的分析会在修复后失败，不会被静默丢弃。

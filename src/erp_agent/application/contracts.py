@@ -29,6 +29,7 @@ from erp_agent.domain.models import (
     StrategyProposal,
     WorkforceDetails,
 )
+from erp_agent.domain.planning import PlanPreparation
 
 JSONValue: TypeAlias = "str | int | float | bool | None | list[JSONValue] | dict[str, JSONValue]"
 JSONObject: TypeAlias = dict[str, JSONValue]
@@ -355,7 +356,7 @@ def decode_action(value: JSONValue, *, legacy_index: int | None = None) -> Actio
 def decode_plan(value: JSONValue, *, allow_legacy: bool = True) -> Plan:
     data = obj(value)
     required = {"title", "summary", "actions", "assumptions", "risks"}
-    if set(data) not in (required, required | {"budget_items"}):
+    if not required <= set(data) or set(data) - required - {"budget_items", "preparation"}:
         raise ERPError("invalid_contract", "方案字段不符合要求。")
     decoded_actions = []
     for index, value in enumerate(array(data["actions"])):
@@ -424,7 +425,14 @@ def decode_plan(value: JSONValue, *, allow_legacy: bool = True) -> Plan:
         strings(data["assumptions"]),
         strings(data["risks"]),
         tuple(budget_items),
+        _decode_preparation(data.get("preparation")),
     )
+
+
+def _decode_preparation(value: JSONValue) -> "PlanPreparation | None":
+    from erp_agent.application.planning_codec import decode_preparation
+
+    return decode_preparation(obj(value)) if value is not None else None
 
 
 def decode_proposal(content: str, model: str, *, allow_legacy: bool = True) -> StrategyProposal:

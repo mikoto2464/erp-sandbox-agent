@@ -29,6 +29,7 @@ from erp_agent.application.solver_context import (
     role_material,
     selected_snapshot,
 )
+from erp_agent.application.solver_references import REFERENCE_INSTRUCTION, reference_schema
 from erp_agent.application.solver_repairs import apply_specialist_patch, specialist_patch
 from erp_agent.application.solver_specialist import decode_specialist as decode_specialist
 from erp_agent.application.task_reporting import TaskLLMClient, report_task
@@ -97,6 +98,9 @@ class CollaborativeStrategyGenerator:
                 material["scope_instruction"] += (
                     "跨对象模板建议用 company；entity_id 只能选 entity_catalog 的 id。"
                 )
+                material["reference_catalog"]["entity_ids"] = [
+                    entry["id"] for entry in material["entity_catalog"]
+                ]
             return material
 
         def run(unit: tuple[TaskContext, JSONObject, tuple[Action, ...]]) -> JSONObject:
@@ -109,9 +113,9 @@ class CollaborativeStrategyGenerator:
             }
             if role == "budget":
                 schema_data["properties"]["candidate_actions"]["maxItems"] = 0
-            task_schema = dumps(schema_data)
+            task_schema = dumps(reference_schema(schema_data, obj(material["reference_catalog"])))
             request = LLMRequest(
-                prompt + "\nJSON schema:\n" + task_schema,
+                prompt,
                 dumps(material),
                 "erp_solver_specialist",
                 task_schema,
@@ -124,7 +128,7 @@ class CollaborativeStrategyGenerator:
             key = (
                 "solver-unit:"
                 + hashlib.sha256(
-                    dumps({"version": "solver-14", "request": request}).encode()
+                    dumps({"version": "solver-15", "request": request}).encode()
                 ).hexdigest()
             )
             saved = self.memory.get(key) if self.memory else None
@@ -133,9 +137,10 @@ class CollaborativeStrategyGenerator:
                     obj(saved["result"]), snapshot, candidate_actions=candidates, role=role
                 )
                 report_task(self.control, task, "cached")
-                return {"role": material["role"], **data}
+                return {"role": material["role"], **data, "analysis_limits": []}
             client = TaskLLMClient(self.llm, self.control, task)
             report_task(self.control, task, "running")
+            analysis_limits = []
             try:
                 if len(request.system) + len(request.user) + len(request.schema_json) > getattr(
                     self.llm, "max_input_chars", 100_000
@@ -188,16 +193,23 @@ class CollaborativeStrategyGenerator:
                                 "其余内容由 Python 原样保留，未开放的 condition 不要重新输出。"
                                 "保持稳定 ID 和目录外对象。"
                                 "不能删掉时间依赖或清空已知完成/支付期来绕过校验；"
-                                "实体 ID 从 entity_catalog 选，不将模板或输入组 ID 当实体。",
+                                "实体 ID 从 entity_catalog 选，不将模板或输入组 ID 当实体。"
+                                + REFERENCE_INSTRUCTION,
                             }
+                        )
+                        patch_schema = dumps(
+                            reference_schema(
+                                patch.schema,
+                                obj(focused["reference_catalog"]),
+                                allow_new_actions=False,
+                            )
                         )
                         repair_request = replace(
                             request,
                             user=dumps(focused),
                             schema_name="erp_specialist_patch",
-                            schema_json=dumps(patch.schema),
-                            system="只返回目录内对象的受限修正。\nJSON schema:\n"
-                            + dumps(patch.schema),
+                            schema_json=patch_schema,
+                            system="只返回目录内对象的受限修正。",
                             max_output_tokens=min(12000, max(2000, len(patch.objects) * 600)),
                         )
                         repaired = recovery_call(client, repair_request, self.control)
@@ -206,6 +218,8 @@ class CollaborativeStrategyGenerator:
                             obj(loads(normalize_model_json(repaired.content))),
                             patch,
                         )
+                        # 引用失效的分析记录（recommendations/risks/dependencies）不能静默隔离，
+                        # 否则关键依赖约束会被丢弃；一次修复后仍无效即失败。
                         data = decode_specialist(
                             patched, snapshot, candidate_actions=candidates, role=role
                         )
@@ -237,7 +251,7 @@ class CollaborativeStrategyGenerator:
                             role=role,
                         )
                 self.control.checkpoint("saving_planning_progress")
-                if self.memory:
+                if self.memory and not analysis_limits:
                     self.memory.put(key, {"result": data})
                 report_task(
                     self.control,
@@ -248,8 +262,9 @@ class CollaborativeStrategyGenerator:
                     if data["status"] in {"partial", "missing_input"}
                     else "",
                     recommendation_count=len(array(data["recommendations"])),
+                    analysis_limits=analysis_limits,
                 )
-                return {"role": material["role"], **data}
+                return {"role": material["role"], **data, "analysis_limits": analysis_limits}
             except Cancelled:
                 raise
             except ERPError as error:
@@ -282,7 +297,14 @@ class CollaborativeStrategyGenerator:
         operations = findings[0]
         candidates = tuple(decode_action(a) for a in array(operations["candidate_actions"]))
         report_task(self.control, finance_task, "queued", depends_on=[operations_task.id])
-        finance = run((finance_task, material_for("finance", candidates), candidates))
+        finance_material = material_for("finance", candidates)
+        finance_material["operations_analysis"] = {
+            key: operations[key] for key in ("status", "recommendations", "dependencies", "risks")
+        }
+        finance_material["operations_analysis"]["analysis_limits"] = operations.get(
+            "analysis_limits", []
+        )
+        finance = run((finance_task, finance_material, candidates))
         findings.append(finance)
         self.control.checkpoint("synthesizing_strategy")
         generator = LLMStrategyGenerator(
@@ -299,7 +321,7 @@ class CollaborativeStrategyGenerator:
             + hashlib.sha256(
                 dumps(
                     {
-                        "version": "solver-14",
+                        "version": "solver-15",
                         "constraints": role_material(snapshot, "coordinator", candidates),
                         "generation": context.config,
                         "template_readings": snapshot.template_readings,

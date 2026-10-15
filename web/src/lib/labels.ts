@@ -79,6 +79,8 @@ export const stageNames: Record<string, string> = {
   planning_finance: '资金与风险规划',
   planning_budget: '模板预算规划',
   planning_collaboration: '协作规划',
+  planning_tools: '核对经营依据与计算',
+  preparing_plan_parameters: '确定预算参数与文档数据',
   planning_budget_values: '根据经营行动逐表安排预算',
   retrying_strategy: '退避后重试当前规划任务',
   expanding_output_budget: '增加思考与回答预算后重试',

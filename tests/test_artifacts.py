@@ -129,7 +129,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertTrue(any(i.severity == 'error' for i in validate_mapping(
             template, (WorkbookEntry('生产', 'B3', '内部', ('action:0:amount',)),), data.solution)))
         changed = tuple(
-            replace(e, source_ids=(f'action:{data.solution.plan.actions[1].action_id}:amount',))
+            replace(e, source_ids=(f'action:{data.solution.plan.actions[1].action_id}:quantity',))
             if e.cell == 'B2' and e.sheet == '第一年' else e
             for e in mapping.entries
         )

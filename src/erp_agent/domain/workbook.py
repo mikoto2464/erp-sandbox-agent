@@ -62,6 +62,18 @@ def output_sources(
                 item.unit,
             )
         )
+    if solution.plan.preparation:
+        result.extend(
+            OutputSource(
+                f"calculation:{record.id}",
+                record.formula + " · 工具计算情景值",
+                record.value,
+                True,
+                record.period,
+                record.unit,
+            )
+            for record in solution.plan.preparation.calculations
+        )
     if snapshot:
         for fact in snapshot.reading.problem.facts:
             if fact.state == KnowledgeState.KNOWN and fact.value is not None:

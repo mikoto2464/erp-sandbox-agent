@@ -15,6 +15,8 @@ from erp_agent.domain.models import Plan, SolutionBundle
 def plan_hash(plan: Plan) -> str:
     material = obj(to_json(plan))
     material.pop("budget_items", None)
+    if material.get("preparation") is None:
+        material.pop("preparation", None)
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()

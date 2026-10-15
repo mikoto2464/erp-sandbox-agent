@@ -186,6 +186,7 @@ class PlanBudgetPlanner:
                 for s in sources
                 if any(s.id.startswith(f"action:{aid}:") for aid in action_ids)
                 or s.id.removeprefix("fact:") in related_ids
+                or s.id in {"calculation:" + r["id"] for r in payload.get("calculations", [])}
             )
             payload["sources"] = [
                 {

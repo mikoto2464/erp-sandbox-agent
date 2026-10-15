@@ -1,6 +1,10 @@
-from dataclasses import dataclass
+from __future__ import annotations
 
-from erp_agent.domain.models import BudgetItem
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from erp_agent.domain.models import BudgetItem
 
 
 @dataclass(frozen=True)
