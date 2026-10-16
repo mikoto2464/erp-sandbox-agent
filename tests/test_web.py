@@ -172,7 +172,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(done['status'], 'succeeded')
         first = self.request(base + '/solutions')[0]
         payload = loads(next(call.user for call in reversed(self.llm.calls) if call.schema_name == 'erp_planning_decisions'))
-        self.assertEqual(payload['context']['template_requirements'][0]['template_id'], template['source']['id'])
+        self.assertTrue(payload['context']['template_requirements']['sheets'][0]['id'].startswith(template['source']['id'] + ':'))
         self.assertNotIn('budget_templates', payload)
         self.assertIn('保守', payload['planning_policy']['tone_instruction'])
         self.assertNotIn('previous_plan_summary', payload)

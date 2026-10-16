@@ -1,4 +1,5 @@
 import time
+from contextvars import ContextVar
 from dataclasses import replace
 
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_random_exponential
@@ -9,9 +10,31 @@ from erp_agent.application.task_reporting import report_task
 from erp_agent.domain.errors import ERPError, ModelOutputTruncated
 
 TRANSIENT_ERRORS = {"llm_gateway_timeout", "llm_unavailable", "llm_timeout", "llm_connection"}
+_tool_recovery: ContextVar[dict[str, object] | None] = ContextVar("erp_tool_recovery", default=None)
+
+
+def current_tool_recovery() -> dict[str, object] | None:
+    """仅在一次有限重试内保留工具对话，任务/线程/修正请求之间不共享。"""
+    return _tool_recovery.get()
+
+
+def _tools_have_room() -> bool:
+    return all(getattr(state, "can_retry", True) for state in (_tool_recovery.get() or {}).values())
+
+
+def _can_retry(error: Exception) -> bool:
+    return isinstance(error, ERPError) and error.code in TRANSIENT_ERRORS and _tools_have_room()
 
 
 def recovery_call(client: LLMClient, request: LLMRequest, control: RunControl) -> LLMResponse:
+    token = _tool_recovery.set({})
+    try:
+        return _recovery_call(client, request, control)
+    finally:
+        _tool_recovery.reset(token)
+
+
+def _recovery_call(client: LLMClient, request: LLMRequest, control: RunControl) -> LLMResponse:
     task = request.task or getattr(client, "task", None)
     configured = client
     for _ in range(5):
@@ -51,7 +74,7 @@ def recovery_call(client: LLMClient, request: LLMRequest, control: RunControl) -
     retry = Retrying(
         stop=stop_after_attempt(2),
         wait=wait_random_exponential(multiplier=1, min=1, max=3),
-        retry=retry_if_exception(lambda e: isinstance(e, ERPError) and e.code in TRANSIENT_ERRORS),
+        retry=retry_if_exception(_can_retry),
         sleep=pause,
         reraise=True,
     )
@@ -91,11 +114,13 @@ def recovery_call(client: LLMClient, request: LLMRequest, control: RunControl) -
                     break
                 scheduled = wrapped
             models = getattr(scheduled, "models", ())
-            if error.code not in TRANSIENT_ERRORS or len(models) < 2:
+            if not _can_retry(error) or len(models) < 2:
                 raise
             # 同任务最多切换一次，仍使用共同调用/时间边界。
             return generate(request)
     except ModelOutputTruncated as error:
+        if not _tools_have_room():
+            raise
         expanded = min(
             error.configured_limit,
             max(

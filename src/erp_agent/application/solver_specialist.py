@@ -176,16 +176,18 @@ def decode_specialist(
                 string(value)
         allowed = {"fact": facts, "rule": rules, "action": identifiers, "gap": gaps}
         kind = string(condition.get("kind"))
-        if kind != "always" and (
+        if kind not in {"always", "scenario"} and (
             kind not in allowed or condition.get("reference_id") not in allowed[kind]
         ):
             raise ERPError("solver_source", "条件引用无效。")
         operator = condition.get("operator")
         if operator not in OPERATORS or (
-            kind == "always"
+            kind in {"always", "scenario"}
             and any(condition.get(key) for key in ("reference_id", "operator", "value"))
         ):
             raise ERPError("solver_source", "条件结构无效。")
+        if kind == "scenario" and not string(condition.get("explanation")).strip():
+            raise ERPError("solver_source", "情景条件须说明未验证的执行前提。")
 
     def validate_refs(entry: JSONObject, key: str, allowed: set[str]) -> None:
         for identifier in strings(entry.get(key, [])):

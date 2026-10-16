@@ -81,9 +81,7 @@ def canonical_references(
     return tuple(fact_ids), tuple(rule_ids), tuple(gap_ids)
 
 
-def normalize_action(
-    action: Action, facts: set[str], rules: set[str], gaps: set[str]
-) -> Action:
+def normalize_action(action: Action, facts: set[str], rules: set[str], gaps: set[str]) -> Action:
     """归位跨类别引用并补全缺失说明，让结构校验不被 LLM 的类别误填打断。"""
     if action.schema_version != "2":
         return action
@@ -157,7 +155,8 @@ def validate_cash_flow(snapshot: ProblemSnapshot, plan: Plan) -> tuple[Issue, ..
         if action.amount_meaning in CASH_OUTFLOW:
             net[timing] -= action.amount
             outflows[timing].append(action.action_id)
-        else:
+        elif action.condition.kind != "scenario":
+            # 尚未成立的情景收款/融资不能填平确定支出；情景付款仍保守预留。
             net[timing] += action.amount
     balance = initial
     for period in range(1, horizon + 1):
@@ -372,8 +371,23 @@ def validate_actions(
                 pending.extend(previous.depends_on)
         condition = action.condition
         allowed = {"fact": facts, "rule": rules, "action": actions, "gap": gaps}
-        if condition.operator not in OPERATORS or condition.kind not in {"always", *allowed}:
+        if condition.operator not in OPERATORS or condition.kind not in {
+            "always",
+            "scenario",
+            *allowed,
+        }:
             error("condition", index, "condition", "条件类型或运算符无效。")
+        elif condition.kind == "scenario":
+            if not condition.explanation.strip() or any(
+                value is not None
+                for value in (condition.reference_id, condition.operator, condition.value)
+            ):
+                error(
+                    "condition",
+                    index,
+                    "condition",
+                    "情景条件须有非空执行前提说明，引用、运算符和值须为空。",
+                )
         elif condition.kind != "always" and condition.reference_id not in allowed[condition.kind]:
             error("condition", index, "condition.reference_id", "条件引用未知对象。")
         elif condition.kind == "always" and any(

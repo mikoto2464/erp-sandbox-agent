@@ -322,7 +322,7 @@ def decode_action(value: JSONValue, *, legacy_index: int | None = None) -> Actio
     amount_meaning = string(data["amount_meaning"])
     if amount_meaning not in AMOUNT_MEANINGS:
         raise ERPError("invalid_action_amount", "行动金额含义无效。")
-    if string(condition["kind"]) not in {"always", "fact", "action", "rule", "gap"}:
+    if string(condition["kind"]) not in {"always", "scenario", "fact", "action", "rule", "gap"}:
         raise ERPError("invalid_action_condition", "行动条件类型无效。")
     return Action(
         integer(data["period"]),
@@ -527,7 +527,7 @@ AMOUNT_MEANINGS = (
 )
 CONDITION_SCHEMA = object_schema(
     {
-        "kind": {"type": "string", "enum": ["always", "fact", "action", "rule", "gap"]},
+        "kind": {"type": "string", "enum": ["always", "scenario", "fact", "action", "rule", "gap"]},
         "reference_id": NULLABLE_TEXT,
         "operator": NULLABLE_TEXT,
         "value": NULLABLE_TEXT,
