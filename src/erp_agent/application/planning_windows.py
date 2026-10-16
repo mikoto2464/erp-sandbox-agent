@@ -22,6 +22,7 @@ from erp_agent.application.contracts import (
     strings,
     to_json,
 )
+from erp_agent.application.human_resolution import PlanningProblem
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.planning_context import PlanningKnowledge
 from erp_agent.application.planning_decisions import compile_decisions, decision_schema
@@ -44,6 +45,7 @@ from erp_agent.domain.action_validation import CASH_OUTFLOW, validate_actions
 from erp_agent.domain.calculations import CalculationRecord
 from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import Plan, ProblemSnapshot
+from erp_agent.domain.money import money_value
 
 Unit = tuple[TaskContext, LLMRequest]
 
@@ -197,6 +199,7 @@ def generate_windows(
     execute: Callable[[Unit], LLMResponse],
     control: RunControl,
     budget_calls: int,
+    unit_choices: dict[str, str] | None = None,
 ) -> WindowResult:
     from erp_agent.application.solver import DraftPlanEvaluator
     from erp_agent.application.solver_period_output import check_planning_content
@@ -305,6 +308,9 @@ def generate_windows(
                         or not string(limit["cash_unit"]).strip()
                     ):
                         raise ERPError("planning.route", "分段支出限额须非负并带单位。")
+                    money_value(
+                        decimal(limit["cash_outflow_limit"]), limit["cash_unit"], limit["cash_unit"]
+                    )
             shared = {str(p): [] for p in range(1, horizon + 1)}
             values = array(route["shared_actions"])
             if len(values) > 24:
@@ -351,8 +357,10 @@ def generate_windows(
                     else error.message
                 )
                 report_task(control, route_task, "failed", error=message)
-                raise ERPError(
-                    "planning.route" if isinstance(error, KeyError) else error.code, message
+                raise PlanningProblem(
+                    "planning.route" if isinstance(error, KeyError) else error.code,
+                    message,
+                    route_task.id,
                 ) from error
             evidence = knowledge.reference_batch(
                 tuple(ref for ref in route_references(route) if ref in allowed and ref not in refs)
@@ -533,6 +541,23 @@ def generate_windows(
             plan = compile_decisions(
                 data, snapshot, knowledge.hash, tuple(calculations.values()), refs
             )
+            if unit_choices:
+                notes = tuple(
+                    f"用户确认金额单位：{a.action_id} 的 {a.amount} {a.amount_unit} "
+                    f"按 {unit_choices[a.action_id]} 理解，数值不变。"
+                    for a in plan.actions
+                    if a.action_id in unit_choices
+                )
+                plan = replace(
+                    plan,
+                    actions=tuple(
+                        replace(a, amount_unit=unit_choices[a.action_id])
+                        if a.action_id in unit_choices
+                        else a
+                        for a in plan.actions
+                    ),
+                    assumptions=tuple(dict.fromkeys(plan.assumptions + notes)),
+                )
             check_planning_content(plan)
             issues = tuple(
                 i
@@ -562,12 +587,51 @@ def generate_windows(
                     and a.amount_meaning in CASH_OUTFLOW
                     and a.amount is not None
                 ]
-                if any(a.amount_unit != limit["cash_unit"] for a in payments):
+                converted, invalid = [], []
+                for action in payments:
+                    try:
+                        converted.append(
+                            money_value(action.amount, action.amount_unit, limit["cash_unit"])
+                        )
+                    except ERPError:
+                        invalid.append(
+                            {
+                                "action_id": action.action_id,
+                                "period": action.period,
+                                "description": action.description[:160],
+                                "amount": str(action.amount),
+                                "unit": action.amount_unit,
+                            }
+                        )
+                if invalid:
+                    calculated = {
+                        f"a-{knowledge.hash[:10]}-{action['key']}"
+                        for actions in data["periods"].values()
+                        for action in actions
+                        if action.get("amount_calculation_id")
+                    }
                     owner = index
-                    raise ERPError(
-                        "planning.cash_limit", f"分段{index + 1}现金单位不一致，不能绕过限额。"
+                    raise PlanningProblem(
+                        "planning.cash_unit",
+                        f"分段{index + 1}现金单位无法换算为“{limit['cash_unit']}”："
+                        + "；".join(
+                            f"{a['action_id']}：{a['amount']} {a['unit']}" for a in invalid
+                        ),
+                        units[index][0].id,
+                        {
+                            "cash_unit": limit["cash_unit"],
+                            "cash_limit": limit["cash_outflow_limit"],
+                            "actions": invalid[:24],
+                            "affected_count": len(invalid),
+                            "unit_editable": not any(
+                                a["action_id"].startswith(f"a-{knowledge.hash[:10]}-shared-")
+                                or a["action_id"] in calculated
+                                for a in invalid
+                            )
+                            and len(invalid) <= 24,
+                        },
                     )
-                if sum(a.amount for a in payments) > decimal(limit["cash_outflow_limit"]):
+                if sum(converted) > decimal(limit["cash_outflow_limit"]):
                     owner = index
                     raise ERPError(
                         "planning.cash_limit", f"分段{index + 1}现金支出超过冻结路线限额。"
@@ -595,8 +659,13 @@ def generate_windows(
                     "failed",
                     error=str(error),
                 )
-                raise ERPError(
-                    "planning.window_validation", "分段合并校验失败：" + str(error)
+                raise PlanningProblem(
+                    error.code
+                    if isinstance(error, PlanningProblem)
+                    else "planning.window_validation",
+                    "分段合并校验失败：" + str(error),
+                    units[owner][0].id if owner is not None else base[0].id,
+                    error.details if isinstance(error, PlanningProblem) else None,
                 ) from error
             repaired.add(owner)
             task, request = units[owner]

@@ -121,6 +121,8 @@ export const stageNames: Record<string, string> = {
   saving: '保存结果',
   done: '已完成',
   cancelling: '等待取消',
+  awaiting_resolution: '等待选择处理方案',
+  resuming: '继续处理方案',
 };
 
 export const actionKindNames: Record<string, string> = {

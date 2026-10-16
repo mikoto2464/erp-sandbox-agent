@@ -5,7 +5,15 @@ import AppModal from './AppModal.vue';
 import { useWorkspaceContext } from '../composables/context';
 import { statusNames, stageNames } from '../lib/labels';
 import { readingProgress } from '../lib/tasks';
-const { taskOpen, allJobs: jobs, run, cancelJob, retryJob, operations } = useWorkspaceContext();
+const {
+  taskOpen,
+  allJobs: jobs,
+  run,
+  cancelJob,
+  retryJob,
+  operations,
+  openResolution,
+} = useWorkspaceContext();
 const expanded = ref(new Set<string>());
 const difficultyNames: Record<string, string> = {
   simple: '简单',
@@ -141,6 +149,13 @@ function duration(task: AgentTask) {
           子任务已结束，{{ stageNames[job.stage] || job.stage }}。
         </p>
       </div>
+      <button
+        v-if="job.intervention"
+        class="primary"
+        @click="openResolution(job)"
+      >
+        处理问题
+      </button>
       <button
         v-if="['running', 'queued'].includes(job.status)"
         class="review-action"

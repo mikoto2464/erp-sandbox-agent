@@ -189,11 +189,13 @@ class Handler(BaseHTTPRequestHandler):
             elif len(parts) == 3 and ID.fullmatch(parts[2]) and method == "GET":
                 self._json(workflow.application_job(parts[2]))
             elif len(parts) == 4 and ID.fullmatch(parts[2]) and method == "POST":
-                self._body_json()
+                body = self._body_json()
                 if parts[3] == "cancel":
                     self._json(workflow.cancel_application_job(parts[2]))
                 elif parts[3] == "retry":
                     self._json(workflow.retry_application_job(parts[2]), 202)
+                elif parts[3] == "answer":
+                    self._json(workflow.answer_application_job(parts[2], body), 202)
                 else:
                     raise ERPError("not_found", "接口不存在。", 404)
             else:

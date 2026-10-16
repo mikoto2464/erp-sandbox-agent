@@ -1,7 +1,9 @@
 from dataclasses import fields, is_dataclass, replace
 from decimal import Decimal, InvalidOperation
 
+from erp_agent.domain.errors import ERPError
 from erp_agent.domain.models import Action, ActionKind, Issue, KnowledgeState, Plan, ProblemSnapshot
+from erp_agent.domain.money import money_value
 
 OPERATORS = {None, "eq", "ne", "gt", "gte", "lt", "lte", "exists", "completed"}
 CASH_INFLOW = {"financing_principal", "receipt"}
@@ -131,10 +133,11 @@ def validate_cash_flow(snapshot: ProblemSnapshot, plan: Plan) -> tuple[Issue, ..
             continue
         if initial is None:
             initial, unit = value, fact.unit
-        elif fact.unit == unit:
-            initial += value
         else:
-            return ()
+            try:
+                initial += money_value(value, fact.unit, unit)
+            except ERPError:
+                return ()
     if initial is None:
         return ()
     net: dict[int, Decimal] = {period: Decimal(0) for period in range(1, horizon + 1)}
@@ -145,19 +148,21 @@ def validate_cash_flow(snapshot: ProblemSnapshot, plan: Plan) -> tuple[Issue, ..
             continue
         if action.amount_meaning not in meanings:
             continue
-        if action.amount_unit and action.amount_unit != unit:
-            continue
         if not action.amount.is_finite() or action.amount < 0:
+            continue
+        try:
+            amount = money_value(action.amount, action.amount_unit, unit)
+        except ERPError:
             continue
         timing = action.payment_period if action.payment_period is not None else action.period
         if not 1 <= timing <= horizon:
             continue
         if action.amount_meaning in CASH_OUTFLOW:
-            net[timing] -= action.amount
+            net[timing] -= amount
             outflows[timing].append(action.action_id)
         elif action.condition.kind != "scenario":
             # 尚未成立的情景收款/融资不能填平确定支出；情景付款仍保守预留。
-            net[timing] += action.amount
+            net[timing] += amount
     balance = initial
     for period in range(1, horizon + 1):
         balance += net[period]

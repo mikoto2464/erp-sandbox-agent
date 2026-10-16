@@ -11,6 +11,8 @@
 - references 只放当前事实/规则/缺口 ID；计算用 calculation_ids 或金额/数量对应 calculation_id。不要复制不相关的来源 ID。
 
 计算契约：
+- 现金 amount_unit / cash_unit 只写金额单位：人民币优先“元”；“万元”表示数值乘10000元。不得把元/月、元/季、RMB元、万、含税金额说明写进现金单位。
+- 单价/每月费用属于计算输入单位，先按明确数量或月数计算总额，再把结果金额及“元”绑定行动；支付频率写 description/payment_period。未知单位保持未知并说明，不把单位标签改掉来省略倍率。
 - calculation_results 是上游已执行结果（含值、单位、期间、公式、输入、来源与情景），可以复用。
 - 未附内容的计算按 planning_lookup(kind=calculations, ids=[...]) 查询；参数名严格使用工具 formula 签名，公式口径按需通过 kind=formulas 查询。
 - 优先 erp_calculate_batch，每批最多24项，依赖项在前，可连续多批；只重试失败项。单轮最多16个工具调用。

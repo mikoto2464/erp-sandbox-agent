@@ -7,6 +7,7 @@ import AppModal from './components/AppModal.vue';
 import AppSelect from './components/AppSelect.vue';
 import ToastHost from './components/ToastHost.vue';
 import TaskDrawer from './components/TaskDrawer.vue';
+import JobResolution from './components/JobResolution.vue';
 import ModelSettings from './components/ModelSettings.vue';
 import type { Project } from './lib/types';
 const router = useRouter(),
@@ -213,7 +214,7 @@ onBeforeUnmount(workspace.dispose);
         />
       </RouterView>
     </main>
-    <ModelSettings ref="settings" /><TaskDrawer />
+    <ModelSettings ref="settings" /><TaskDrawer /><JobResolution />
   </div>
   <AppModal
     :open="creating"

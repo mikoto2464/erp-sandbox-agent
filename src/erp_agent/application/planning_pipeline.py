@@ -1,8 +1,10 @@
-"""Solver v18：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
+"""Solver v19：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
+from threading import RLock
+from uuid import uuid4
 
 from erp_agent.application.contracts import (
     TEXT,
@@ -17,6 +19,7 @@ from erp_agent.application.contracts import (
     strings,
     to_json,
 )
+from erp_agent.application.human_resolution import PlanningProblem
 from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.planning_analysis import validate_analysis
@@ -50,7 +53,7 @@ from erp_agent.domain.models import (
 from erp_agent.domain.planning import PlanPreparation
 from erp_agent.domain.reporting import ReportNote, ReportOutline
 
-PLANNING_VERSION = "solver-18"
+PLANNING_VERSION = "solver-19"
 DEFAULT_CONTEXT = PlanningContext()
 ANALYSIS_SCHEMA = object_schema(
     {
@@ -104,8 +107,107 @@ class ParallelPlanningGenerator:
         documents: tuple[ParsedDocument, ...] = (),
     ) -> None:
         self.llm, self.control, self.memory, self.documents = llm, control, memory, documents
+        self._responses: dict[str, tuple[str, LLMResponse]] = {}
+        self._response_lock = RLock()
+        self._guidance: dict[str, str] = {}
+        self._unit_choices: dict[str, str] = {}
+        self._pending: JSONObject | None = None
+        self._failed_task = "solver:synthesis"
 
     def propose(
+        self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_CONTEXT
+    ) -> StrategyProposal:
+        ask = getattr(self.control, "request_resolution", None)
+        while True:
+            if self._pending is not None:
+                question = self._pending
+                answer = ask(question)
+                task_id = question["task_id"]
+                if answer["option"] == "use_unit":
+                    for action in question["details"]["actions"]:
+                        self._unit_choices[action["action_id"]] = question["details"]["cash_unit"]
+                elif answer["option"] == "retry":
+                    self._guidance[task_id] = (
+                        "用户要求修正本任务："
+                        + answer.get("text", "")
+                        + "；当前诊断："
+                        + question["message"]
+                    )
+                    with self._response_lock:
+                        self._responses = {
+                            k: v for k, v in self._responses.items() if v[0] != task_id
+                        }
+                else:
+                    raise ERPError("planning.resolution", "不支持的人工处理选项。")
+                self._pending = None
+            try:
+                return self._propose(snapshot, context)
+            except ERPError as error:
+                if not callable(ask) or not (
+                    error.code.startswith(("planning.", "llm_"))
+                    or error.code
+                    in {
+                        "task_call_limit",
+                        "task_deadline",
+                        "llm_input_limit",
+                        "llm_structured_response",
+                        "money.unit",
+                    }
+                ):
+                    raise
+                from erp_agent.application.task_budget import task_budget
+
+                task_id = error.task_id if isinstance(error, PlanningProblem) else self._failed_task
+                budget = task_budget(self.control, TaskContext(task_id, "Solver", "", ""))
+                details = error.details if isinstance(error, PlanningProblem) else {}
+                options = []
+                if details.get("unit_editable"):
+                    options.append(
+                        {
+                            "id": "use_unit",
+                            "label": f"确认列表金额均以{details['cash_unit']}计量",
+                            "description": "保留数值，按确认的单位解释，再校验现金和限额。",
+                        }
+                    )
+                if budget.calls < budget.max_calls and error.code not in {
+                    "task_deadline",
+                    "planning.context",
+                    "llm_tools_unsupported",
+                    "llm_not_configured",
+                }:
+                    options.append(
+                        {
+                            "id": "retry",
+                            "label": "按修正说明继续",
+                            "description": "仅重新请求问题任务，复用其它结果，仍使用当前调用额度。",
+                        }
+                    )
+                else:
+                    options.append(
+                        {
+                            "id": "restart",
+                            "label": "重新开始生成任务",
+                            "description": "使用新任务额度，复用已校验分析的成功缓存。",
+                        }
+                    )
+                options.append(
+                    {
+                        "id": "cancel",
+                        "label": "取消本次生成",
+                        "description": "保留历史方案，结束此任务。",
+                    }
+                )
+                self._pending = {
+                    "id": uuid4().hex,
+                    "task_id": task_id,
+                    "title": "方案生成需要你的处理",
+                    "code": error.code,
+                    "message": error.message[:5000],
+                    "details": details,
+                    "options": options,
+                }
+
+    def _propose(
         self, snapshot: ProblemSnapshot, context: PlanningContext = DEFAULT_CONTEXT
     ) -> StrategyProposal:
         from erp_agent.application.solver import DraftPlanEvaluator
@@ -199,6 +301,14 @@ class ParallelPlanningGenerator:
 
         def execute(unit: tuple[TaskContext, LLMRequest]) -> LLMResponse:
             task, request = unit
+            if task.id in self._guidance:
+                request = replace(
+                    request,
+                    user=dumps(
+                        {**obj(loads(request.user)), "human_guidance": self._guidance[task.id]}
+                    ),
+                )
+                unit = (task, request)
             supplied = provided_references(obj(loads(request.user)))
             # 初始资料及本任务前次实际访问可继承，不继承其它角色的裸已读标记。
             request = replace(
@@ -213,7 +323,12 @@ class ParallelPlanningGenerator:
             )
             report_task(self.control, task, "queued", context_hash=knowledge.hash)
             # 缓存键对应调用者的稳定请求，运行时已读登记不改变缓存身份。
-            key = "planning-18:" + context_digest({"request": unit[1]})
+            key = "planning-19:" + context_digest({"request": unit[1]})
+            with self._response_lock:
+                previous_response = self._responses.get(key)
+            if previous_response:
+                report_task(self.control, task, "cached", context_hash=knowledge.hash)
+                return previous_response[1]
             saved = self.memory.get(key) if self.memory else None
             if saved and saved.get("context_hash") == knowledge.hash:
                 from erp_agent.application.planning_codec import decode_calculation
@@ -238,7 +353,7 @@ class ParallelPlanningGenerator:
                     response = LLMResponse(
                         dumps({"context_hash": knowledge.hash, "invalid_output": error.message}), ""
                     )
-                return replace(
+                response = replace(
                     response,
                     accessed_reference_ids=tuple(
                         sorted(
@@ -248,7 +363,11 @@ class ParallelPlanningGenerator:
                         )
                     ),
                 )
+                with self._response_lock:
+                    self._responses[key] = (task.id, response)
+                return response
             except ERPError as error:
+                self._failed_task = task.id
                 report_task(self.control, task, "failed", error=error.message)
                 raise
 
@@ -258,9 +377,19 @@ class ParallelPlanningGenerator:
         allowed |= {f"{i.code}:{i.target}" for i in snapshot.reading.issues}
 
         def cache_validated(unit: tuple[TaskContext, LLMRequest], result: LLMResponse) -> None:
+            task, request = unit
+            if self._unit_choices and task.id not in {"solver:operations", "solver:finance"}:
+                return
+            if task.id in self._guidance:
+                request = replace(
+                    request,
+                    user=dumps(
+                        {**obj(loads(request.user)), "human_guidance": self._guidance[task.id]}
+                    ),
+                )
             if self.memory:
                 self.memory.put(
-                    "planning-18:" + context_digest({"request": unit[1]}),
+                    "planning-19:" + context_digest({"request": request}),
                     {
                         "content": result.content,
                         "model": result.model,
@@ -323,7 +452,7 @@ class ParallelPlanningGenerator:
                             else error.message
                         )
                         report_task(self.control, task, "failed", error=message)
-                        raise ERPError(error.code, message) from error
+                        raise PlanningProblem(error.code, message, task.id) from error
                     material = knowledge.project(
                         "operations" if task.id.endswith("operations") else "finance",
                         references=requested_references(data),
@@ -381,7 +510,14 @@ class ParallelPlanningGenerator:
             from erp_agent.application.planning_windows import generate_windows
 
             result = generate_windows(
-                snapshot, knowledge, synthesis, calculations, execute, self.control, budget_calls
+                snapshot,
+                knowledge,
+                synthesis,
+                calculations,
+                execute,
+                self.control,
+                budget_calls,
+                self._unit_choices,
             )
             plan, response = result.plan, result.response
             data = obj(loads(response.content))

@@ -26,12 +26,13 @@ class SQLiteRepository:
                 project_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
                 PRIMARY KEY(project_id, kind, id))""")
             for record in self.list_all("job"):
-                if record.get("status") in {"running", "queued"}:
+                if record.get("status") in {"running", "queued"} or record.get("intervention"):
                     record["status"] = "failed"
                     record["error"] = {
                         "code": "server_restarted",
                         "message": "服务重启，请重试任务。",
                     }
+                    record.pop("intervention", None)
                     tasks = record.get("tasks", [])
                     if isinstance(tasks, list):
                         for task in tasks:
@@ -39,6 +40,7 @@ class SQLiteRepository:
                                 "queued",
                                 "waiting",
                                 "running",
+                                "needs_input",
                             }:
                                 task.update(status="failed", error="服务重启，请重试任务。")
                     connection.execute(

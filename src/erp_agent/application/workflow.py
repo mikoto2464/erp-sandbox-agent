@@ -119,6 +119,28 @@ class WorkflowService:
     def cancel_application_job(self, job_id: str) -> JSONObject:
         return self.application_tasks.cancel(job_id)
 
+    def answer_application_job(self, job_id: str, data: JSONObject) -> JSONObject:
+        with self._solve_lock:
+            job = self.application_tasks.get(job_id)
+            if job.get("kind") != "solve" or not job.get("intervention"):
+                raise ERPError("resolution_stale", "此任务当前没有待处理的方案问题。", 409)
+            project_id = string(job["project_id"])
+            if data.get("option") != "cancel":
+                snapshot = self.problem(project_id, integer(obj(job["metadata"])["version"]))
+                if (
+                    snapshot.version != self.repository.versions(project_id)[0]
+                    or snapshot.inputs.revision != self.inputs(project_id).revision
+                ):
+                    raise ERPError(
+                        "resolution_context_changed",
+                        "题目已变化，请取消此任务并按当前题目重新生成。",
+                        409,
+                    )
+            result = self.jobs.answer(project_id, job_id, data)
+            if data.get("option") == "restart":
+                return self.retry_application_job(job_id)
+            return result
+
     def retry_application_job(self, job_id: str) -> JSONObject:
         job = self.application_tasks.get(job_id)
         if job["status"] not in {"failed", "cancelled"}:
@@ -378,11 +400,13 @@ class WorkflowService:
                 if (
                     kind == "document"
                     and job.get("kind") == "solve"
-                    and job.get("status") in {"queued", "running"}
+                    and (job.get("status") in {"queued", "running"} or job.get("intervention"))
                 ):
                     snapshot = self.repository.snapshot(project_id, integer(metadata["version"]))
                     references += array(snapshot.get("document_ids", []))
-                if upload_id in references and job.get("status") in {"queued", "running"}:
+                if upload_id in references and (
+                    job.get("status") in {"queued", "running"} or job.get("intervention")
+                ):
                     self.jobs.cancel(project_id, string(job["id"]))
             return self.repository.delete_upload(project_id, kind, upload_id)
 
@@ -723,7 +747,11 @@ class WorkflowService:
         if snapshot.version != self.repository.versions(project_id)[0]:
             raise ERPError("problem_version_changed", "题目已有更新，请刷新后按当前题目生成。", 409)
         if any(
-            obj(job).get("kind") == "solve" and obj(job).get("status") in {"running", "queued"}
+            obj(job).get("kind") == "solve"
+            and (
+                obj(job).get("status") in {"running", "queued"}
+                or bool(obj(job).get("intervention"))
+            )
             for job in self.repository.list("job", project_id)
         ):
             raise ERPError("solve_in_progress", "当前项目正在生成方案，请等待完成。", 409)
@@ -786,7 +814,10 @@ class WorkflowService:
         if binding and not binding.client.configured:
             raise ERPError("llm_not_configured", "当前模型预设未配置完成。", 503)
 
+        planning_generator = None
+
         def operation(control: RunControl) -> JSONValue:
+            nonlocal planning_generator
             generator = self.solver.generator
             role_memory = None
             if binding or isinstance(generator, LLMStrategyGenerator):
@@ -804,7 +835,7 @@ class WorkflowService:
                             dumps(
                                 {
                                     "config": config,
-                                    "version": "solver-18",
+                                    "version": "solver-19",
                                     "model": binding.metadata() if binding else None,
                                 }
                             ).encode()
@@ -812,14 +843,18 @@ class WorkflowService:
                         snapshot.document_ids,
                     )
                     role_memory.put("requirements", {"generation": to_json(config)})
-                    # Solver v17 只使用冻结快照的职责投影/只读查询，不自动注入记忆检索文本。
+                    # 只使用冻结快照的职责投影/只读查询，不自动注入记忆检索文本。
                 from erp_agent.application.planning_pipeline import ParallelPlanningGenerator
 
                 documents = tuple(
                     parsed_document(self.repository.get("document", project_id, document_id))
                     for document_id in snapshot.document_ids
                 )
-                generator = ParallelPlanningGenerator(client, control, role_memory, documents)
+                if planning_generator is None:
+                    planning_generator = ParallelPlanningGenerator(
+                        client, control, role_memory, documents
+                    )
+                generator = planning_generator
             result = self.solver.solve(request, control, generator)
             report_task(
                 control,
@@ -860,7 +895,7 @@ class WorkflowService:
                 "mode": mode.value,
                 "version": snapshot.version,
                 "generation": to_json(config),
-                "prompt_version": "solver-18",
+                "prompt_version": "solver-19",
                 "model_preset": binding.metadata() if binding else None,
             },
         )

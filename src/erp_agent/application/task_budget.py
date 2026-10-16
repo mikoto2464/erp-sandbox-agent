@@ -193,6 +193,16 @@ def allocate_child_budgets(
         return result
 
 
+def exclude_human_wait(control: RunControl, seconds: float) -> None:
+    """人工等待不占模型执行时限；调用次数和已消耗执行时间保持。"""
+    with _lock:
+        registry = _registries.get(control)
+        if registry:
+            for budget in set(registry.tasks.values()):
+                with budget.lock:
+                    budget.deadline += max(0, seconds)
+
+
 @contextmanager
 def model_call(budget: TaskCallBudget):
     nested = _active.get() is budget

@@ -46,6 +46,7 @@ export function useWorkspace(router: Router) {
   const inputsDirty = ref(false),
     readingDirty = ref(false),
     taskOpen = ref(false),
+    resolutionJobId = ref<string | null>(null),
     pendingNavigation = ref<null | (() => void)>(null);
   const planTone = ref<PlanTone>('balanced'),
     customPrompt = ref(''),
@@ -121,7 +122,10 @@ export function useWorkspace(router: Router) {
     jobs.value.some((job) => job.kind === 'read' && ['queued', 'running'].includes(job.status)),
   );
   const activeSolve = computed(() =>
-    jobs.value.some((job) => job.kind === 'solve' && ['queued', 'running'].includes(job.status)),
+    jobs.value.some(
+      (job) =>
+        job.kind === 'solve' && (['queued', 'running'].includes(job.status) || !!job.intervention),
+    ),
   );
   const inputChanged = computed(
     () =>
@@ -389,6 +393,13 @@ export function useWorkspace(router: Router) {
     await post(`/api/jobs/${job.id}/cancel`, {});
     await refresh();
   }
+  function openResolution(job: Job) {
+    resolutionJobId.value = job.id;
+  }
+  async function answerJob(job: Job, questionId: string, option: string, text: string) {
+    await post(`/api/jobs/${job.id}/answer`, { question_id: questionId, option, text });
+    await refresh();
+  }
   async function analyzeTemplate(templateId: string) {
     if (!currentSolution.value) throw new Error('请先生成方案。');
     await post(base() + '/mappings', {
@@ -422,6 +433,15 @@ export function useWorkspace(router: Router) {
     await refresh();
   }
   function notifyJob(job: Job) {
+    if (job.intervention) {
+      notifications.notify(
+        `${job.scope_name || '项目'} · 方案生成等待你的处理。`,
+        'info',
+        () => openResolution(job),
+        '处理问题',
+      );
+      return;
+    }
     const library = job.project_id === 'template-library';
     const targetId = job.project_id;
     const targetStep =
@@ -684,6 +704,9 @@ export function useWorkspace(router: Router) {
     inputsDirty,
     readingDirty,
     taskOpen,
+    resolutionJobId,
+    openResolution,
+    answerJob,
     pendingNavigation,
     planTone,
     customPrompt,

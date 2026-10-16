@@ -17,4 +17,4 @@ class PlanPreparation:
     completed_sheets: tuple[tuple[str, str], ...] = ()
     failed_sheets: tuple[tuple[str, str, str], ...] = ()
     snapshot_hash: str = ""
-    version: str = "solver-18"
+    version: str = "solver-19"

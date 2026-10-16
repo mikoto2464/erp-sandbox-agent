@@ -284,6 +284,25 @@ export interface AgentTask {
   finished_at?: string;
 }
 export interface Job {
+  intervention?: {
+    id: string;
+    task_id: string;
+    title: string;
+    message: string;
+    code: string;
+    details: {
+      cash_unit?: string;
+      cash_limit?: string;
+      actions?: {
+        action_id: string;
+        period: number;
+        description: string;
+        amount: string;
+        unit: string;
+      }[];
+    };
+    options: { id: string; label: string; description: string }[];
+  };
   project_id?: string;
   scope_name?: string;
   created_at?: string;
