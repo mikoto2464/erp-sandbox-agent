@@ -10,6 +10,16 @@ def planning_prompt(stage: str) -> str:
     parts = [root.joinpath("planning.txt").read_text(encoding="utf-8")]
     parts.append(root.joinpath("planning_platform.txt").read_text(encoding="utf-8"))
     parts.append(root.joinpath(f"planning_{stage}.txt").read_text(encoding="utf-8"))
+    platform_stage = {
+        "operations": "operations",
+        "finance": "finance",
+        "window": "execution",
+        "synthesis": "execution",
+    }.get(stage)
+    if platform_stage:
+        parts.append(
+            root.joinpath(f"planning_platform_{platform_stage}.txt").read_text(encoding="utf-8")
+        )
     if stage in {"route", "window", "synthesis"}:
         parts.append(root.joinpath("planning_decisions.txt").read_text(encoding="utf-8"))
     return "\n\n".join(parts)

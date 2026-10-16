@@ -1,4 +1,4 @@
-"""Solver v20：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
+"""Solver v21：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -53,7 +53,7 @@ from erp_agent.domain.models import (
 from erp_agent.domain.planning import PlanPreparation
 from erp_agent.domain.reporting import ReportNote, ReportOutline
 
-PLANNING_VERSION = "solver-20"
+PLANNING_VERSION = "solver-21"
 DEFAULT_CONTEXT = PlanningContext()
 ANALYSIS_SCHEMA = object_schema(
     {

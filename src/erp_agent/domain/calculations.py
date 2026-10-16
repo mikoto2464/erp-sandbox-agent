@@ -6,6 +6,8 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, localcon
 
 from erp_agent.domain.errors import ERPError
 
+FORMULA_VERSION = "erp-formulas-2"
+
 
 @dataclass(frozen=True)
 class CalculationRecord:
@@ -20,7 +22,7 @@ class CalculationRecord:
     context_hash: str
     operands: tuple[tuple[str, str, str, str], ...] = ()
     period: int | None = None
-    version: str = "erp-formulas-1"
+    version: str = FORMULA_VERSION
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,19 @@ def _depreciation(p: dict[str, Decimal]) -> Decimal:
     return (p["original"] - p["residual"]) / p["years"]
 
 
+def _feature_research(p: dict[str, Decimal]) -> Decimal:
+    if p["target_value"] < p["current_value"]:
+        raise ERPError("calculation.domain", "特性研发目标不得低于当前值，不能产生退款。")
+    return (p["target_value"] - p["current_value"]) * p["unit_cost"]
+
+
 FORMULAS: dict[str, Formula] = {
+    "feature_research": Formula(
+        ("current_value", "target_value", "unit_cost"),
+        "(拟定目标特性值-当前特性值)*每点研发费，操作当期扣现金；"
+        "不推断初始值，特性上限须另核对当前规则；不是产品生产资质或每次图纸设计费。",
+        _feature_research,
+    ),
     "score": Formula(
         (
             "equity",
@@ -187,7 +201,7 @@ def _rounded(value: Decimal, quantum: Decimal, rounding: str) -> Decimal:
 
 
 class ERPCalculator:
-    version = "erp-formulas-1"
+    version = FORMULA_VERSION
 
     def calculate(self, formula: str, inputs: dict[str, Decimal]) -> Decimal:
         definition = FORMULAS.get(formula)
@@ -252,7 +266,11 @@ def validate_formula_units(formula: str, units: dict[str, str], output: str) -> 
         raise ERPError(
             "calculation.unit", "百分数、效率、利率须以比例传入，不能把百分数直接当比例。"
         )
-    if formula in {"multiply", "startup_cost"}:
+    if formula == "feature_research":
+        same(("current_value", "target_value"), {"点", "1", "无量纲"})
+        if output not in money or units["unit_cost"] != f"{output}/{units['current_value']}":
+            raise ERPError("calculation.unit", "研发特性值与每点费用单位不匹配。")
+    elif formula in {"multiply", "startup_cost"}:
         price = "unit_price" if formula == "multiply" else "unit_cost"
         quantities = count | {"月", "季", "期", "年"} if formula == "multiply" else count
         if units["quantity"] not in quantities or units[price] != f"{output}/{units['quantity']}":
