@@ -1,0 +1,15 @@
+行动契约：
+key 是本次任务的稳定短名；kind 与 details 成对，实体用当前题目实体 ID，跨对象用 company，模板/工作表不是业务实体。
+references 填实际读到的依据。depends_on 和 action 条件引用行动 key，程序生成最终行动 ID。
+payment/borrow/repay 的 details 使用 finance_entity_id、obligation_action_id；无前置债务时后者可省略或 null。
+其它动作严格使用 Schema 给出的对应 details，不猜字段名。条件为 always/scenario/fact/rule/action/gap。
+scenario 表示尚未验证的执行前提：reference_id/operator/value 为 null，explanation 必须说明条件；不代表条件已满足。
+fact/rule/gap 必须填写对应目录的真实 reference_id；没有正式缺口 ID 时用 scenario，不能填 gap+null 或改成 always。
+金额/数量必须有单位，金额还须 amount_meaning；计算值用 amount_calculation_id 或 quantity_calculation_id，数值可 null 由程序填入。
+区分“拟定决策”和“未知事实”：新增人数、设备数、竞单报价及有来源支持的计划产量由你选择，写入结构化 quantity/amount；不能只写在说明里，或因尚未发生便全部留空。
+条件表示何时执行该数量，不是省略数量的理由。确因单位、BOM或适用规则无法确定时，说明具体缺失依据与受影响参数；可行路线优先使用已核对参数，不把所有经营动作改成日后核对。
+已知事实的直接值可引用原值；乘法、费用汇总和公式结果应调用批量计算并绑定结果，不在文字里心算后填入另一套数值。描述“支付”的金额按现金收付含义标记，不能只标 cost 绕过现金检查。
+已知完成期、付款/收款期必须给出，不能清空绕过提前期。review 无金额/数量及完成/支付期，不算业务期覆盖。
+可省略空数组、未知 null 和 always 条件；程序只补结构默认，不补业务事实。最少包含 key/kind/entity_id/description/references/details。
+每个经营期应有具体业务操作，末期处理实际交付/回款/费用/债务。不要为填满四条线虚构投入，不把检查当经营。
+所有业务参数在本阶段确定，后续 Word 和空表只对应已有数据。
