@@ -57,6 +57,44 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('方案问题处理窗口', () => {
+  it('引用错误展示经营操作，将内部编号折叠，用户无需填写说明即可重查', async () => {
+    const t = setup();
+    t.allJobs.value = [
+      {
+        ...t.pending,
+        intervention: {
+          ...t.pending.intervention!,
+          id: 'reference-question',
+          title: 'AI生成的操作未能关联题目依据',
+          message: '部分操作使用的依据编号无法匹配当前题目，系统需要重新核对其来源。',
+          help_text: '你不需要查找或填写 fact 编号，直接选择重新核对即可。',
+          input_placeholder: '可留空，系统会重新查询工资依据。',
+          technical_details:
+            'periods.6 · w2-p6-senior-wage-payment：fact_7a1114af2fbc26e28af6d 不存在',
+          details: {
+            affected_actions: [
+              { period_label: '第 2 年 · 第 2 季', description: '发放高级技工季度工资' },
+            ],
+          },
+          options: [
+            { id: 'retry', label: '重新核对题目依据并修正（推荐）', description: '说明可留空。' },
+            { id: 'cancel', label: '取消本次生成', description: '保留历史方案。' },
+          ],
+        },
+      },
+    ];
+    await flushPromises();
+    expect(t.wrapper.find('.resolution-message').text()).not.toContain('fact_');
+    expect(t.wrapper.text()).toContain('你不需要查找或填写');
+    expect(t.wrapper.find('table').text()).toContain('第 2 年 · 第 2 季');
+    expect(t.wrapper.find('table').text()).toContain('高级技工季度工资');
+    expect(t.wrapper.find('.technical-diagnostic').attributes('open')).toBeUndefined();
+    expect(t.wrapper.find('textarea').attributes('placeholder')).toContain('可留空');
+    await t.wrapper.find('form').trigger('submit');
+    await flushPromises();
+    expect(t.answerJob).toHaveBeenCalledWith(t.allJobs.value[0], 'reference-question', 'retry', '');
+    t.wrapper.unmount();
+  });
   it('自动展示具体金额和选项，不自动提交，关闭后仍可从任务记录打开', async () => {
     const t = setup();
     await flushPromises();

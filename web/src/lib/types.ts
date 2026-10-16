@@ -289,10 +289,15 @@ export interface Job {
     task_id: string;
     title: string;
     message: string;
+    help_text?: string;
+    input_label?: string;
+    input_placeholder?: string;
+    technical_details?: string;
     code: string;
     details: {
       cash_unit?: string;
       cash_limit?: string;
+      affected_actions?: { period_label: string; description: string; entity_name?: string }[];
       actions?: {
         action_id: string;
         period: number;

@@ -1,4 +1,4 @@
-"""Solver v19：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
+"""Solver v20：职责分析、来源交接、分段决策、确定性核验及冻结输出。"""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -19,7 +19,7 @@ from erp_agent.application.contracts import (
     strings,
     to_json,
 )
-from erp_agent.application.human_resolution import PlanningProblem
+from erp_agent.application.human_resolution import PlanningProblem, resolution_content
 from erp_agent.application.llm_recovery import recovery_call
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.planning_analysis import validate_analysis
@@ -53,7 +53,7 @@ from erp_agent.domain.models import (
 from erp_agent.domain.planning import PlanPreparation
 from erp_agent.domain.reporting import ReportNote, ReportOutline
 
-PLANNING_VERSION = "solver-19"
+PLANNING_VERSION = "solver-20"
 DEFAULT_CONTEXT = PlanningContext()
 ANALYSIS_SCHEMA = object_schema(
     {
@@ -110,6 +110,7 @@ class ParallelPlanningGenerator:
         self._responses: dict[str, tuple[str, LLMResponse]] = {}
         self._response_lock = RLock()
         self._guidance: dict[str, str] = {}
+        self._guidance_issues: dict[str, list[JSONObject]] = {}
         self._unit_choices: dict[str, str] = {}
         self._pending: JSONObject | None = None
         self._failed_task = "solver:synthesis"
@@ -127,11 +128,14 @@ class ParallelPlanningGenerator:
                     for action in question["details"]["actions"]:
                         self._unit_choices[action["action_id"]] = question["details"]["cash_unit"]
                 elif answer["option"] == "retry":
+                    self._guidance_issues[task_id] = question["details"].get(
+                        "validation_issues", []
+                    )
                     self._guidance[task_id] = (
                         "用户要求修正本任务："
                         + answer.get("text", "")
                         + "；当前诊断："
-                        + question["message"]
+                        + question.get("technical_details", question["message"])
                     )
                     with self._response_lock:
                         self._responses = {
@@ -159,7 +163,8 @@ class ParallelPlanningGenerator:
 
                 task_id = error.task_id if isinstance(error, PlanningProblem) else self._failed_task
                 budget = task_budget(self.control, TaskContext(task_id, "Solver", "", ""))
-                details = error.details if isinstance(error, PlanningProblem) else {}
+                presentation = resolution_content(error)
+                details = presentation["details"]
                 options = []
                 if details.get("unit_editable"):
                     options.append(
@@ -178,8 +183,12 @@ class ParallelPlanningGenerator:
                     options.append(
                         {
                             "id": "retry",
-                            "label": "按修正说明继续",
-                            "description": "仅重新请求问题任务，复用其它结果，仍使用当前调用额度。",
+                            "label": "重新核对题目依据并修正（推荐）"
+                            if presentation["reference_error"]
+                            else "让系统修正当前任务（推荐）",
+                            "description": "系统重查当前题目依据，只修正问题任务；说明可留空。"
+                            if presentation["reference_error"]
+                            else "仅重新请求问题任务，复用其它结果，仍使用当前调用额度。",
                         }
                     )
                 else:
@@ -200,10 +209,8 @@ class ParallelPlanningGenerator:
                 self._pending = {
                     "id": uuid4().hex,
                     "task_id": task_id,
-                    "title": "方案生成需要你的处理",
+                    **{k: v for k, v in presentation.items() if k != "reference_error"},
                     "code": error.code,
-                    "message": error.message[:5000],
-                    "details": details,
                     "options": options,
                 }
 
@@ -299,16 +306,29 @@ class ParallelPlanningGenerator:
             )
             return task, request
 
+        def guided_request(task: TaskContext, request: LLMRequest) -> LLMRequest:
+            if task.id not in self._guidance:
+                return request
+            payload = {**obj(loads(request.user)), "human_guidance": self._guidance[task.id]}
+            issues = self._guidance_issues.get(task.id, [])
+            if issues:
+                targets = {"periods": {}}
+                for issue in issues:
+                    targets["periods"].setdefault(str(issue.get("period")), []).append(issue)
+                candidates = knowledge.repair_candidates(targets, tuple(issues))
+                current = provided_references(
+                    {"reference_evidence": payload.get("reference_evidence", {})}
+                )
+                payload["reference_evidence"] = knowledge.reference_batch(
+                    tuple(sorted(current)) + candidates
+                )
+                payload["validation_issues"] = issues
+            return replace(request, user=dumps(payload))
+
         def execute(unit: tuple[TaskContext, LLMRequest]) -> LLMResponse:
             task, request = unit
-            if task.id in self._guidance:
-                request = replace(
-                    request,
-                    user=dumps(
-                        {**obj(loads(request.user)), "human_guidance": self._guidance[task.id]}
-                    ),
-                )
-                unit = (task, request)
+            request = guided_request(task, request)
+            unit = (task, request)
             supplied = provided_references(obj(loads(request.user)))
             # 初始资料及本任务前次实际访问可继承，不继承其它角色的裸已读标记。
             request = replace(
@@ -323,7 +343,7 @@ class ParallelPlanningGenerator:
             )
             report_task(self.control, task, "queued", context_hash=knowledge.hash)
             # 缓存键对应调用者的稳定请求，运行时已读登记不改变缓存身份。
-            key = "planning-19:" + context_digest({"request": unit[1]})
+            key = "planning-20:" + context_digest({"request": unit[1]})
             with self._response_lock:
                 previous_response = self._responses.get(key)
             if previous_response:
@@ -380,16 +400,10 @@ class ParallelPlanningGenerator:
             task, request = unit
             if self._unit_choices and task.id not in {"solver:operations", "solver:finance"}:
                 return
-            if task.id in self._guidance:
-                request = replace(
-                    request,
-                    user=dumps(
-                        {**obj(loads(request.user)), "human_guidance": self._guidance[task.id]}
-                    ),
-                )
+            request = guided_request(task, request)
             if self.memory:
                 self.memory.put(
-                    "planning-19:" + context_digest({"request": request}),
+                    "planning-20:" + context_digest({"request": request}),
                     {
                         "content": result.content,
                         "model": result.model,

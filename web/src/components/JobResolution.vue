@@ -74,6 +74,34 @@ async function submit() {
         {{ job.tasks?.find((t) => t.id === question?.task_id)?.role || '方案生成' }}
       </p>
       <p class="resolution-message">{{ question.message }}</p>
+      <p
+        v-if="question.help_text"
+        class="muted"
+      >
+        {{ question.help_text }}
+      </p>
+      <div
+        v-if="question.details.affected_actions?.length"
+        class="table-scroll"
+      >
+        <table>
+          <thead>
+            <tr>
+              <th>受影响期间</th>
+              <th>经营操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(action, index) in question.details.affected_actions"
+              :key="index"
+            >
+              <td>{{ action.period_label }}</td>
+              <td>{{ action.description }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
       <p v-if="question.details.cash_limit">
         分段支出限额：{{ question.details.cash_limit }} {{ question.details.cash_unit }}
       </p>
@@ -123,15 +151,22 @@ async function submit() {
           >
         </label>
       </fieldset>
-      <label for="resolution-guidance">你的修正说明（选填）</label>
+      <label for="resolution-guidance">{{ question.input_label || '你的修正说明（选填）' }}</label>
       <textarea
         id="resolution-guidance"
         v-model="text"
         maxlength="2000"
         rows="3"
         :disabled="submitting"
-        placeholder="例如：这些金额是季度付款总额，按元填写；请保留其余期间。"
+        :placeholder="question.input_placeholder || '可留空直接继续，也可补充经营口径。'"
       />
+      <details
+        v-if="question.technical_details"
+        class="technical-diagnostic"
+      >
+        <summary>查看诊断详情（无需填写其中的编号）</summary>
+        <pre>{{ question.technical_details }}</pre>
+      </details>
       <p class="muted">
         关闭窗口会保留问题，可从任务记录重新打开。选择后仍会校验来源、期间、现金和限额。
       </p>
@@ -197,5 +232,10 @@ async function submit() {
 }
 .table-scroll {
   overflow-x: auto;
+}
+.technical-diagnostic pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
 }
 </style>

@@ -133,6 +133,54 @@ class PlanningKnowledge:
         material["unloaded_reference_ids"] = remaining
         return {"context": material, "reference_evidence": evidence}
 
+    def repair_candidates(
+        self, decisions: JSONObject, issues: tuple[JSONObject, ...]
+    ) -> tuple[str, ...]:
+        """为失效引用补传行动对象的真实记录；只提供核对材料，不替换引用。"""
+        affected = {
+            (str(i.get("period")), str(i.get("key")))
+            for i in issues
+            if i.get("code") in {"planning.reference", "planning.references", "planning.not_loaded"}
+        }
+        if not affected:
+            return ()
+        facts = self.data["facts"]
+        catalog_entities = {f["entity_id"] for f in facts}
+        explicit, mentioned = set(), set()
+        for period, actions in decisions.get("periods", {}).items():
+            for action in actions:
+                if not isinstance(action, dict) or not any(
+                    p == str(period)
+                    and (key == action.get("key") or key.endswith("-" + str(action.get("key"))))
+                    for p, key in affected
+                ):
+                    continue
+                related = action.get("related_entity_ids", [])
+                values = [action.get("entity_id"), *(related if isinstance(related, list) else [])]
+                if isinstance(action.get("details"), dict):
+                    values.extend(action["details"].values())
+                explicit.update(v for v in values if isinstance(v, str) and v in catalog_entities)
+                description = str(action.get("description", "")).casefold()
+                mentioned.update(
+                    f["entity_id"]
+                    for f in facts
+                    if f["entity_name"] and f["entity_name"].casefold() in description
+                )
+        candidates = [f for f in facts if f["entity_id"] in explicit | mentioned]
+        candidates.sort(
+            key=lambda f: (
+                f["entity_id"] == "company",
+                f["entity_id"] not in explicit,
+                not any(
+                    word in f["key"].casefold()
+                    for word in ("salary", "wage", "price", "工资", "月薪")
+                ),
+                f["entity_id"],
+                f["id"],
+            )
+        )
+        return tuple(f["id"] for f in candidates[:12])
+
     def project(
         self, role: str, max_chars: int = 22000, references: tuple[str, ...] = ()
     ) -> JSONObject:

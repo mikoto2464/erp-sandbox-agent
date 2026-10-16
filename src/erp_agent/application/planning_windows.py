@@ -22,7 +22,7 @@ from erp_agent.application.contracts import (
     strings,
     to_json,
 )
-from erp_agent.application.human_resolution import PlanningProblem
+from erp_agent.application.human_resolution import PlanningProblem, PlanningValidationError
 from erp_agent.application.model_output import normalize_model_json
 from erp_agent.application.planning_context import PlanningKnowledge
 from erp_agent.application.planning_decisions import compile_decisions, decision_schema
@@ -361,6 +361,9 @@ def generate_windows(
                     "planning.route" if isinstance(error, KeyError) else error.code,
                     message,
                     route_task.id,
+                    {"validation_issues": list(error.issues)}
+                    if isinstance(error, PlanningValidationError)
+                    else None,
                 ) from error
             evidence = knowledge.reference_batch(
                 tuple(ref for ref in route_references(route) if ref in allowed and ref not in refs)
@@ -661,11 +664,15 @@ def generate_windows(
                 )
                 raise PlanningProblem(
                     error.code
-                    if isinstance(error, PlanningProblem)
+                    if isinstance(error, (PlanningProblem, PlanningValidationError))
                     else "planning.window_validation",
                     "分段合并校验失败：" + str(error),
                     units[owner][0].id if owner is not None else base[0].id,
-                    error.details if isinstance(error, PlanningProblem) else None,
+                    error.details
+                    if isinstance(error, PlanningProblem)
+                    else {"validation_issues": list(error.issues)}
+                    if isinstance(error, PlanningValidationError)
+                    else None,
                 ) from error
             repaired.add(owner)
             task, request = units[owner]
@@ -678,11 +685,13 @@ def generate_windows(
             if not affected:
                 affected = {str(p) for p in windows[owner]}
             prior = responses[owner]
+            validation_issues = error.issues if isinstance(error, PlanningValidationError) else ()
             own_refs = provided_references(obj(loads(request.user))) | set(
                 prior.accessed_reference_ids
             )
             evidence = knowledge.reference_batch(
                 tuple(ref for ref in requested_references(original_part) if ref not in own_refs)
+                + knowledge.repair_candidates(original_part, validation_issues)
             )
             own_refs.update(provided_references({"reference_evidence": evidence}))
             own_records = {
@@ -711,6 +720,7 @@ def generate_windows(
                             own_records, requested_calculations(original_part) & own_records.keys()
                         ),
                         "diagnostics": str(error),
+                        "validation_issues": list(validation_issues),
                         "repair_instruction": "仅修正本段行动，冻结路线、跨段承诺"
                         "及其它段均不可修改。",
                     }

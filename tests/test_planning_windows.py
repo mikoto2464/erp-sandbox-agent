@@ -131,7 +131,7 @@ class WindowPlanningTests(unittest.TestCase):
                 plan = case.request(base + "/solutions")[0]["plan"]
                 self.assertEqual({a["period"] for a in plan["actions"]}, set(range(1, 17)))
                 self.assertEqual(sum(m.calls for m in calls), 8)
-                self.assertEqual(plan["preparation"]["version"], "solver-19")
+                self.assertEqual(plan["preparation"]["version"], "solver-20")
             finally:
                 case.tearDown()
 
@@ -167,7 +167,7 @@ class WindowPlanningTests(unittest.TestCase):
             self.assertTrue(request.distribute)
         route = next(r for r in client.calls if r.schema_name == "erp_planning_route")
         self.assertNotIn("periods", loads(route.schema_json)["properties"])
-        self.assertEqual(plan.preparation.version, "solver-19")
+        self.assertEqual(plan.preparation.version, "solver-20")
 
     def test_partition_uses_actual_horizon(self):
         for horizon in (1, 2, 5, 10, 15, 16, 24):

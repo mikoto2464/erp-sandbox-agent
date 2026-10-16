@@ -8,6 +8,7 @@ def planning_prompt(stage: str) -> str:
         raise ValueError(f"Unknown planning stage: {stage}")
     root = files("erp_agent").joinpath("prompts")
     parts = [root.joinpath("planning.txt").read_text(encoding="utf-8")]
+    parts.append(root.joinpath("planning_platform.txt").read_text(encoding="utf-8"))
     parts.append(root.joinpath(f"planning_{stage}.txt").read_text(encoding="utf-8"))
     if stage in {"route", "window", "synthesis"}:
         parts.append(root.joinpath("planning_decisions.txt").read_text(encoding="utf-8"))

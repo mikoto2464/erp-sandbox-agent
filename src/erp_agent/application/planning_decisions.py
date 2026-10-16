@@ -18,6 +18,7 @@ from erp_agent.application.contracts import (
     string,
     strings,
 )
+from erp_agent.application.human_resolution import PlanningValidationError
 from erp_agent.domain.action_validation import normalize_plan
 from erp_agent.domain.calculations import CalculationRecord
 from erp_agent.domain.errors import ERPError
@@ -244,10 +245,12 @@ def compile_decisions(
                 ref: get_close_matches(ref, sorted(facts | rules | gaps), n=2, cutoff=0.85)
                 for ref in sorted(unknown)[:6]
             }
-            raise ERPError(
+            raise PlanningValidationError(
                 "planning.references",
                 f"references 含未知题目引用：{sorted(unknown)[:6]}；"
-                f"可按内容核对的目录候选（未自动替换）：{candidates}",
+                f"可按内容核对的目录候选（未自动替换）：{candidates}；"
+                "按行动对象/工资等参数查询真实目录，不得从实体 ID 拼接 fact ID。",
+                ({"field": "references", "unknown_ids": sorted(unknown)[:12]},),
             )
         if available_references is not None and not set(refs) <= available_references:
             raise ERPError(
@@ -315,6 +318,8 @@ def compile_decisions(
             ) from error
 
     diagnostics = []
+    structured = []
+    entity_names = {f.entity_id: f.entity_name for f in snapshot.reading.problem.facts}
     for period, decision in entries:
         try:
             compile_entry(period, decision)
@@ -324,8 +329,30 @@ def compile_decisions(
                 error.message if isinstance(error, ERPError) else f"缺少字段 {error.args[0]}。"
             )
             diagnostics.append((code, f"periods.{period} · {decision.get('key', '?')}：{message}"))
+            per_year = snapshot.reading.problem.periods_per_year or 4
+            location = {
+                "code": code,
+                "period": period,
+                "key": decision.get("key", "?"),
+                "period_label": f"第 {(period - 1) // per_year + 1} 年 · "
+                f"第 {(period - 1) % per_year + 1} 季",
+                "description": str(decision.get("description", "经营操作"))[:240],
+                "entity_name": entity_names.get(
+                    str(decision.get("entity_id")),
+                    "公司" if decision.get("entity_id") == "company" else "经营对象",
+                ),
+                "entity_id": str(decision.get("entity_id", "")),
+            }
+            if isinstance(error, PlanningValidationError):
+                structured.extend({**location, **issue} for issue in error.issues)
+            else:
+                structured.append(location)
     if diagnostics:
-        raise ERPError(diagnostics[0][0], "；".join(message for _, message in diagnostics[:24]))
+        raise PlanningValidationError(
+            diagnostics[0][0],
+            "；".join(message for _, message in diagnostics[:24]),
+            tuple(structured[:24]),
+        )
     assumptions = (
         strings(data["assumptions"])
         + tuple(r.assumption for r in calculations if r.id in used and r.assumption)

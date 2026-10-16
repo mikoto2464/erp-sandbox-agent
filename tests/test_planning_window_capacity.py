@@ -182,7 +182,7 @@ class PlanningWindowCapacityTests(unittest.TestCase):
         client = CapacityClient(selected, native=True, read=False)
         with self.assertRaises(ERPError) as caught:
             ParallelPlanningGenerator(client, Control()).propose(snap)
-        self.assertEqual(caught.exception.code, "planning.window_validation")
+        self.assertEqual(caught.exception.code, "planning.not_loaded")
         self.assertIn("尚未读取", caught.exception.message)
         self.assertIn("periods.1", caught.exception.message)
         self.assertEqual(len(client.models), 2)  # 唯一修正仍不能将未发送的来源标为已读。
